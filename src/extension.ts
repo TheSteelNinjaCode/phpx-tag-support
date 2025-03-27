@@ -7,20 +7,6 @@ import * as vscode from "vscode";
 export function activate(context: vscode.ExtensionContext) {
   console.log("PHPX tag support is now active!");
 
-  const editorConfig = vscode.workspace.getConfiguration("editor");
-
-  // Force single and multiple definitions to open Peek
-  editorConfig.update(
-    "gotoLocation.single",
-    "peek",
-    vscode.ConfigurationTarget.Global
-  );
-  editorConfig.update(
-    "gotoLocation.multiple",
-    "peek",
-    vscode.ConfigurationTarget.Global
-  );
-
   // Collection for missing-import diagnostics
   const diagnosticCollection =
     vscode.languages.createDiagnosticCollection("phpx-tags");
