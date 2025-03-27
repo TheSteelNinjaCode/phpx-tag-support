@@ -41,7 +41,7 @@ Search for **PHPX Tag Support** in the Visual Studio Code Marketplace and click 
 Package the extension into a `.vsix` file (using `vsce package`) and install it via:
 
 ```bash
-code --install-extension your-extension-name.vsix
+code --install-extension phpx-tag-support-0.0.1.vsix
 ```
 
 ## Usage

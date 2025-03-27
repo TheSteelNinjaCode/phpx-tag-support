@@ -3,7 +3,7 @@
   "displayName": "PHPX Tag Support",
   "description": "Provides support for JSX-like tags in PHP, including hover info, Peek Definition for tags, and diagnostics for missing imports.",
   "version": "0.0.1",
-  "publisher": "Jefferson Abraham Omier <thesteelninjacode@gmail.com>",
+  "publisher": "JeffersonAbrahamOmier",
   "engines": {
     "vscode": "^1.98.0"
   },
