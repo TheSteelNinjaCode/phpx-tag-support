@@ -94,6 +94,10 @@ export function activate(context: vscode.ExtensionContext) {
     validateMissingImports(e.document, diagnosticCollection);
   });
 
+  vscode.workspace.onDidSaveTextDocument((doc) => {
+    highlightUseStatement(doc);
+  });
+
   vscode.window.onDidChangeActiveTextEditor((editor) => {
     if (editor) {
       highlightUseStatement(editor.document);
@@ -135,7 +139,9 @@ function highlightUseStatement(document: vscode.TextDocument) {
 
   // Find all JSX-like tag usages (e.g. <Dot>)
   const tagMatches = [...text.matchAll(/<([A-Z][A-Za-z0-9]*)\s?/g)];
+  console.log("🚀 ~ highlightUseStatement ~ tagMatches:", tagMatches);
   const tagNames = tagMatches.map((m) => m[1]);
+  console.log("🚀 ~ highlightUseStatement ~ tagNames:", tagNames);
 
   // Regex to match composer use statements, e.g. "use Lib\PHPX\PPIcons\Dot;"
   // including group imports "use Lib\PHPX\PPIcons\{Dot, Dot2};"
@@ -154,14 +160,18 @@ function highlightUseStatement(document: vscode.TextDocument) {
     // match[0] -> entire "use ...;" line
     // match[1] -> everything after "use " and before ";"
     const fullMatch = match[0];
+    console.log("🚀 ~ highlightUseStatement ~ fullMatch:", fullMatch);
     const importBody = match[1].trim();
+    console.log("🚀 ~ highlightUseStatement ~ importBody:", importBody);
     const matchStart = match.index!;
+    console.log("🚀 ~ highlightUseStatement ~ matchStart:", matchStart);
 
     // --- 1) Highlight the "use" keyword ---
     const useRange = new vscode.Range(
       document.positionAt(matchStart),
       document.positionAt(matchStart + 3) // 'use'.length
     );
+    console.log("🚀 ~ highlightUseStatement ~ useRange:", useRange);
     useKeywordRanges.push({ range: useRange });
 
     // --- Parse the rest of the import statement for first namespace, as keywords, and short classes ---
@@ -195,28 +205,28 @@ function highlightUseStatement(document: vscode.TextDocument) {
   }
 
   // --- Create decoration types with the specified colors ---
-  const useDecorationType = vscode.window.createTextEditorDecorationType({
-    color: "#569CD6", // "use"
-  });
-  const asDecorationType = vscode.window.createTextEditorDecorationType({
-    color: "#569CD6", // "as"
-  });
-  const libDecorationType = vscode.window.createTextEditorDecorationType({
-    color: "#D4D4D4", // first namespace token, e.g. "Lib"
-  });
-  const shortClassUsedType = vscode.window.createTextEditorDecorationType({
-    color: "#4EC9B0", // short class name (used)
-  });
-  const shortClassUnusedType = vscode.window.createTextEditorDecorationType({
-    color: "#C586C0", // short class name (unused)
-  });
+    const useDecorationType = vscode.window.createTextEditorDecorationType({
+      textDecoration: "none; color: #569CD6; opacity: 1;",
+    });
+    const asDecorationType = vscode.window.createTextEditorDecorationType({
+      textDecoration: "none; color: #569CD6; opacity: 1;",
+    });
+    const libDecorationType = vscode.window.createTextEditorDecorationType({
+      textDecoration: "none; color: #D4D4D4; opacity: 1;",
+    });
+    const shortClassUsedType = vscode.window.createTextEditorDecorationType({
+      textDecoration: "none; color: #4EC9B0; opacity: 1;",
+    });
+    const shortClassUnusedType = vscode.window.createTextEditorDecorationType({
+      textDecoration: "none; color: #C586C0; opacity: 1;",
+    });
 
-  // --- Apply the decorations ---
-  editor.setDecorations(useDecorationType, useKeywordRanges);
-  editor.setDecorations(asDecorationType, asKeywordRanges);
-  editor.setDecorations(libDecorationType, firstNamespaceRanges);
-  editor.setDecorations(shortClassUsedType, shortClassUsedRanges);
-  editor.setDecorations(shortClassUnusedType, shortClassUnusedRanges);
+  //   // --- Apply the decorations ---
+  //   editor.setDecorations(useDecorationType, useKeywordRanges);
+  //   editor.setDecorations(asDecorationType, asKeywordRanges);
+  //   editor.setDecorations(libDecorationType, firstNamespaceRanges);
+  //   editor.setDecorations(shortClassUsedType, shortClassUsedRanges);
+  //   editor.setDecorations(shortClassUnusedType, shortClassUnusedRanges);
 }
 
 /**
