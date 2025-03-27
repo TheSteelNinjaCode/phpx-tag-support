@@ -14,8 +14,8 @@
   "contributes": {
     "commands": [
       {
-        "command": "phpx-tag-support.helloWorld",
-        "title": "Hello World"
+        "command": "phpx-tag-support.hoverProvider",
+        "title": "phpx"
       }
     ]
   },
