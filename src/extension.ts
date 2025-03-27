@@ -2,8 +2,8 @@ import * as vscode from "vscode";
 
 /**
  * Activates the PHPX extension.
- * Registers hover and definition providers as well as document change listeners.
- * Also forces Ctrl+Click (Go to Definition) to use Peek Definition.
+ * Registers hover and definition providers, plus document change listeners.
+ * Forces Ctrl+Click (Go to Definition) to open Peek Definition.
  */
 export function activate(context: vscode.ExtensionContext) {
   console.log("PHPX tag support is now active!");
@@ -29,6 +29,7 @@ export function activate(context: vscode.ExtensionContext) {
   // --- Register hover provider for PHP tags ---
   const hoverProvider = vscode.languages.registerHoverProvider("php", {
     provideHover(document, position) {
+      // Match <Tag or </Tag
       const range = document.getWordRangeAtPosition(
         position,
         /<\/?[A-Z][A-Za-z0-9]*/
@@ -37,17 +38,13 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      // e.g. "<Toggle" or "Toggle"
-      const word = document.getText(range);
+      const word = document.getText(range); // e.g. "<GoogleSearch" or "GoogleSearch"
       const tagName = word.replace(/[</]/g, ""); // remove '<' or '</'
 
-      // Check if there's a corresponding "use" import
-      const text = document.getText();
-      const useRegex = new RegExp(`use\\s+([\\w\\\\]*${tagName});`);
-      const match = useRegex.exec(text);
-
-      if (match) {
-        const fullClass = match[1];
+      // Build a shortName → fullClass map from all use statements
+      const useMap = parsePhpUseStatements(document.getText());
+      if (useMap.has(tagName)) {
+        const fullClass = useMap.get(tagName)!;
         return new vscode.Hover(
           `🔍 Tag \`${tagName}\` is imported from \`${fullClass}\``
         );
@@ -75,16 +72,14 @@ export function activate(context: vscode.ExtensionContext) {
 
         const word = document.getText(range);
         const tagName = word.replace(/[</]/g, "");
-        const text = document.getText();
-        const useRegex = new RegExp(`use\\s+([\\w\\\\]*${tagName});`);
-        const match = useRegex.exec(text);
 
-        if (!match) {
+        // Build a shortName → fullClass map from all use statements
+        const useMap = parsePhpUseStatements(document.getText());
+        if (!useMap.has(tagName)) {
           return;
         }
 
-        // e.g. Lib\PHPX\Toggle -> Lib/PHPX/Toggle.php
-        const fullClass = match[1];
+        const fullClass = useMap.get(tagName)!;
         const filePath = fullClass.replace(/\\\\/g, "/") + ".php";
 
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(
@@ -94,7 +89,7 @@ export function activate(context: vscode.ExtensionContext) {
           const fullPath = vscode.Uri.file(
             `${workspaceFolder.uri.fsPath}/${filePath}`
           );
-          // Return a Location so VS Code can use it for peek or go to definition.
+          // Return a Location so VS Code can go (or peek) to it
           return new vscode.Location(fullPath, new vscode.Position(0, 0));
         }
         return;
@@ -156,26 +151,22 @@ function validateMissingImports(
     return;
   }
 
-  // Get the full document text, then strip out heredocs and nowdocs.
-  let text = document.getText();
-  text = removeHeredocsAndNowdocs(text);
+  // Remove heredocs/nowdocs so we don't catch tags in strings
+  const originalText = document.getText();
+  const strippedText = removeHeredocsAndNowdocs(originalText);
 
-  // Capture tags like <Toggle
-  const tagMatches = [...text.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g)];
-  // Capture imports like "use Lib\PHPX\Toggle;"
-  const useMatches = [...text.matchAll(/use\s+([^\s;]+);/g)];
+  // Build shortName → fullClass map from all use statements
+  const useMap = parsePhpUseStatements(originalText);
 
-  // Build a set of imported class short names (the part after the last backslash)
-  const importedClasses = new Set(
-    useMatches.map((match) => match[1].split("\\").pop())
-  );
+  // Capture tags like <Toggle or <GoogleSearch
+  const tagMatches = [...strippedText.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g)];
 
   const diagnostics: vscode.Diagnostic[] = [];
-  for (const tagMatch of tagMatches) {
-    const tag = tagMatch[1];
-    if (!importedClasses.has(tag)) {
+  for (const match of tagMatches) {
+    const tag = match[1];
+    if (!useMap.has(tag)) {
       // Mark the tag usage as a warning if missing
-      const start = document.positionAt(tagMatch.index! + 1); // +1 to skip '<'
+      const start = document.positionAt(match.index! + 1); // +1 to skip '<'
       const end = start.translate(0, tag.length);
       const range = new vscode.Range(start, end);
       const message = `⚠️ Missing import for component <${tag} />`;
@@ -189,16 +180,111 @@ function validateMissingImports(
 }
 
 /**
- * Improved helper to remove heredoc/nowdoc blocks from the text before scanning for tags.
- * This avoids false positives for e.g. <<<HTML ... HTML; inside a PHP string.
+ * Parse all "use" statements (including group imports) from the given text.
+ * Returns a Map of shortName -> fullClass.
  *
- * Explanation of the regex:
- *   - /<<<(['"]?)([A-Za-z0-9_]+)\1\s*\r?\n
- *        Captures <<<, an optional quote, a label, the same optional quote, then optional whitespace, newline
- *   - ([\s\S]*?)
- *        Non-greedy match for the heredoc content
- *   - \r?\n\s*\2\s*;
- *        Newline, optional spaces, the same label, optional spaces, then a semicolon
+ * Examples:
+ *   use Lib\PHPX\Toggle;                 // "Toggle" -> "Lib\PHPX\Toggle"
+ *   use Lib\PHPX\Toggle as MyToggle;     // "MyToggle" -> "Lib\PHPX\Toggle"
+ *   use Lib\PHPX\PPIcons\{Search};       // "Search" -> "Lib\PHPX\PPIcons\Search"
+ *   use Lib\PHPX\PPIcons\{Search as GoogleSearch}; // "GoogleSearch" -> "Lib\PHPX\PPIcons\Search"
+ */
+function parsePhpUseStatements(text: string): Map<string, string> {
+  const shortNameMap = new Map<string, string>();
+
+  // Regex to match entire use statement up to the semicolon
+  // e.g. "use Lib\PHPX\Toggle;" or "use Lib\PHPX\PPIcons\{Search as GoogleSearch};"
+  const useRegex = /use\s+([^;]+);/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = useRegex.exec(text))) {
+    const importBody = match[1].trim();
+    if (!importBody) {
+      continue;
+    }
+
+    // If it's a group import with braces: "use Some\Prefix\{A, B as C};"
+    const braceOpenIndex = importBody.indexOf("{");
+    const braceCloseIndex = importBody.lastIndexOf("}");
+    if (braceOpenIndex !== -1 && braceCloseIndex !== -1) {
+      // e.g. prefix = "Some\Prefix\"
+      const prefix = importBody.substring(0, braceOpenIndex).trim();
+      // e.g. "A, B as C"
+      const insideBraces = importBody
+        .substring(braceOpenIndex + 1, braceCloseIndex)
+        .trim();
+
+      // Split by commas to get each item
+      const items = insideBraces.split(",");
+      for (let rawItem of items) {
+        rawItem = rawItem.trim();
+        if (!rawItem) {
+          continue;
+        }
+        processSingleImport(prefix, rawItem, shortNameMap);
+      }
+    } else {
+      // Single import statement
+      processSingleImport("", importBody, shortNameMap);
+    }
+  }
+
+  return shortNameMap;
+}
+
+/**
+ * Processes a single import piece like:
+ *   - "Lib\PHPX\Toggle"
+ *   - "Lib\PHPX\Toggle as MyToggle"
+ *   - "Toggle"
+ *   - "Toggle as MyToggle"
+ *   - prefix = "Some\Prefix\" plus item = "Search as GoogleSearch"
+ */
+function processSingleImport(
+  prefix: string,
+  item: string,
+  shortNameMap: Map<string, string>
+) {
+  // If there's an " as " we highlight the alias; otherwise the short name is the last part.
+  const asMatch = /\bas\b\s+([\w]+)/i.exec(item);
+  if (asMatch) {
+    // e.g. "Lib\PHPX\Toggle as MyToggle"
+    const aliasName = asMatch[1];
+    const originalPart = item.substring(0, asMatch.index).trim(); // e.g. "Lib\PHPX\Toggle"
+    const fullClass = prefix ? joinPath(prefix, originalPart) : originalPart;
+    shortNameMap.set(aliasName, fullClass);
+  } else {
+    // e.g. "Lib\PHPX\Toggle"
+    const fullClass = prefix ? joinPath(prefix, item) : item;
+    const shortName = getLastPart(item);
+    shortNameMap.set(shortName, fullClass);
+  }
+}
+
+/**
+ * Joins a prefix and item ensuring we don't lose backslashes.
+ * e.g. prefix="Lib\PHPX\PPIcons\" and item="Search"
+ */
+function joinPath(prefix: string, item: string): string {
+  // Remove any trailing backslash from prefix
+  if (prefix.endsWith("\\")) {
+    return prefix + item;
+  }
+  return prefix + "\\" + item;
+}
+
+/**
+ * Returns the last part of a backslash-separated string.
+ * e.g. "Lib\PHPX\Toggle" -> "Toggle"
+ */
+function getLastPart(path: string): string {
+  const parts = path.split("\\");
+  return parts[parts.length - 1];
+}
+
+/**
+ * Removes heredoc/nowdoc blocks from text to avoid false positives like <HTML />
+ * inside a string block.
  */
 function removeHeredocsAndNowdocs(text: string): string {
   // This handles both heredocs and nowdocs, with or without quotes,
@@ -208,5 +294,5 @@ function removeHeredocsAndNowdocs(text: string): string {
   return text.replace(heredocPattern, "");
 }
 
-// This method is called when your extension is deactivated.
+// Called when your extension is deactivated
 export function deactivate() {}
