@@ -3,9 +3,23 @@ import * as vscode from "vscode";
 /**
  * Activates the PHPX extension.
  * Registers hover and definition providers as well as document change listeners.
+ * Also forces Ctrl+Click (Go to Definition) to use Peek Definition.
  */
 export function activate(context: vscode.ExtensionContext) {
   console.log("PHPX tag support is now active!");
+
+  // Force Peek Definition for Go to Definition
+  const editorConfig = vscode.workspace.getConfiguration("editor");
+  editorConfig.update(
+    "gotoLocation.single",
+    "peek",
+    vscode.ConfigurationTarget.Global
+  );
+  editorConfig.update(
+    "gotoLocation.multiple",
+    "peek",
+    vscode.ConfigurationTarget.Global
+  );
 
   // Collection for missing-import diagnostics
   const diagnosticCollection =
@@ -80,7 +94,7 @@ export function activate(context: vscode.ExtensionContext) {
           const fullPath = vscode.Uri.file(
             `${workspaceFolder.uri.fsPath}/${filePath}`
           );
-          // Return a Location so VS Code can go (or peek) to it
+          // Return a Location so VS Code can use it for peek or go to definition.
           return new vscode.Location(fullPath, new vscode.Position(0, 0));
         }
         return;
@@ -112,7 +126,7 @@ export function activate(context: vscode.ExtensionContext) {
       if (!editor) {
         return;
       }
-      // This command simply invokes VS Code’s built-in peek definition on the current symbol
+      // This command simply invokes VS Code’s built-in peek definition on the current symbol.
       await vscode.commands.executeCommand("editor.action.peekDefinition");
     }
   );
@@ -142,7 +156,10 @@ function validateMissingImports(
     return;
   }
 
-  const text = document.getText();
+  // Get the full document text, then strip out heredocs and nowdocs.
+  let text = document.getText();
+  text = removeHeredocsAndNowdocs(text);
+
   // Capture tags like <Toggle
   const tagMatches = [...text.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g)];
   // Capture imports like "use Lib\PHPX\Toggle;"
@@ -171,5 +188,25 @@ function validateMissingImports(
   diagnosticCollection.set(document.uri, diagnostics);
 }
 
-// This method is called when your extension is deactivated
+/**
+ * Improved helper to remove heredoc/nowdoc blocks from the text before scanning for tags.
+ * This avoids false positives for e.g. <<<HTML ... HTML; inside a PHP string.
+ *
+ * Explanation of the regex:
+ *   - /<<<(['"]?)([A-Za-z0-9_]+)\1\s*\r?\n
+ *        Captures <<<, an optional quote, a label, the same optional quote, then optional whitespace, newline
+ *   - ([\s\S]*?)
+ *        Non-greedy match for the heredoc content
+ *   - \r?\n\s*\2\s*;
+ *        Newline, optional spaces, the same label, optional spaces, then a semicolon
+ */
+function removeHeredocsAndNowdocs(text: string): string {
+  // This handles both heredocs and nowdocs, with or without quotes,
+  // and allows indentation before the closing label.
+  const heredocPattern =
+    /<<<(['"]?)([A-Za-z0-9_]+)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
+  return text.replace(heredocPattern, "");
+}
+
+// This method is called when your extension is deactivated.
 export function deactivate() {}
