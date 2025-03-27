@@ -1,5 +1,25 @@
 import * as vscode from "vscode";
 
+const useKeywordStyle = vscode.window.createTextEditorDecorationType({
+  color: "#569CD6", // blue
+});
+
+const asKeywordStyle = vscode.window.createTextEditorDecorationType({
+  color: "#569CD6", // blue
+});
+
+const firstNamespaceStyle = vscode.window.createTextEditorDecorationType({
+  color: "#D4D4D4", // light gray
+});
+
+const shortClassUsedStyle = vscode.window.createTextEditorDecorationType({
+  color: "#4EC9B0", // vivid teal
+});
+
+const shortClassUnusedStyle = vscode.window.createTextEditorDecorationType({
+  color: "#C586C0", // dull purple
+});
+
 /**
  * Activates the PHPX extension.
  * Registers hover and definition providers as well as text document change listeners.
@@ -160,18 +180,14 @@ function highlightUseStatement(document: vscode.TextDocument) {
     // match[0] -> entire "use ...;" line
     // match[1] -> everything after "use " and before ";"
     const fullMatch = match[0];
-    console.log("🚀 ~ highlightUseStatement ~ fullMatch:", fullMatch);
     const importBody = match[1].trim();
-    console.log("🚀 ~ highlightUseStatement ~ importBody:", importBody);
     const matchStart = match.index!;
-    console.log("🚀 ~ highlightUseStatement ~ matchStart:", matchStart);
 
     // --- 1) Highlight the "use" keyword ---
     const useRange = new vscode.Range(
       document.positionAt(matchStart),
       document.positionAt(matchStart + 3) // 'use'.length
     );
-    console.log("🚀 ~ highlightUseStatement ~ useRange:", useRange);
     useKeywordRanges.push({ range: useRange });
 
     // --- Parse the rest of the import statement for first namespace, as keywords, and short classes ---
@@ -180,6 +196,10 @@ function highlightUseStatement(document: vscode.TextDocument) {
       importBody,
       matchStart,
       document
+    );
+    console.log(
+      "🚀 ~ highlightUseStatement ~ parsedHighlights:",
+      parsedHighlights
     );
 
     // For each highlight piece, determine if it's "as", "firstNamespace", or "shortClass".
@@ -205,28 +225,32 @@ function highlightUseStatement(document: vscode.TextDocument) {
   }
 
   // --- Create decoration types with the specified colors ---
-    const useDecorationType = vscode.window.createTextEditorDecorationType({
-      textDecoration: "none; color: #569CD6; opacity: 1;",
-    });
-    const asDecorationType = vscode.window.createTextEditorDecorationType({
-      textDecoration: "none; color: #569CD6; opacity: 1;",
-    });
-    const libDecorationType = vscode.window.createTextEditorDecorationType({
-      textDecoration: "none; color: #D4D4D4; opacity: 1;",
-    });
-    const shortClassUsedType = vscode.window.createTextEditorDecorationType({
-      textDecoration: "none; color: #4EC9B0; opacity: 1;",
-    });
-    const shortClassUnusedType = vscode.window.createTextEditorDecorationType({
-      textDecoration: "none; color: #C586C0; opacity: 1;",
-    });
+  const useKeywordStyle = vscode.window.createTextEditorDecorationType({
+    color: "#569CD6", // blue
+  });
 
-  //   // --- Apply the decorations ---
-  //   editor.setDecorations(useDecorationType, useKeywordRanges);
-  //   editor.setDecorations(asDecorationType, asKeywordRanges);
-  //   editor.setDecorations(libDecorationType, firstNamespaceRanges);
-  //   editor.setDecorations(shortClassUsedType, shortClassUsedRanges);
-  //   editor.setDecorations(shortClassUnusedType, shortClassUnusedRanges);
+  const asKeywordStyle = vscode.window.createTextEditorDecorationType({
+    color: "#569CD6", // blue
+  });
+
+  const firstNamespaceStyle = vscode.window.createTextEditorDecorationType({
+    color: "#D4D4D4", // light gray
+  });
+
+  const shortClassUsedStyle = vscode.window.createTextEditorDecorationType({
+    color: "#4EC9B0", // vivid teal
+  });
+
+  const shortClassUnusedStyle = vscode.window.createTextEditorDecorationType({
+    color: "#C586C0", // dull purple
+  });
+
+  // --- Apply the decorations ---
+  editor.setDecorations(useKeywordStyle, useKeywordRanges);
+  editor.setDecorations(asKeywordStyle, asKeywordRanges);
+  editor.setDecorations(firstNamespaceStyle, firstNamespaceRanges);
+  editor.setDecorations(shortClassUsedStyle, shortClassUsedRanges);
+  editor.setDecorations(shortClassUnusedStyle, shortClassUnusedRanges);
 }
 
 /**
@@ -506,4 +530,10 @@ function validateMissingImports(
 }
 
 // This method is called when your extension is deactivated
-export function deactivate() {}
+export function deactivate() {
+  useKeywordStyle.dispose();
+  asKeywordStyle.dispose();
+  firstNamespaceStyle.dispose();
+  shortClassUsedStyle.dispose();
+  shortClassUnusedStyle.dispose();
+}
