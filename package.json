@@ -1,21 +1,28 @@
 {
   "name": "phpx-tag-support",
-  "displayName": "phpx-tag-support",
-  "description": "VSCode support for JSX-like tags in PHP",
+  "displayName": "PHPX Tag Support",
+  "description": "Provides support for JSX-like tags in PHP, including hover info, Peek Definition for tags, and diagnostics for missing imports.",
   "version": "0.0.1",
+  "publisher": "Jefferson Abraham Omier <thesteelninjacode@gmail.com>",
   "engines": {
     "vscode": "^1.98.0"
   },
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onLanguage:php"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "phpx-tag-support.hoverProvider",
-        "title": "phpx"
+        "title": "PHPX: Show Tag Info"
+      },
+      {
+        "command": "phpx-tag-support.peekTagDefinition",
+        "title": "PHPX: Peek Tag Definition"
       }
     ]
   },
@@ -37,5 +44,14 @@
     "typescript": "^5.8.2",
     "@vscode/test-cli": "^0.0.10",
     "@vscode/test-electron": "^2.4.1"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yourusername/phpx-tag-support.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/phpx-tag-support/issues"
+  },
+  "homepage": "https://prismaphp.tsnc.tech/",
+  "license": "MIT"
 }

@@ -1,71 +1,88 @@
-# phpx-tag-support README
+# PHPX Tag Support
 
-This is the README for your extension "phpx-tag-support". After writing up a brief description, we recommend including the following sections.
+**PHPX Tag Support** is a Visual Studio Code extension designed to enhance your PHP development workflow by adding custom tag support for PHPX. It provides features like hover information, definition lookup, and diagnostic warnings for missing tag imports. The extension also intelligently parses PHP `use` statements—including group imports and aliases—to determine the correct source file for a tag.
 
 ## Features
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+### Hover Provider
 
-For example if there is an image subfolder under your extension project workspace:
+Hover over a PHPX tag (e.g., `<GoogleSearch />`) to see a tooltip displaying the full class imported via the corresponding `use` statement.
 
-\!\[feature X\]\(images/feature-x.png\)
+### Definition Provider
 
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+Ctrl+Click (or F12) on a tag opens the Peek Definition view, showing the contents of the source file. The extension ensures that even single definitions use the peek view by updating VS Code’s configuration.
 
-## Requirements
+### Diagnostic Warnings
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+The extension scans your PHP files for custom tags and flags any tag without a corresponding `use` import. It supports group imports and aliasing to ensure accurate diagnostics.
 
-## Extension Settings
+### Group Import & Alias Support
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+Handles PHP `use` statements like:
 
-For example:
+```php
+use Lib\PHPX\PPIcons\{Search as GoogleSearch, Toggle};
+```
 
-This extension contributes the following settings:
+This allows you to use `<GoogleSearch />` and `<Toggle />` without additional configuration.
 
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
+### Heredoc/Nowdoc Filtering
 
-## Known Issues
+To avoid false positives, the extension ignores tags found inside PHP heredoc/nowdoc blocks.
 
-Calling out known issues can help limit users opening duplicate issues against your extension.
+## Installation
 
-## Release Notes
+### From the Marketplace
 
-Users appreciate release notes as you update your extension.
+Search for **PHPX Tag Support** in the Visual Studio Code Marketplace and click **Install**.
 
-### 1.0.0
+### From a VSIX File
 
-Initial release of ...
+Package the extension into a `.vsix` file (using `vsce package`) and install it via:
 
-### 1.0.1
+```bash
+code --install-extension your-extension-name.vsix
+```
 
-Fixed issue #.
+## Usage
 
-### 1.1.0
+### Hover Over Tags
 
-Added features X, Y, and Z.
+Hover over a tag like `<GoogleSearch />` in your PHP file to see information about its corresponding import.
 
----
+### Peek Definition
 
-## Following extension guidelines
+Ctrl+Click (or F12) on a tag opens the inline Peek Definition view. Alternatively, use the command palette command **PHPX: Peek Tag Definition** (`phpx-tag-support.peekTagDefinition`) to manually open the peek view.
 
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
+### Diagnostics
 
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
+If a tag is missing its import, a warning (e.g., “Missing import for component `<Toggle />`”) will be shown inline.
 
-## Working with Markdown
+## Extension Commands
 
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
+- **PHPX Tag Support: Hover Provider**  
+   Command: `phpx-tag-support.hoverProvider`  
+   Displays a "Hello World" message (example command).
 
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
+- **PHPX Tag Support: Peek Tag Definition**  
+   Command: `phpx-tag-support.peekTagDefinition`  
+   Opens the built-in Peek Definition view for the current tag.
 
-## For more information
+## Configuration
 
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
+This extension automatically updates the following settings to force Peek Definition for Go to Definition:
 
-**Enjoy!**
+```json
+"editor.gotoLocation.single": "peek",
+"editor.gotoLocation.multiple": "peek"
+```
+
+You can disable or modify this behavior in your VS Code settings if preferred.
+
+## Contributing
+
+Contributions are welcome! Fork this repository and submit a pull request with your changes. For bugs or feature requests, please use the issue tracker.
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](./LICENSE) file for details.
