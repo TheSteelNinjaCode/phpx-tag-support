@@ -11,7 +11,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.languages.createDiagnosticCollection("phpx-tags");
   context.subscriptions.push(diagnosticCollection);
 
-  // Register hover provider for PHP tags
+  // --- Register hover provider for PHP tags ---
   const hoverProvider = vscode.languages.registerHoverProvider("php", {
     provideHover(document, position, token) {
       const range = document.getWordRangeAtPosition(
@@ -43,7 +43,7 @@ export function activate(context: vscode.ExtensionContext) {
   });
   context.subscriptions.push(hoverProvider);
 
-  // Register definition provider for PHP tags
+  // --- Register definition provider for PHP tags ---
   const definitionProvider = vscode.languages.registerDefinitionProvider(
     "php",
     {
@@ -88,7 +88,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(definitionProvider);
 
-  // Listen for document changes and active editor changes
+  // --- Listen for document changes and active editor changes ---
   vscode.workspace.onDidChangeTextDocument((e) => {
     highlightUseStatement(e.document);
     validateMissingImports(e.document, diagnosticCollection);
@@ -101,7 +101,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  // Register command defined in package.json
+  // --- Register command defined in package.json ---
   const disposable = vscode.commands.registerCommand(
     "phpx-tag-support.hoverProvider",
     () => {
@@ -113,6 +113,18 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(disposable);
 }
 
+/**
+ * Highlights all import statements, including:
+ *  - Simple:        use Dot;
+ *  - Fully-qualified:  use Lib\PHPX\PPIcons\Dot;
+ *  - Aliased:       use Lib\PHPX\PPIcons\Dot as Dot;
+ *  - Group import:  use Lib\PHPX\PPIcons\{Dot, Dot2};
+ *
+ * Colors:
+ *  - "use" / "as" keyword -> #569CD6
+ *  - First namespace token -> #D4D4D4
+ *  - Short class/alias -> #4EC9B0 if used, #C586C0 if unused
+ */
 function highlightUseStatement(document: vscode.TextDocument) {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document !== document) {
@@ -126,86 +138,323 @@ function highlightUseStatement(document: vscode.TextDocument) {
   const tagNames = tagMatches.map((m) => m[1]);
 
   // Regex to match composer use statements, e.g. "use Lib\PHPX\PPIcons\Dot;"
-  const useRegex = /use\s+([^\s;]+);/g;
+  // including group imports "use Lib\PHPX\PPIcons\{Dot, Dot2};"
+  const useRegex = /use\s+([^;]+);/g;
 
-  // We’ll collect ranges for each color category:
+  // We'll collect ranges for each color category:
   const useKeywordRanges: vscode.DecorationOptions[] = [];
+  const asKeywordRanges: vscode.DecorationOptions[] = [];
   const firstNamespaceRanges: vscode.DecorationOptions[] = [];
-  const lastTokenUsedRanges: vscode.DecorationOptions[] = [];
-  const lastTokenUnusedRanges: vscode.DecorationOptions[] = [];
+  // We'll keep separate arrays for short class names that are used vs unused
+  const shortClassUsedRanges: vscode.DecorationOptions[] = [];
+  const shortClassUnusedRanges: vscode.DecorationOptions[] = [];
 
   let match: RegExpExecArray | null;
   while ((match = useRegex.exec(text))) {
-    // e.g. fullMatch = "use Lib\PHPX\PPIcons\Dot;"
-    //      namespaceStr = "Lib\PHPX\PPIcons\Dot"
+    // match[0] -> entire "use ...;" line
+    // match[1] -> everything after "use " and before ";"
     const fullMatch = match[0];
-    const namespaceStr = match[1];
-    const tokens = namespaceStr.split("\\");
-    const firstToken = tokens[0]; // e.g. "Lib"
-    const lastToken = tokens[tokens.length - 1]; // e.g. "Dot"
-
-    // ----- 1) "use" keyword range -----
-    //   Always 3 characters from matchStart
+    const importBody = match[1].trim();
     const matchStart = match.index!;
-    const useKeywordStart = matchStart;
-    const useKeywordRange = new vscode.Range(
-      document.positionAt(useKeywordStart),
-      document.positionAt(useKeywordStart + 3)
-    );
-    useKeywordRanges.push({ range: useKeywordRange });
 
-    // ----- 2) First namespace token range -----
-    //   Find where the namespace actually starts in the matched string
-    const namespaceOffset = fullMatch.indexOf(namespaceStr);
-    const firstTokenStart = matchStart + namespaceOffset; // e.g. after "use "
-    const firstTokenRange = new vscode.Range(
-      document.positionAt(firstTokenStart),
-      document.positionAt(firstTokenStart + firstToken.length)
+    // --- 1) Highlight the "use" keyword ---
+    const useRange = new vscode.Range(
+      document.positionAt(matchStart),
+      document.positionAt(matchStart + 3) // 'use'.length
     );
-    firstNamespaceRanges.push({ range: firstTokenRange });
+    useKeywordRanges.push({ range: useRange });
 
-    // ----- 3) Last token (short class name) range -----
-    const lastTokenIndexInNamespace = namespaceStr.lastIndexOf(lastToken);
-    const lastTokenStart =
-      matchStart + namespaceOffset + lastTokenIndexInNamespace;
-    const lastTokenRange = new vscode.Range(
-      document.positionAt(lastTokenStart),
-      document.positionAt(lastTokenStart + lastToken.length)
+    // --- Parse the rest of the import statement for first namespace, as keywords, and short classes ---
+    const parsedHighlights = parseUseImport(
+      fullMatch,
+      importBody,
+      matchStart,
+      document
     );
 
-    // If you want to color the last token differently based on whether it’s actually used,
-    // check if the lastToken is in your list of <Tags>:
-    if (tagNames.includes(lastToken)) {
-      // The tag is actually used in the document
-      lastTokenUsedRanges.push({ range: lastTokenRange });
-    } else {
-      // The tag is *not* used
-      lastTokenUnusedRanges.push({ range: lastTokenRange });
+    // For each highlight piece, determine if it's "as", "firstNamespace", or "shortClass".
+    for (const item of parsedHighlights) {
+      switch (item.colorType) {
+        case "asKeyword":
+          asKeywordRanges.push({ range: item.range });
+          break;
+        case "firstNamespace":
+          firstNamespaceRanges.push({ range: item.range });
+          break;
+        case "shortClass":
+          // We check if the shortName is used in the document (<Tag>)
+          // item.shortName holds the actual class or alias text
+          if (item.shortName && tagNames.includes(item.shortName)) {
+            shortClassUsedRanges.push({ range: item.range });
+          } else {
+            shortClassUnusedRanges.push({ range: item.range });
+          }
+          break;
+      }
     }
   }
 
   // --- Create decoration types with the specified colors ---
   const useDecorationType = vscode.window.createTextEditorDecorationType({
-    color: "#569CD6", // "use" keyword
+    color: "#569CD6", // "use"
+  });
+  const asDecorationType = vscode.window.createTextEditorDecorationType({
+    color: "#569CD6", // "as"
   });
   const libDecorationType = vscode.window.createTextEditorDecorationType({
     color: "#D4D4D4", // first namespace token, e.g. "Lib"
   });
-
-  // If you want the same color for the last token whether used or not,
-  // you can omit the separate “unused” color. Otherwise, pick a different color:
-  const lastTokenUsedType = vscode.window.createTextEditorDecorationType({
+  const shortClassUsedType = vscode.window.createTextEditorDecorationType({
     color: "#4EC9B0", // short class name (used)
   });
-  const lastTokenUnusedType = vscode.window.createTextEditorDecorationType({
-    color: "#C586C0", // short class name (unused) - or any color you like
+  const shortClassUnusedType = vscode.window.createTextEditorDecorationType({
+    color: "#C586C0", // short class name (unused)
   });
 
   // --- Apply the decorations ---
   editor.setDecorations(useDecorationType, useKeywordRanges);
+  editor.setDecorations(asDecorationType, asKeywordRanges);
   editor.setDecorations(libDecorationType, firstNamespaceRanges);
-  editor.setDecorations(lastTokenUsedType, lastTokenUsedRanges);
-  editor.setDecorations(lastTokenUnusedType, lastTokenUnusedRanges);
+  editor.setDecorations(shortClassUsedType, shortClassUsedRanges);
+  editor.setDecorations(shortClassUnusedType, shortClassUnusedRanges);
+}
+
+/**
+ * Parse a single "use ...;" import statement and return an array of highlight objects.
+ * This handles:
+ *  1) Simple:                 use Dot;
+ *  2) Fully-qualified:        use Lib\PHPX\PPIcons\Dot;
+ *  3) Aliased:                use Lib\PHPX\PPIcons\Dot as Dot;
+ *  4) Group import:           use Lib\PHPX\PPIcons\{Dot, Dot2};
+ */
+function parseUseImport(
+  fullMatch: string,
+  importBody: string,
+  matchStart: number,
+  document: vscode.TextDocument
+): Array<{
+  range: vscode.Range;
+  colorType: "asKeyword" | "firstNamespace" | "shortClass";
+  shortName?: string; // store short class/alias name for usage checks
+}> {
+  const results: Array<{
+    range: vscode.Range;
+    colorType: "asKeyword" | "firstNamespace" | "shortClass";
+    shortName?: string;
+  }> = [];
+
+  // Find where the importBody actually starts inside the full match
+  const bodyIndexInFull = fullMatch.indexOf(importBody);
+  if (bodyIndexInFull < 0) {
+    return results;
+  }
+
+  // Absolute position in the document where 'importBody' starts
+  const contentStartAbsolute = matchStart + bodyIndexInFull;
+
+  // Check if it's a group import, e.g. "Lib\PHPX\PPIcons\{Dot, Dot2}"
+  if (importBody.includes("{")) {
+    // e.g. prefix = "Lib\PHPX\PPIcons\"
+    // items inside braces => "Dot, Dot2"
+    const braceOpenIndex = importBody.indexOf("{");
+    const braceCloseIndex = importBody.lastIndexOf("}");
+    if (braceOpenIndex < 0 || braceCloseIndex < 0) {
+      return results; // invalid syntax
+    }
+
+    // The prefix before the curly brace (e.g. "Lib\PHPX\PPIcons\")
+    const prefix = importBody.substring(0, braceOpenIndex).trim();
+    highlightFirstNamespaceToken(
+      prefix,
+      contentStartAbsolute,
+      document,
+      results
+    );
+
+    // The comma-separated items inside { ... }
+    const itemsStr = importBody
+      .substring(braceOpenIndex + 1, braceCloseIndex)
+      .trim();
+    const items = itemsStr.split(",");
+
+    // Track how far we’ve searched for each item to ensure we find them in the correct place
+    let offsetSoFar = braceOpenIndex + 1;
+
+    for (const rawItem of items) {
+      const item = rawItem.trim();
+      if (!item) {
+        continue;
+      }
+
+      // e.g. "Dot", or "Dot as Something"
+      const itemIndexInContent = importBody.indexOf(item, offsetSoFar);
+      if (itemIndexInContent < 0) {
+        continue;
+      }
+      offsetSoFar = itemIndexInContent + item.length; // move offset forward
+
+      // If there's an " as " we highlight alias
+      const asIndex = item.toLowerCase().indexOf(" as ");
+      if (asIndex >= 0) {
+        // e.g. "Dot as Dot2"
+        const originalName = item.substring(0, asIndex).trim();
+        const aliasName = item.substring(asIndex + 4).trim(); // skip " as "
+
+        // short class highlight (originalName)
+        addShortClassHighlight(
+          originalName,
+          contentStartAbsolute + itemIndexInContent,
+          document,
+          results
+        );
+
+        // highlight the "as" keyword
+        const asAbsolute = contentStartAbsolute + itemIndexInContent + asIndex;
+        const asRange = new vscode.Range(
+          document.positionAt(asAbsolute),
+          document.positionAt(asAbsolute + 2) // highlight just "as" (2 chars)
+        );
+        results.push({ range: asRange, colorType: "asKeyword" });
+
+        // highlight the alias name
+        const aliasAbsolute = asAbsolute + 3; // skip "as "
+        const aliasRange = new vscode.Range(
+          document.positionAt(aliasAbsolute),
+          document.positionAt(aliasAbsolute + aliasName.length)
+        );
+        results.push({
+          range: aliasRange,
+          colorType: "shortClass",
+          shortName: aliasName,
+        });
+      } else {
+        // e.g. "Dot"
+        addShortClassHighlight(
+          item,
+          contentStartAbsolute + itemIndexInContent,
+          document,
+          results
+        );
+      }
+    }
+  } else {
+    // Single import or single alias import
+    // e.g. "Dot", "Lib\PHPX\PPIcons\Dot", "Lib\PHPX\PPIcons\Dot as Dot"
+    const asIndex = importBody.toLowerCase().indexOf(" as ");
+    let mainPart = importBody;
+    let aliasPart = "";
+
+    if (asIndex >= 0) {
+      mainPart = importBody.substring(0, asIndex).trim();
+      aliasPart = importBody.substring(asIndex + 4).trim(); // skip " as "
+
+      // highlight the "as" keyword
+      const asAbsolute = contentStartAbsolute + asIndex;
+      const asRange = new vscode.Range(
+        document.positionAt(asAbsolute),
+        document.positionAt(asAbsolute + 2) // highlight "as"
+      );
+      results.push({ range: asRange, colorType: "asKeyword" });
+    }
+
+    // Highlight the first namespace token (e.g. "Lib")
+    highlightFirstNamespaceToken(
+      mainPart,
+      contentStartAbsolute,
+      document,
+      results
+    );
+
+    // Highlight the last token in mainPart as the short class name
+    const tokens = mainPart.split("\\");
+    const lastToken = tokens[tokens.length - 1];
+    const lastTokenIndexInMainPart = mainPart.lastIndexOf(lastToken);
+    if (lastTokenIndexInMainPart >= 0) {
+      const absolute = contentStartAbsolute + lastTokenIndexInMainPart;
+      const range = new vscode.Range(
+        document.positionAt(absolute),
+        document.positionAt(absolute + lastToken.length)
+      );
+      results.push({
+        range,
+        colorType: "shortClass",
+        shortName: lastToken,
+      });
+    }
+
+    // If there's an alias part, highlight it as a short class name
+    if (aliasPart) {
+      const aliasAbsolute = contentStartAbsolute + asIndex + 4;
+      const aliasRange = new vscode.Range(
+        document.positionAt(aliasAbsolute),
+        document.positionAt(aliasAbsolute + aliasPart.length)
+      );
+      results.push({
+        range: aliasRange,
+        colorType: "shortClass",
+        shortName: aliasPart,
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Highlights only the *first* token in a backslash-separated prefix.
+ * E.g. prefix = "Lib\PHPX\PPIcons", it highlights "Lib".
+ */
+function highlightFirstNamespaceToken(
+  prefix: string,
+  contentStartAbsolute: number,
+  document: vscode.TextDocument,
+  results: Array<{
+    range: vscode.Range;
+    colorType: "asKeyword" | "firstNamespace" | "shortClass";
+    shortName?: string;
+  }>
+) {
+  // If there's no prefix or no backslash, it means there's no "namespace" portion to highlight.
+  if (!prefix || !prefix.includes("\\")) {
+    return;
+  }
+
+  const tokens = prefix.split("\\");
+  if (!tokens.length) {
+    return;
+  }
+
+  // Highlight only the first token (e.g. "Lib" in "Lib\PHPX\PPIcons")
+  const firstToken = tokens[0];
+  const firstTokenOffset = prefix.indexOf(firstToken);
+  if (firstTokenOffset >= 0) {
+    const absolute = contentStartAbsolute + firstTokenOffset;
+    const range = new vscode.Range(
+      document.positionAt(absolute),
+      document.positionAt(absolute + firstToken.length)
+    );
+    results.push({ range, colorType: "firstNamespace" });
+  }
+}
+
+/**
+ * Helper to highlight a single short class name or item in group import.
+ */
+function addShortClassHighlight(
+  shortName: string,
+  absoluteOffset: number,
+  document: vscode.TextDocument,
+  results: Array<{
+    range: vscode.Range;
+    colorType: "asKeyword" | "firstNamespace" | "shortClass";
+    shortName?: string;
+  }>
+) {
+  const range = new vscode.Range(
+    document.positionAt(absoluteOffset),
+    document.positionAt(absoluteOffset + shortName.length)
+  );
+  results.push({ range, colorType: "shortClass", shortName });
 }
 
 /**
