@@ -7,6 +7,21 @@ import * as vscode from "vscode";
 export function activate(context: vscode.ExtensionContext) {
   console.log("PHPX tag support is now active!");
 
+  const editorConfig = vscode.workspace.getConfiguration("editor");
+
+  // Force single and multiple definitions to open Peek
+  editorConfig.update(
+    "gotoLocation.single",
+    "peek",
+    vscode.ConfigurationTarget.Global
+  );
+  editorConfig.update(
+    "gotoLocation.multiple",
+    "peek",
+    vscode.ConfigurationTarget.Global
+  );
+
+  // Collection for missing-import diagnostics
   const diagnosticCollection =
     vscode.languages.createDiagnosticCollection("phpx-tags");
   context.subscriptions.push(diagnosticCollection);
@@ -22,9 +37,11 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      const word = document.getText(range); // e.g. "<Dot" or "Dot"
-      const tagName = word.replace(/[</]/g, ""); // Remove '<' or '</'
+      // e.g. "<Toggle" or "Toggle"
+      const word = document.getText(range);
+      const tagName = word.replace(/[</]/g, ""); // remove '<' or '</'
 
+      // Check if there's a corresponding "use" import
       const text = document.getText();
       const useRegex = new RegExp(`use\\s+([\\w\\\\]*${tagName});`);
       const match = useRegex.exec(text);
@@ -66,6 +83,7 @@ export function activate(context: vscode.ExtensionContext) {
           return;
         }
 
+        // e.g. Lib\PHPX\Toggle -> Lib/PHPX/Toggle.php
         const fullClass = match[1];
         const filePath = fullClass.replace(/\\\\/g, "/") + ".php";
 
@@ -76,6 +94,7 @@ export function activate(context: vscode.ExtensionContext) {
           const fullPath = vscode.Uri.file(
             `${workspaceFolder.uri.fsPath}/${filePath}`
           );
+          // Return a Location so VS Code can go (or peek) to it
           return new vscode.Location(fullPath, new vscode.Position(0, 0));
         }
         return;
@@ -99,7 +118,21 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  // --- Register command defined in package.json ---
+  // --- Optional command to manually trigger Peek Definition ---
+  const peekCommand = vscode.commands.registerCommand(
+    "phpx-tag-support.peekTagDefinition",
+    async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        return;
+      }
+      // This command simply invokes VS Code’s built-in peek definition on the current symbol
+      await vscode.commands.executeCommand("editor.action.peekDefinition");
+    }
+  );
+  context.subscriptions.push(peekCommand);
+
+  // --- Example "hoverProvider" command from package.json ---
   const disposable = vscode.commands.registerCommand(
     "phpx-tag-support.hoverProvider",
     () => {
@@ -124,10 +157,12 @@ function validateMissingImports(
   }
 
   const text = document.getText();
+  // Capture tags like <Toggle
   const tagMatches = [...text.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g)];
+  // Capture imports like "use Lib\PHPX\Toggle;"
   const useMatches = [...text.matchAll(/use\s+([^\s;]+);/g)];
 
-  // Build a set of imported class short names
+  // Build a set of imported class short names (the part after the last backslash)
   const importedClasses = new Set(
     useMatches.map((match) => match[1].split("\\").pop())
   );
@@ -136,6 +171,7 @@ function validateMissingImports(
   for (const tagMatch of tagMatches) {
     const tag = tagMatch[1];
     if (!importedClasses.has(tag)) {
+      // Mark the tag usage as a warning if missing
       const start = document.positionAt(tagMatch.index! + 1); // +1 to skip '<'
       const end = start.translate(0, tag.length);
       const range = new vscode.Range(start, end);
