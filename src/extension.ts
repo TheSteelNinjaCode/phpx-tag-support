@@ -251,22 +251,31 @@ function getXmlAttributeDiagnostics(
 ): vscode.Diagnostic[] {
   const text = document.getText();
   const xmlDiagnostics: vscode.Diagnostic[] = [];
-  // Regex to match a tag with its attributes.
-  // Group 1: tag name; Group 2: attributes string.
-  const tagRegex = /<(\w+)(\s+[^>]+?)>/g;
+
+  // Identify PHP regions in the document.
+  const phpRegions = getPhpRegions(text);
+
+  // Regex to match a tag with its attributes (supports self-closing tags).
+  const tagRegex = /<(\w+)(\s+[^>]+?)\/?>/g;
   let match: RegExpExecArray | null;
   while ((match = tagRegex.exec(text))) {
     const tagName = match[1];
-    const attrText = match[2];
-    // Regex to match attributes with or without proper assignment.
-    // Group 1: attribute name; Group 2: assignment (if present).
+    let attrText = match[2];
+    // Remove any embedded PHP code from the attribute string (just in case).
+    attrText = attrText.replace(/<\?(?:=)?[\s\S]+?\?>/g, "");
+    // Regex to match attributes: Group 1 is the attribute name; Group 2 is the assignment (if present).
     const attrRegex = /(\w+)(\s*=\s*(".*?"|'.*?'))?/g;
     let attrMatch: RegExpExecArray | null;
     while ((attrMatch = attrRegex.exec(attrText))) {
       const attrName = attrMatch[1];
       const attrAssignment = attrMatch[2];
+      // Only report if there's no explicit assignment.
       if (!attrAssignment) {
         const fullMatchIndex = match.index + match[0].indexOf(attrName);
+        // Skip if the match falls within a PHP region.
+        if (isIndexInPhpRegion(fullMatchIndex, phpRegions)) {
+          continue;
+        }
         const start = document.positionAt(fullMatchIndex);
         const end = document.positionAt(fullMatchIndex + attrName.length);
         xmlDiagnostics.push(
@@ -280,6 +289,25 @@ function getXmlAttributeDiagnostics(
     }
   }
   return xmlDiagnostics;
+}
+
+// Helper function: returns ranges for PHP code segments.
+function getPhpRegions(text: string): { start: number; end: number }[] {
+  const regions: { start: number; end: number }[] = [];
+  const phpRegex = /<\?(?:php|=)[\s\S]+?\?>/g;
+  let m: RegExpExecArray | null;
+  while ((m = phpRegex.exec(text))) {
+    regions.push({ start: m.index, end: phpRegex.lastIndex });
+  }
+  return regions;
+}
+
+// Helper function: checks if an index falls within any PHP region.
+function isIndexInPhpRegion(
+  index: number,
+  regions: { start: number; end: number }[]
+): boolean {
+  return regions.some((region) => index >= region.start && index < region.end);
 }
 
 /**
