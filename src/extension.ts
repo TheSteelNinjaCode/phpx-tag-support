@@ -243,44 +243,56 @@ function validateMissingImports(
 }
 
 /**
- * Returns diagnostics for tags with attributes that don’t have an explicit value.
- * This enforces XML syntax where every attribute must be assigned a value.
+ * Returns diagnostics for XML attributes without an explicit value.
+ * In "XML mode," every attribute must be assigned a value (e.g., foo="bar").
  */
 function getXmlAttributeDiagnostics(
   document: vscode.TextDocument
 ): vscode.Diagnostic[] {
   const text = document.getText();
-  const xmlDiagnostics: vscode.Diagnostic[] = [];
+  const diagnostics: vscode.Diagnostic[] = [];
 
-  // Identify PHP regions in the document.
-  const phpRegions = getPhpRegions(text);
+  // 1) Replace all inline PHP blocks with whitespace of equal length,
+  //    preserving correct character offsets for everything else.
+  //    This handles: <?php ... ?>, <?= ... ?>, and short tags <? ... ?>.
+  const noPhpText = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (phpBlock) => {
+    return " ".repeat(phpBlock.length);
+  });
 
-  // Regex to match a tag with its attributes (supports self-closing tags).
-  const tagRegex = /<(\w+)(\s+[^>]+?)\/?>/g;
+  // 2) Match tags (including self-closing ones). We capture:
+  //    - Group 1: the tag name (e.g. "input")
+  //    - Group 2: everything until the next ">"
+  //      (this is where attributes live, now free of PHP code).
+  const tagRegex = /<(\w+)([^>]*)\/?>/g;
+
   let match: RegExpExecArray | null;
-  while ((match = tagRegex.exec(text))) {
-    const tagName = match[1];
-    let attrText = match[2];
-    // Remove any embedded PHP code from the attribute string (just in case).
-    attrText = attrText.replace(/<\?(?:=)?[\s\S]+?\?>/g, "");
-    // Regex to match attributes: Group 1 is the attribute name; Group 2 is the assignment (if present).
-    const attrRegex = /(\w+)(\s*=\s*(".*?"|'.*?'))?/g;
+  while ((match = tagRegex.exec(noPhpText))) {
+    const fullTag = match[0]; // e.g. <input isActive ... />
+    const tagName = match[1]; // e.g. "input"
+    const attrText = match[2] || ""; // e.g. isActive type="checkbox"  isChecked
+
+    // Where the attribute text begins in the overall document.
+    // We find the index of attrText *inside* the full tag, then add match.index.
+    const attrTextIndex = match.index + fullTag.indexOf(attrText);
+
+    // 3) Look for attributes. For each, check if it has = "..." or = '...'.
+    //    Group 1 is the attribute name, Group 2 is the optional assignment.
+    const attrRegex = /([A-Za-z_:][A-Za-z0-9_.:\-]*)(\s*=\s*(".*?"|'.*?'))?/g;
     let attrMatch: RegExpExecArray | null;
     while ((attrMatch = attrRegex.exec(attrText))) {
       const attrName = attrMatch[1];
       const attrAssignment = attrMatch[2];
-      // Only report if there's no explicit assignment.
+
+      // If there's no = "..." or = '...', it's invalid XML syntax.
       if (!attrAssignment) {
-        const fullMatchIndex = match.index + match[0].indexOf(attrName);
-        // Skip if the match falls within a PHP region.
-        if (isIndexInPhpRegion(fullMatchIndex, phpRegions)) {
-          continue;
-        }
-        const start = document.positionAt(fullMatchIndex);
-        const end = document.positionAt(fullMatchIndex + attrName.length);
-        xmlDiagnostics.push(
+        const startIndex = attrTextIndex + attrMatch.index;
+        const endIndex = startIndex + attrName.length;
+        const startPos = document.positionAt(startIndex);
+        const endPos = document.positionAt(endIndex);
+
+        diagnostics.push(
           new vscode.Diagnostic(
-            new vscode.Range(start, end),
+            new vscode.Range(startPos, endPos),
             `In XML mode, attribute "${attrName}" in <${tagName}> must have an explicit value (e.g., ${attrName}="value")`,
             vscode.DiagnosticSeverity.Warning
           )
@@ -288,26 +300,49 @@ function getXmlAttributeDiagnostics(
       }
     }
   }
-  return xmlDiagnostics;
+
+  return diagnostics;
 }
 
-// Helper function: returns ranges for PHP code segments.
-function getPhpRegions(text: string): { start: number; end: number }[] {
-  const regions: { start: number; end: number }[] = [];
-  const phpRegex = /<\?(?:php|=)[\s\S]+?\?>/g;
-  let m: RegExpExecArray | null;
-  while ((m = phpRegex.exec(text))) {
-    regions.push({ start: m.index, end: phpRegex.lastIndex });
+/**
+ * Runs an attribute regex on a pure-XML segment (no PHP code),
+ * reporting diagnostics for attributes with no explicit value.
+ */
+function parseSegmentForAttributes(
+  segmentText: string,
+  segmentOffset: number,
+  document: vscode.TextDocument,
+  tagName: string
+): vscode.Diagnostic[] {
+  const diagnostics: vscode.Diagnostic[] = [];
+
+  // This pattern matches valid attribute names (Group 1),
+  // then optionally = "..." or = '...' (Group 2).
+  const attrRegex = /([A-Za-z_:][A-Za-z0-9_.:\-]*)(\s*=\s*(".*?"|'.*?'))?/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = attrRegex.exec(segmentText))) {
+    const attrName = match[1];
+    const attrAssignment = match[2];
+    if (!attrAssignment) {
+      // Compute the actual document index of the attribute name
+      // so the diagnostic range is accurate in the editor.
+      const startIndex = segmentOffset + match.index;
+      const endIndex = startIndex + attrName.length;
+      const startPos = document.positionAt(startIndex);
+      const endPos = document.positionAt(endIndex);
+
+      diagnostics.push(
+        new vscode.Diagnostic(
+          new vscode.Range(startPos, endPos),
+          `In XML mode, attribute "${attrName}" in <${tagName}> must have an explicit value (e.g., ${attrName}="value")`,
+          vscode.DiagnosticSeverity.Warning
+        )
+      );
+    }
   }
-  return regions;
-}
 
-// Helper function: checks if an index falls within any PHP region.
-function isIndexInPhpRegion(
-  index: number,
-  regions: { start: number; end: number }[]
-): boolean {
-  return regions.some((region) => index >= region.start && index < region.end);
+  return diagnostics;
 }
 
 /**
