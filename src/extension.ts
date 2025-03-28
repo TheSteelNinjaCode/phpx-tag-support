@@ -80,14 +80,22 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         const fullClass = useMap.get(tagName)!;
-        const filePath = fullClass.replace(/\\\\/g, "/") + ".php";
+
+        // Replace backslashes with forward slashes and add .php extension
+        const relativePath = fullClass.replace(/\\\\/g, "/") + ".php";
 
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(
           document.uri
         );
         if (workspaceFolder) {
+          // Read the custom source root setting, defaulting to 'src'
+          const sourceRoot = vscode.workspace
+            .getConfiguration("phpx-tag-support")
+            .get("sourceRoot", "src");
+
+          // Construct the full path using the source root
           const fullPath = vscode.Uri.file(
-            `${workspaceFolder.uri.fsPath}/${filePath}`
+            `${workspaceFolder.uri.fsPath}/${sourceRoot}/${relativePath}`
           );
           // Return a Location so VS Code can go (or peek) to it
           return new vscode.Location(fullPath, new vscode.Position(0, 0));
@@ -137,6 +145,34 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
   context.subscriptions.push(disposable);
+
+  // Register a completion provider for PHP files that triggers on '<'
+  const completionProvider = vscode.languages.registerCompletionItemProvider(
+    "php",
+    {
+      provideCompletionItems(document, position) {
+        // Use the same function to parse use statements
+        const useMap = parsePhpUseStatements(document.getText());
+        const completionItems: vscode.CompletionItem[] = [];
+
+        // Create a CompletionItem for each imported component
+        for (const [shortName, fullClass] of useMap.entries()) {
+          const item = new vscode.CompletionItem(
+            shortName,
+            vscode.CompletionItemKind.Class
+          );
+          item.detail = `Component from ${fullClass}`;
+          // When selected, insert the component tag (you can adjust this as needed)
+          item.insertText = `<${shortName} />`;
+          completionItems.push(item);
+        }
+
+        return completionItems;
+      },
+    },
+    "<" // Trigger character for suggestions
+  );
+  context.subscriptions.push(completionProvider);
 }
 
 /**
