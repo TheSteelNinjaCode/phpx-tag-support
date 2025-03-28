@@ -263,6 +263,50 @@ function validateMissingImports(
   }
 
   diagnosticCollection.set(document.uri, diagnostics);
+
+  function validateXmlAttributes(
+    document: vscode.TextDocument,
+    diagnosticCollection: vscode.DiagnosticCollection
+  ) {
+    const text = document.getText();
+    // Regex to match a tag with its attributes.
+    // This will capture the tag name in group 1 and all attributes (if any) in group 2.
+    const tagRegex = /<(\w+)(\s+[^>]+?)>/g;
+    let match: RegExpExecArray | null;
+    const diagnostics: vscode.Diagnostic[] = [];
+
+    while ((match = tagRegex.exec(text))) {
+      const tagName = match[1];
+      const attrText = match[2]; // string containing all attributes
+
+      // Regex to match attributes.
+      // This pattern captures attributes with or without proper assignment.
+      // Group 1: attribute name; Group 2: the assignment part (if any).
+      const attrRegex = /(\w+)(\s*=\s*(".*?"|'.*?'))?/g;
+      let attrMatch: RegExpExecArray | null;
+      while ((attrMatch = attrRegex.exec(attrText))) {
+        const attrName = attrMatch[1];
+        const attrAssignment = attrMatch[2];
+        // If there's no assignment, the attribute doesn't follow XML syntax.
+        if (!attrAssignment) {
+          // Calculate the diagnostic position relative to the document.
+          const fullMatchIndex = match.index + match[0].indexOf(attrName);
+          const start = document.positionAt(fullMatchIndex);
+          const end = document.positionAt(fullMatchIndex + attrName.length);
+          diagnostics.push(
+            new vscode.Diagnostic(
+              new vscode.Range(start, end),
+              `In XML mode, attribute "${attrName}" in <${tagName}> must have an explicit value (e.g., ${attrName}="value")`,
+              vscode.DiagnosticSeverity.Warning
+            )
+          );
+        }
+      }
+    }
+    diagnosticCollection.set(document.uri, diagnostics);
+  }
+
+  validateXmlAttributes(document, diagnosticCollection);
 }
 
 /**
