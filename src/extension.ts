@@ -62,7 +62,7 @@ export function activate(context: vscode.ExtensionContext) {
     "php",
     {
       async provideDefinition(document, position) {
-        // Extract the tag name from something like <Tag or </Tag
+        // Extract tag name from something like <Tag or </Tag
         const range = document.getWordRangeAtPosition(
           position,
           /<\/?[A-Z][A-Za-z0-9]*/
@@ -81,39 +81,44 @@ export function activate(context: vscode.ExtensionContext) {
           return;
         }
 
-        // Construct the URI for the JSON mapping file
+        // Build the URI for the class-log.json mapping file
         const jsonUri = vscode.Uri.joinPath(
           workspaceFolder.uri,
           "settings",
-          "class-imports.json"
+          "class-log.json"
         );
 
-        // Try reading the JSON file and parsing its content
         let mapping: { filePath: string } | undefined;
         try {
           const data = await vscode.workspace.fs.readFile(jsonUri);
           const jsonStr = Buffer.from(data).toString("utf8").trim();
           if (jsonStr) {
             const jsonMapping = JSON.parse(jsonStr);
-            mapping = jsonMapping[tagName];
+            // Loop through each fully qualified class name in the JSON mapping
+            for (const fqcn in jsonMapping) {
+              // Use getLastPart to get the short name from the fully qualified class name
+              if (getLastPart(fqcn) === tagName) {
+                mapping = jsonMapping[fqcn];
+                break;
+              }
+            }
           } else {
-            console.error("class-imports.json is empty.");
+            console.error("class-log.json is empty.");
           }
         } catch (error) {
-          console.error("Error reading class-imports.json:", error);
+          console.error("Error reading class-log.json:", error);
         }
 
-        // If the mapping wasn't found in JSON, fall back to parsing use statements
+        // Fallback: if no mapping found in the JSON, parse the PHP file's use statements.
         if (!mapping) {
           const useMap = parsePhpUseStatements(document.getText());
           if (!useMap.has(tagName)) {
             return;
           }
           const fullClass = useMap.get(tagName)!;
-          // Convert the full class to a relative path and add .php
           mapping = { filePath: fullClass.replace(/\\\\/g, "/") + ".php" };
         } else {
-          // Normalize backslashes to forward slashes in the mapping file path
+          // Normalize backslashes in the mapping file path
           mapping.filePath = mapping.filePath.replace(/\\/g, "/");
         }
 
@@ -122,13 +127,12 @@ export function activate(context: vscode.ExtensionContext) {
           .getConfiguration("phpx-tag-support")
           .get("sourceRoot", "src");
 
-        // Construct the full file path using the workspace folder and source root
+        // Construct the full path to the file
         const fullPath = vscode.Uri.file(
           `${workspaceFolder.uri.fsPath}/${sourceRoot}/${mapping.filePath}`
         );
 
-        // Return a Location pointing to the file.
-        // (If needed, you can further search inside the file for the actual class declaration.)
+        // Return a Location pointing to the file (at position 0,0).
         return new vscode.Location(fullPath, new vscode.Position(0, 0));
       },
     }
