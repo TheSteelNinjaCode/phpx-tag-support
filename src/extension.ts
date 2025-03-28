@@ -237,6 +237,7 @@ function validateMissingImports(
     if (files.length > 0) {
       // Merge XML attribute diagnostics
       diagnostics = diagnostics.concat(getXmlAttributeDiagnostics(document));
+      diagnostics = diagnostics.concat(getTagPairDiagnostics(document));
     }
     diagnosticCollection.set(document.uri, diagnostics);
   });
@@ -304,42 +305,91 @@ function getXmlAttributeDiagnostics(
   return diagnostics;
 }
 
-/**
- * Runs an attribute regex on a pure-XML segment (no PHP code),
- * reporting diagnostics for attributes with no explicit value.
- */
-function parseSegmentForAttributes(
-  segmentText: string,
-  segmentOffset: number,
-  document: vscode.TextDocument,
-  tagName: string
+function getTagPairDiagnostics(
+  document: vscode.TextDocument
 ): vscode.Diagnostic[] {
   const diagnostics: vscode.Diagnostic[] = [];
+  const text = document.getText();
 
-  // This pattern matches valid attribute names (Group 1),
-  // then optionally = "..." or = '...' (Group 2).
-  const attrRegex = /([A-Za-z_:][A-Za-z0-9_.:\-]*)(\s*=\s*(".*?"|'.*?'))?/g;
+  // Remove inline PHP blocks (similar to your getXmlAttributeDiagnostics)
+  const noPhpText = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (phpBlock) => {
+    return " ".repeat(phpBlock.length);
+  });
+
+  // List of void elements that in XML mode must be self-closed.
+  const voidElements = new Set(["input", "br", "hr", "img", "meta", "link"]);
+
+  // Regex to match both opening and closing tags.
+  // Group 1: "/" if it's a closing tag.
+  // Group 2: the tag name.
+  // Group 3: any attribute text.
+  // Group 4: "/" if it's a self-closing tag.
+  const tagRegex = /<(\/?)([A-Za-z][A-Za-z0-9]*)(\s[^>]*?)?(\/?)>/g;
+  const stack: { tag: string; pos: number }[] = [];
+
   let match: RegExpExecArray | null;
+  while ((match = tagRegex.exec(noPhpText))) {
+    const isClosing = match[1] === "/";
+    const tagName = match[2];
+    const selfClosingIndicator = match[4];
+    const matchIndex = match.index;
 
-  while ((match = attrRegex.exec(segmentText))) {
-    const attrName = match[1];
-    const attrAssignment = match[2];
-    if (!attrAssignment) {
-      // Compute the actual document index of the attribute name
-      // so the diagnostic range is accurate in the editor.
-      const startIndex = segmentOffset + match.index;
-      const endIndex = startIndex + attrName.length;
-      const startPos = document.positionAt(startIndex);
-      const endPos = document.positionAt(endIndex);
-
-      diagnostics.push(
-        new vscode.Diagnostic(
-          new vscode.Range(startPos, endPos),
-          `In XML mode, attribute "${attrName}" in <${tagName}> must have an explicit value (e.g., ${attrName}="value")`,
-          vscode.DiagnosticSeverity.Warning
-        )
-      );
+    if (isClosing) {
+      if (stack.length === 0) {
+        const pos = document.positionAt(matchIndex);
+        diagnostics.push(
+          new vscode.Diagnostic(
+            new vscode.Range(pos, pos.translate(0, tagName.length + 3)),
+            `Extra closing tag </${tagName}> found.`,
+            vscode.DiagnosticSeverity.Warning
+          )
+        );
+      } else {
+        const last = stack.pop()!;
+        if (last.tag !== tagName) {
+          const pos = document.positionAt(matchIndex);
+          diagnostics.push(
+            new vscode.Diagnostic(
+              new vscode.Range(pos, pos.translate(0, tagName.length + 3)),
+              `Mismatched closing tag: expected </${last.tag}> but found </${tagName}>.`,
+              vscode.DiagnosticSeverity.Warning
+            )
+          );
+        }
+      }
+    } else {
+      // For opening tags:
+      if (voidElements.has(tagName.toLowerCase())) {
+        // In XML mode, even void elements must be self-closed.
+        if (selfClosingIndicator !== "/") {
+          const pos = document.positionAt(matchIndex);
+          diagnostics.push(
+            new vscode.Diagnostic(
+              new vscode.Range(pos, pos.translate(0, tagName.length)),
+              `In XML mode, <${tagName}> must be self-closed (e.g., <${tagName} ... />).`,
+              vscode.DiagnosticSeverity.Warning
+            )
+          );
+        }
+      } else {
+        // For non-void elements, if not self-closing, push onto the stack to match a future closing tag.
+        if (selfClosingIndicator !== "/") {
+          stack.push({ tag: tagName, pos: matchIndex });
+        }
+      }
     }
+  }
+
+  // Any remaining opening tags without a corresponding closing tag.
+  for (const unclosed of stack) {
+    const pos = document.positionAt(unclosed.pos);
+    diagnostics.push(
+      new vscode.Diagnostic(
+        new vscode.Range(pos, pos.translate(0, unclosed.tag.length)),
+        `Missing closing tag for <${unclosed.tag}>.`,
+        vscode.DiagnosticSeverity.Warning
+      )
+    );
   }
 
   return diagnostics;
