@@ -209,7 +209,7 @@ export function activate(context: vscode.ExtensionContext) {
           // Set filterText to help match even if the user starts with a '<'
           item.filterText = `<${shortName}`;
           // Use a SnippetString so that when inserted it becomes <Component />
-          item.insertText = new vscode.SnippetString(`<${shortName} />`);
+          item.insertText = new vscode.SnippetString(`<${shortName}`);
           // If a replacement range was calculated, assign it so that any pre-typed '<' (or partial tag) is replaced.
           if (replaceRange) {
             item.range = replaceRange;
