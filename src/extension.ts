@@ -151,9 +151,20 @@ export function activate(context: vscode.ExtensionContext) {
     "php",
     {
       provideCompletionItems(document, position) {
-        // Use the same function to parse use statements
         const useMap = parsePhpUseStatements(document.getText());
         const completionItems: vscode.CompletionItem[] = [];
+
+        // Get the current line's text and check for a '<' before the cursor
+        const line = document.lineAt(position.line);
+        const lessThanIndex = line.text.lastIndexOf("<", position.character);
+        // If a '<' exists, calculate a replacement range; if not, leave it undefined.
+        let replaceRange: vscode.Range | undefined;
+        if (lessThanIndex !== -1) {
+          replaceRange = new vscode.Range(
+            new vscode.Position(position.line, lessThanIndex),
+            position
+          );
+        }
 
         // Create a CompletionItem for each imported component
         for (const [shortName, fullClass] of useMap.entries()) {
@@ -162,8 +173,14 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.CompletionItemKind.Class
           );
           item.detail = `Component from ${fullClass}`;
-          // When selected, insert the component tag (you can adjust this as needed)
-          item.insertText = `<${shortName} />`;
+          // Set filterText to help match even if the user starts with a '<'
+          item.filterText = `<${shortName}`;
+          // Use a SnippetString so that when inserted it becomes <Component />
+          item.insertText = new vscode.SnippetString(`<${shortName} />`);
+          // If a replacement range was calculated, assign it so that any pre-typed '<' (or partial tag) is replaced.
+          if (replaceRange) {
+            item.range = replaceRange;
+          }
           completionItems.push(item);
         }
 
