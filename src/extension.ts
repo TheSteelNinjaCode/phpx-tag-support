@@ -253,18 +253,12 @@ function getXmlAttributeDiagnostics(
   const text = document.getText();
   const diagnostics: vscode.Diagnostic[] = [];
 
-  //
-  // 1) Replace all inline PHP blocks with whitespace, preserving offsets.
-  //    (Same as your old code.)
-  //
-  let noPhpText = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (phpBlock) => {
-    return " ".repeat(phpBlock.length);
-  });
+  // 1) Replace inline PHP blocks with whitespace, preserving offsets
+  let noPhpText = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (phpBlock) =>
+    " ".repeat(phpBlock.length)
+  );
 
-  //
-  // 2) Blank out heredoc/nowdoc *opener* tokens like `<<<HTML` or `<<<'HTML'`.
-  //    This prevents them from being read as real `<HTML>` tags.
-  //
+  // 2) Blank out heredoc/nowdoc openers so `<<<HTML` isn’t parsed as <HTML> tag
   noPhpText = noPhpText.replace(/<<<[A-Za-z_][A-Za-z0-9_]*/g, (match) => {
     return " ".repeat(match.length);
   });
@@ -272,45 +266,57 @@ function getXmlAttributeDiagnostics(
     return " ".repeat(match.length);
   });
 
-  //
-  // 3) Now match tags (including self-closing). For each tag:
-  //    - Group 1: the tag name (e.g., "input")
-  //    - Group 2: everything until ">", i.e. the attributes portion
-  //
+  // 3) Find tags (including self-closing).
+  //    Group 1: the tag name
+  //    Group 2: the raw attribute text
   const tagRegex = /<(\w+)([^>]*)\/?>/g;
   let match: RegExpExecArray | null;
   while ((match = tagRegex.exec(noPhpText))) {
-    const fullTag = match[0]; // e.g. <input isActive ... />
-    const tagName = match[1]; // e.g. "input"
-    const attrText = match[2] || ""; // e.g. isActive type="checkbox" isChecked
+    const fullTag = match[0];
+    const tagName = match[1];
+    const attrText = match[2] || "";
 
-    // Figure out where the attributes begin in the document (for diagnostics).
+    // Calculate where the attribute text begins (for diagnostic positioning).
     const attrTextIndex = match.index + fullTag.indexOf(attrText);
 
     //
-    // 4) Look for attributes. For each, check if it has = "..." or = '...'.
-    //    Group 1: attribute name, Group 2: optional assignment (="...")
+    // 4) Combined regex to detect:
+    //    - Normal attributes:  name="..." or name='...'
+    //    - Or a dynamic placeholder like {$attributes}, $foo, $$bar, etc.
     //
-    const attrRegex = /([A-Za-z_:][A-Za-z0-9_.:\-]*)(\s*=\s*(".*?"|'.*?'))?/g;
+    // Group 1: the attribute name (e.g. "class")
+    // Group 2: the optional assignment (e.g. = "value")
+    //
+    // If Group 1 is present but Group 2 is missing => warn about no explicit value.
+    // If Group 1 is empty but we matched a dynamic placeholder => skip.
+    //
+    const combinedRegex =
+      /([A-Za-z_:][A-Za-z0-9_.:\-]*)(\s*=\s*(".*?"|'.*?'))?|\{\$[^}]+\}|\$+\w+/g;
+
     let attrMatch: RegExpExecArray | null;
-    while ((attrMatch = attrRegex.exec(attrText))) {
-      const attrName = attrMatch[1];
-      const attrAssignment = attrMatch[2];
+    while ((attrMatch = combinedRegex.exec(attrText))) {
+      // If group 1 is present, we have a normal attribute
+      if (attrMatch[1]) {
+        const attrName = attrMatch[1];
+        const attrAssignment = attrMatch[2];
+        // No assignment => warn
+        if (!attrAssignment) {
+          const startIndex = attrTextIndex + attrMatch.index;
+          const endIndex = startIndex + attrName.length;
+          const startPos = document.positionAt(startIndex);
+          const endPos = document.positionAt(endIndex);
 
-      // If there's no assignment at all, it's invalid XML syntax in "XML mode."
-      if (!attrAssignment) {
-        const startIndex = attrTextIndex + attrMatch.index;
-        const endIndex = startIndex + attrName.length;
-        const startPos = document.positionAt(startIndex);
-        const endPos = document.positionAt(endIndex);
-
-        diagnostics.push(
-          new vscode.Diagnostic(
-            new vscode.Range(startPos, endPos),
-            `In XML mode, attribute "${attrName}" in <${tagName}> must have an explicit value (e.g. ${attrName}="value")`,
-            vscode.DiagnosticSeverity.Warning
-          )
-        );
+          diagnostics.push(
+            new vscode.Diagnostic(
+              new vscode.Range(startPos, endPos),
+              `In XML mode, attribute "${attrName}" in <${tagName}> must have an explicit value (e.g., ${attrName}="value")`,
+              vscode.DiagnosticSeverity.Warning
+            )
+          );
+        }
+      } else {
+        // Otherwise, we matched a dynamic placeholder (e.g. {$attributes} or $foo).
+        // We skip complaining about it since it’s deliberate PHP code.
       }
     }
   }
