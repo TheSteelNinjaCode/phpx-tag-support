@@ -253,38 +253,51 @@ function getXmlAttributeDiagnostics(
   const text = document.getText();
   const diagnostics: vscode.Diagnostic[] = [];
 
-  // 1) Replace all inline PHP blocks with whitespace of equal length,
-  //    preserving correct character offsets for everything else.
-  //    This handles: <?php ... ?>, <?= ... ?>, and short tags <? ... ?>.
-  const noPhpText = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (phpBlock) => {
+  //
+  // 1) Replace all inline PHP blocks with whitespace, preserving offsets.
+  //    (Same as your old code.)
+  //
+  let noPhpText = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (phpBlock) => {
     return " ".repeat(phpBlock.length);
   });
 
-  // 2) Match tags (including self-closing ones). We capture:
-  //    - Group 1: the tag name (e.g. "input")
-  //    - Group 2: everything until the next ">"
-  //      (this is where attributes live, now free of PHP code).
-  const tagRegex = /<(\w+)([^>]*)\/?>/g;
+  //
+  // 2) Blank out heredoc/nowdoc *opener* tokens like `<<<HTML` or `<<<'HTML'`.
+  //    This prevents them from being read as real `<HTML>` tags.
+  //
+  noPhpText = noPhpText.replace(/<<<[A-Za-z_][A-Za-z0-9_]*/g, (match) => {
+    return " ".repeat(match.length);
+  });
+  noPhpText = noPhpText.replace(/<<<'[A-Za-z_][A-Za-z0-9_]*'/g, (match) => {
+    return " ".repeat(match.length);
+  });
 
+  //
+  // 3) Now match tags (including self-closing). For each tag:
+  //    - Group 1: the tag name (e.g., "input")
+  //    - Group 2: everything until ">", i.e. the attributes portion
+  //
+  const tagRegex = /<(\w+)([^>]*)\/?>/g;
   let match: RegExpExecArray | null;
   while ((match = tagRegex.exec(noPhpText))) {
     const fullTag = match[0]; // e.g. <input isActive ... />
     const tagName = match[1]; // e.g. "input"
-    const attrText = match[2] || ""; // e.g. isActive type="checkbox"  isChecked
+    const attrText = match[2] || ""; // e.g. isActive type="checkbox" isChecked
 
-    // Where the attribute text begins in the overall document.
-    // We find the index of attrText *inside* the full tag, then add match.index.
+    // Figure out where the attributes begin in the document (for diagnostics).
     const attrTextIndex = match.index + fullTag.indexOf(attrText);
 
-    // 3) Look for attributes. For each, check if it has = "..." or = '...'.
-    //    Group 1 is the attribute name, Group 2 is the optional assignment.
+    //
+    // 4) Look for attributes. For each, check if it has = "..." or = '...'.
+    //    Group 1: attribute name, Group 2: optional assignment (="...")
+    //
     const attrRegex = /([A-Za-z_:][A-Za-z0-9_.:\-]*)(\s*=\s*(".*?"|'.*?'))?/g;
     let attrMatch: RegExpExecArray | null;
     while ((attrMatch = attrRegex.exec(attrText))) {
       const attrName = attrMatch[1];
       const attrAssignment = attrMatch[2];
 
-      // If there's no = "..." or = '...', it's invalid XML syntax.
+      // If there's no assignment at all, it's invalid XML syntax in "XML mode."
       if (!attrAssignment) {
         const startIndex = attrTextIndex + attrMatch.index;
         const endIndex = startIndex + attrName.length;
@@ -294,7 +307,7 @@ function getXmlAttributeDiagnostics(
         diagnostics.push(
           new vscode.Diagnostic(
             new vscode.Range(startPos, endPos),
-            `In XML mode, attribute "${attrName}" in <${tagName}> must have an explicit value (e.g., ${attrName}="value")`,
+            `In XML mode, attribute "${attrName}" in <${tagName}> must have an explicit value (e.g. ${attrName}="value")`,
             vscode.DiagnosticSeverity.Warning
           )
         );
@@ -311,31 +324,41 @@ function getTagPairDiagnostics(
   const diagnostics: vscode.Diagnostic[] = [];
   const text = document.getText();
 
-  // Remove inline PHP blocks (similar to your getXmlAttributeDiagnostics)
-  const noPhpText = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (phpBlock) => {
-    return " ".repeat(phpBlock.length);
-  });
+  // 1) Remove inline PHP blocks but keep heredoc/nowdoc content intact
+  let noPhpText = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (phpBlock) =>
+    " ".repeat(phpBlock.length)
+  );
 
-  // List of void elements that in XML mode must be self-closed.
+  // 2) Blank out the heredoc/nowdoc *opener* itself, wherever it appears
+  //    This ensures "<<<HTML" won't be misread as "<HTML>"
+  //    - The following two regexes remove the literal substring `<<<HTML` or `<<<'HTML'`
+  //      from anywhere in the line (including "return <<<HTML").
+  noPhpText = noPhpText.replace(/<<<[A-Za-z_][A-Za-z0-9_]*/g, (match) =>
+    " ".repeat(match.length)
+  );
+  noPhpText = noPhpText.replace(/<<<'[A-Za-z_][A-Za-z0-9_]*'/g, (match) =>
+    " ".repeat(match.length)
+  );
+
+  // (Optional) If you ever need to blank out the closing identifier (e.g. `HTML;`),
+  // you could do a similar replacement. But typically it's not parsed as a tag, so it’s safe.
+
+  // 3) Tag-pair validation
   const voidElements = new Set(["input", "br", "hr", "img", "meta", "link"]);
-
-  // Regex to match both opening and closing tags.
-  // Group 1: "/" if it's a closing tag.
-  // Group 2: the tag name.
-  // Group 3: any attribute text.
-  // Group 4: "/" if it's a self-closing tag.
   const tagRegex = /<(\/?)([A-Za-z][A-Za-z0-9]*)(\s[^>]*?)?(\/?)>/g;
   const stack: { tag: string; pos: number }[] = [];
 
   let match: RegExpExecArray | null;
   while ((match = tagRegex.exec(noPhpText))) {
     const isClosing = match[1] === "/";
-    const tagName = match[2];
+    const tagName = match[2].toLowerCase();
     const selfClosingIndicator = match[4];
     const matchIndex = match.index;
 
     if (isClosing) {
+      // Closing tag logic
       if (stack.length === 0) {
+        // No matching opening tag
         const pos = document.positionAt(matchIndex);
         diagnostics.push(
           new vscode.Diagnostic(
@@ -347,6 +370,7 @@ function getTagPairDiagnostics(
       } else {
         const last = stack.pop()!;
         if (last.tag !== tagName) {
+          // Mismatched tag name
           const pos = document.positionAt(matchIndex);
           diagnostics.push(
             new vscode.Diagnostic(
@@ -358,9 +382,9 @@ function getTagPairDiagnostics(
         }
       }
     } else {
-      // For opening tags:
-      if (voidElements.has(tagName.toLowerCase())) {
-        // In XML mode, even void elements must be self-closed.
+      // Opening tag logic
+      if (voidElements.has(tagName)) {
+        // Void elements in XML mode must be self-closed
         if (selfClosingIndicator !== "/") {
           const pos = document.positionAt(matchIndex);
           diagnostics.push(
@@ -372,7 +396,7 @@ function getTagPairDiagnostics(
           );
         }
       } else {
-        // For non-void elements, if not self-closing, push onto the stack to match a future closing tag.
+        // Non-void elements: push onto stack if not self-closed
         if (selfClosingIndicator !== "/") {
           stack.push({ tag: tagName, pos: matchIndex });
         }
@@ -380,7 +404,7 @@ function getTagPairDiagnostics(
     }
   }
 
-  // Any remaining opening tags without a corresponding closing tag.
+  // 4) Any unclosed tags left on stack
   for (const unclosed of stack) {
     const pos = document.positionAt(unclosed.pos);
     diagnostics.push(
