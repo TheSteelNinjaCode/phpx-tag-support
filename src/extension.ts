@@ -398,7 +398,27 @@ function sanitizeForDiagnostics(text: string): string {
     " ".repeat(comment.length)
   );
 
-  // Blank out heredoc/nowdoc openers
+  // --- NEW: Completely remove (blank out) heredoc/nowdoc blocks ---
+  // Captures something like:
+  //
+  //   <<<HTML
+  //   ... content ...
+  //   HTML;
+  //
+  // or
+  //
+  //   <<<'HTML'
+  //   ... content ...
+  //   HTML;
+  //
+  // and replaces *everything*, including the markers, with whitespace.
+  const heredocPattern =
+    /<<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
+  text = text.replace(heredocPattern, (fullMatch) =>
+    " ".repeat(fullMatch.length)
+  );
+
+  // Blank out heredoc/nowdoc openers (redundant if we remove entire blocks):
   text = text.replace(/<<<[A-Za-z_][A-Za-z0-9_]*/g, (match) =>
     " ".repeat(match.length)
   );
@@ -406,10 +426,67 @@ function sanitizeForDiagnostics(text: string): string {
     " ".repeat(match.length)
   );
 
-  // NEW: Remove PHP regex strings, e.g. '/some<regex>/i'
+  // Remove PHP regex strings (e.g. '/some<regex>/i')
   text = removePhpRegexLiterals(text);
 
   return text;
+}
+
+function analyzeAttributes(
+  code: string,
+  offset: number,
+  document: vscode.TextDocument
+): vscode.Diagnostic[] {
+  const diagnostics: vscode.Diagnostic[] = [];
+  const tagRegex = /<(\w+)((?:"[^"]*"|'[^']*'|[^>"'])*)\/?>/g;
+
+  let match: RegExpExecArray | null;
+  while ((match = tagRegex.exec(code))) {
+    const fullTag = match[0];
+    const tagName = match[1];
+    const attrText = match[2] ?? "";
+
+    // position *within* this snippet
+    const matchIndexInSnippet = match.index;
+    // absolute position in the real file
+    const matchIndex = offset + matchIndexInSnippet;
+
+    // similarly for attribute text
+    const attrTextIndexInSnippet = fullTag.indexOf(attrText);
+    const attrTextIndex = offset + match.index + attrTextIndexInSnippet;
+
+    // Now do the combinedRegex for each attribute
+    const combinedRegex =
+      /([A-Za-z_:][A-Za-z0-9_.:\-]*)(\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?|\{\$[^}]+\}|\$+\w+/g;
+
+    let attrMatch: RegExpExecArray | null;
+    while ((attrMatch = combinedRegex.exec(attrText))) {
+      const attrName = attrMatch[1];
+      const attrAssignment = attrMatch[2];
+
+      // If the attribute is missing a value, we create a Diagnostic
+      if (attrName && !attrAssignment) {
+        // position in snippet:
+        const startIndexInSnippet =
+          attrTextIndexInSnippet + (attrMatch.index ?? 0);
+        // absolute position in real file
+        const startIndex = offset + match.index + startIndexInSnippet;
+
+        // Build the range
+        const startPos = document.positionAt(startIndex);
+        const endPos = document.positionAt(startIndex + attrName.length);
+
+        diagnostics.push(
+          new vscode.Diagnostic(
+            new vscode.Range(startPos, endPos),
+            `In XML mode, attribute "${attrName}" in <${tagName}> must have an explicit value (e.g., ${attrName}="value")`,
+            vscode.DiagnosticSeverity.Warning
+          )
+        );
+      }
+    }
+  }
+  return diagnostics;
 }
 
 /**
@@ -419,48 +496,49 @@ function sanitizeForDiagnostics(text: string): string {
 function getXmlAttributeDiagnostics(
   document: vscode.TextDocument
 ): vscode.Diagnostic[] {
-  const diagnostics: vscode.Diagnostic[] = [];
-  const sanitizedText = sanitizeForDiagnostics(document.getText());
+  const originalText = document.getText();
+  let diagnostics: vscode.Diagnostic[] = [];
 
-  // Find tags (including self-closing) with their raw attribute text.
-  // Group 1: tag name; Group 2: attribute text.
-  const tagRegex = /<(\w+)((?:"[^"]*"|'[^']*'|[^>"'])*)\/?>/g;
-  let match: RegExpExecArray | null;
+  //
+  // (A) Analyze main code outside heredocs
+  //
+  // 1) Create a copy of text where the *heredoc bodies* are removed,
+  //    but everything else is sanitized. That way your main HTML/JSX
+  //    code is cleanly analyzed.
+  //
+  //    – This is what sanitizeForDiagnostics() already does.
+  //    – But do NOT remove the entire heredoc block from the originalText here.
+  //      Just remove them in the sanitized copy used for "main" analysis.
+  //
+  const sanitizedMain = sanitizeForDiagnostics(originalText);
 
-  while ((match = tagRegex.exec(sanitizedText))) {
-    const fullTag = match[0];
-    const tagName = match[1];
-    const attrText = match[2] || "";
+  // 2) Run your existing “find tags + check attributes” logic on `sanitizedMain`.
+  //    That code sees no heredoc content, which is good.
+  const mainDiagnostics = analyzeAttributes(sanitizedMain, 0, document);
+  diagnostics.push(...mainDiagnostics);
 
-    // Calculate the starting index for attribute text within the entire file.
-    const attrTextIndex = match.index + fullTag.indexOf(attrText);
+  //
+  // (B) Analyze each heredoc block *as if* it’s separate HTML
+  //
+  const heredocBlocks = extractAllHeredocBlocks(originalText);
 
-    // Regex to detect attributes with or without explicit assignment.
-    const combinedRegex =
-      /([A-Za-z_:][A-Za-z0-9_.:\-]*)(\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?|\{\$[^}]+\}|\$+\w+/g;
-    let attrMatch: RegExpExecArray | null;
+  for (const block of heredocBlocks) {
+    // 1) Make a sanitized copy of just that heredoc’s content
+    let blockContent = block.content;
+    // Optionally remove nested comments, remove nested heredoc openers, etc.
+    blockContent = removePhpComments(blockContent);
+    blockContent = blankOutHeredocOpeners(blockContent);
+    blockContent = removePhpRegexLiterals(blockContent);
 
-    while ((attrMatch = combinedRegex.exec(attrText))) {
-      if (attrMatch[1]) {
-        const attrName = attrMatch[1];
-        const attrAssignment = attrMatch[2];
-
-        // Warn if the attribute has no assignment.
-        if (!attrAssignment) {
-          const startIndex = attrTextIndex + (attrMatch.index ?? 0);
-          const startPos = document.positionAt(startIndex);
-          const endPos = document.positionAt(startIndex + attrName.length);
-
-          diagnostics.push(
-            new vscode.Diagnostic(
-              new vscode.Range(startPos, endPos),
-              `In XML mode, attribute "${attrName}" in <${tagName}> must have an explicit value (e.g., ${attrName}="value")`,
-              vscode.DiagnosticSeverity.Warning
-            )
-          );
-        }
-      }
-    }
+    // 2) Analyze the block as if it’s standalone HTML
+    //    But we must shift *all positions* by block.startIndex
+    //    so that your diagnostics point to correct lines in the original doc.
+    const blockDiagnostics = analyzeAttributes(
+      blockContent,
+      block.startIndex,
+      document
+    );
+    diagnostics.push(...blockDiagnostics);
   }
 
   return diagnostics;
@@ -478,8 +556,24 @@ function getTagPairDiagnostics(
 
   const voidElements = new Set(["input", "br", "hr", "img", "meta", "link"]);
   // Regex for matching tag pairs.
-  const tagRegex =
-    /<(\/?)([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?))*\s*(\/?)>/g;
+  const tagRegex = new RegExp(
+    String.raw`<(\/?)([A-Za-z][A-Za-z0-9-]*)
+      (?:\s+
+        (?:[A-Za-z_:][A-Za-z0-9_.:-]*  # attribute name
+          (?:\s*=\s*
+            # (A) double-quotes with escapes
+            "(\\.|[^"\\])*"
+            # (B) single-quotes with escapes
+            |'(\\.|[^'\\])*'
+            # (C) unquoted fallback
+            |[^\s>]+
+          )?
+        )
+      )*
+      \s*(\/?)>`,
+    "g"
+  );
+
   const stack: { tag: string; pos: number }[] = [];
   let match: RegExpExecArray | null;
 
