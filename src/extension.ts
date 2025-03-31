@@ -1,5 +1,10 @@
 import * as vscode from "vscode";
 
+interface HeredocBlock {
+  content: string;
+  startIndex: number;
+}
+
 /**
  * Activates the PHPX extension.
  * Registers hover and definition providers, plus document change listeners.
@@ -195,9 +200,70 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 /**
- * Validates that all used JSX-like tags have a corresponding import.
- * Also, if the workspace root contains prisma-php.json, validates that every
- * tag’s attributes follow XML syntax (i.e. every attribute has an explicit value).
+ * Captures any heredoc or nowdoc blocks of the form:
+ *    <<<LABEL
+ *    ... content ...
+ *    LABEL;
+ *
+ *    <<<'LABEL'
+ *    ... content ...
+ *    LABEL;
+ *
+ * Then returns an array of { content, startIndex }.
+ * The startIndex is where the *actual* content begins, so you can map tags to correct positions.
+ */
+function extractAllHeredocBlocks(text: string): HeredocBlock[] {
+  const blocks: HeredocBlock[] = [];
+  // Matches:
+  //    <<<LABEL
+  //    (content)
+  //    LABEL;
+  //
+  // or  <<<'LABEL'
+  //    (content)
+  //    LABEL;
+  //
+  // Group 1: optional quote
+  // Group 2: label (the identifier)
+  // Group 3: the body
+  const pattern =
+    /<<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
+
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text))) {
+    const [, , , blockContent] = match;
+    // The blockContent starts at pattern.lastIndex minus the length of blockContent plus the newline.
+    // However, simpler is to say: start of content is match.index + offset to the group(3).
+    // We'll do a quick calculation:
+    const fullMatchIndex = match.index; // Where the `<<<LABEL` begins
+    const opener = match[0]; // Full matched text: `<<<LABEL\n...\nLABEL;`
+    // We can find where group(3) starts by measuring lengths:
+    const group3Start = match.index + match[0].indexOf(blockContent);
+
+    blocks.push({
+      content: blockContent,
+      startIndex: group3Start,
+    });
+  }
+  return blocks;
+}
+
+/**
+ * Remove or blank out `<<<HTML` or `<<<'HTML'` openers so that they
+ * are not mistakenly parsed as <HTML> tags.
+ */
+function blankOutHeredocOpeners(text: string): string {
+  // This regex matches `<<<SOMETHING` or `<<<'SOMETHING'`.
+  // We replace them with spaces so the offsets of subsequent text remain valid.
+  return text
+    .replace(/<<<[A-Za-z_][A-Za-z0-9_]*/g, (match) => " ".repeat(match.length))
+    .replace(/<<<'[A-Za-z_][A-Za-z0-9_]*'/g, (match) =>
+      " ".repeat(match.length)
+    );
+}
+
+/**
+ * Use this new function in your diagnostics.
  */
 function validateMissingImports(
   document: vscode.TextDocument,
@@ -207,35 +273,67 @@ function validateMissingImports(
     return;
   }
 
-  // Remove heredocs/nowdocs so we don't catch tags in strings
   const originalText = document.getText();
-  const strippedText = removeHeredocsAndNowdocs(originalText);
 
-  // Build shortName → fullClass map from all use statements
+  // 1) Blank out `<<<LABEL` openers to avoid seeing them as <LABEL> tags:
+  const textWithoutOpeners = blankOutHeredocOpeners(originalText);
+
+  // 2) Build shortName → fullClass map
   const useMap = parsePhpUseStatements(originalText);
   let diagnostics: vscode.Diagnostic[] = [];
 
-  // Capture tags like <Toggle or <GoogleSearch
-  const tagMatches = [...strippedText.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g)];
+  // 3) Find <Tag> in normal code (excluding heredoc openers)
+  const tagMatches = [
+    ...textWithoutOpeners.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g),
+  ];
   for (const match of tagMatches) {
     const tag = match[1];
     if (!useMap.has(tag)) {
       const start = document.positionAt(match.index! + 1);
-      const end = start.translate(0, tag.length);
-      const range = new vscode.Range(start, end);
-      const message = `⚠️ Missing import for component <${tag} />`;
+      const range = new vscode.Range(start, start.translate(0, tag.length));
       diagnostics.push(
-        new vscode.Diagnostic(range, message, vscode.DiagnosticSeverity.Warning)
+        new vscode.Diagnostic(
+          range,
+          `⚠️ Missing import for component <${tag} />`,
+          vscode.DiagnosticSeverity.Warning
+        )
       );
     }
   }
 
-  // Check if prisma-php.json exists at the workspace root.
-  // If it does, we assume the user is working with Prisma PHP and
-  // perform additional XML attribute validation.
+  // 4) Extract *all* heredoc/nowdoc blocks
+  const heredocBlocks = extractAllHeredocBlocks(originalText);
+
+  // 5) Validate <Tag> inside each heredoc block
+  for (const block of heredocBlocks) {
+    // Run the same <Tag> regex on block.content
+    const blockTagMatches = [
+      ...block.content.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g),
+    ];
+    for (const match of blockTagMatches) {
+      const tag = match[1];
+      if (!useMap.has(tag)) {
+        // The absolute position in the full document:
+        const absoluteIndex = block.startIndex + (match.index ?? 0) + 1;
+        const startPos = document.positionAt(absoluteIndex);
+        const range = new vscode.Range(
+          startPos,
+          startPos.translate(0, tag.length)
+        );
+        diagnostics.push(
+          new vscode.Diagnostic(
+            range,
+            `⚠️ Missing import for component <${tag} /> (in heredoc)`,
+            vscode.DiagnosticSeverity.Warning
+          )
+        );
+      }
+    }
+  }
+
+  // 6) Check for additional validations (prisma-php.json, etc.)
   vscode.workspace.findFiles("prisma-php.json", null, 1).then((files) => {
     if (files.length > 0) {
-      // Merge XML attribute diagnostics
       diagnostics = diagnostics.concat(getXmlAttributeDiagnostics(document));
       diagnostics = diagnostics.concat(getTagPairDiagnostics(document));
     }
@@ -499,15 +597,6 @@ function joinPath(prefix: string, item: string): string {
 function getLastPart(path: string): string {
   const parts = path.split("\\");
   return parts[parts.length - 1];
-}
-
-/**
- * Removes heredoc/nowdoc blocks from text to avoid false positives.
- */
-function removeHeredocsAndNowdocs(text: string): string {
-  const heredocPattern =
-    /<<<(['"]?)([A-Za-z0-9_]+)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
-  return text.replace(heredocPattern, "");
 }
 
 // Called when your extension is deactivated
