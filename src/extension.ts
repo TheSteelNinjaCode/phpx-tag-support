@@ -249,17 +249,30 @@ function extractAllHeredocBlocks(text: string): HeredocBlock[] {
 }
 
 /**
- * Remove or blank out `<<<HTML` or `<<<'HTML'` openers so that they
- * are not mistakenly parsed as <HTML> tags.
+ * Replaces heredoc/nowdoc openers like `<<<EOD`, `<<< EOD`, `<<<'EOD'`, etc.
+ * with spaces so they aren't detected as <EOD> tags.
  */
 function blankOutHeredocOpeners(text: string): string {
-  // This regex matches `<<<SOMETHING` or `<<<'SOMETHING'`.
-  // We replace them with spaces so the offsets of subsequent text remain valid.
-  return text
-    .replace(/<<<[A-Za-z_][A-Za-z0-9_]*/g, (match) => " ".repeat(match.length))
-    .replace(/<<<'[A-Za-z_][A-Za-z0-9_]*'/g, (match) =>
-      " ".repeat(match.length)
-    );
+  // Notice the `\s*` after `<<<`.
+  return text.replace(/<<<\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?/g, (match) =>
+    " ".repeat(match.length)
+  );
+}
+
+function removePhpComments(text: string): string {
+  let result = text;
+
+  // Remove // single-line comments
+  result = result.replace(/\/\/[^\r\n]*/g, (comment) =>
+    " ".repeat(comment.length)
+  );
+
+  // Remove /* ... */ multi-line comments
+  result = result.replace(/\/\*[\s\S]*?\*\//g, (comment) =>
+    " ".repeat(comment.length)
+  );
+
+  return result;
 }
 
 /**
@@ -275,32 +288,24 @@ function validateMissingImports(
 
   const originalText = document.getText();
 
-  let cleanedText = originalText;
+  // 1) Remove PHP comments so that `<Something>` inside comments is ignored
+  let noCommentsText = removePhpComments(originalText);
 
-  // Remove single-line comments
-  cleanedText = cleanedText.replace(/\/\/[^\n\r]*/g, (comment) =>
-    " ".repeat(comment.length)
-  );
+  // 2) Blank out `<<<LABEL` openers in that text to avoid seeing them as <LABEL> tags
+  noCommentsText = blankOutHeredocOpeners(noCommentsText);
 
-  // Remove multi-line comments
-  cleanedText = cleanedText.replace(/\/\*[\s\S]*?\*\//g, (comment) =>
-    " ".repeat(comment.length)
-  );
-
-  // Remove heredoc openers
-  cleanedText = blankOutHeredocOpeners(cleanedText);
-
-  // 2) Build shortName → fullClass map
+  // 3) Build shortName → fullClass map
   const useMap = parsePhpUseStatements(originalText);
   let diagnostics: vscode.Diagnostic[] = [];
 
-  // 3) Find <Tag> in normal code (excluding heredoc openers)
-  const tagMatches = [...cleanedText.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g)];
-
+  // 4) Find <Tag> in "normal" code (excluding heredoc openers, excluding comments)
+  const tagMatches = [...noCommentsText.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g)];
   for (const match of tagMatches) {
     const tag = match[1];
+    // If not imported, issue a warning
     if (!useMap.has(tag)) {
-      const start = document.positionAt(match.index! + 1);
+      // match.index + 1 because `<Tag` -> the Tag starts at +1 offset
+      const start = document.positionAt((match.index ?? 0) + 1);
       const range = new vscode.Range(start, start.translate(0, tag.length));
       diagnostics.push(
         new vscode.Diagnostic(
@@ -312,19 +317,21 @@ function validateMissingImports(
     }
   }
 
-  // 4) Extract *all* heredoc/nowdoc blocks
+  // 5) Parse tags inside each heredoc block
   const heredocBlocks = extractAllHeredocBlocks(originalText);
 
-  // 5) Validate <Tag> inside each heredoc block
   for (const block of heredocBlocks) {
-    // Run the same <Tag> regex on block.content
+    // FIRST blank out any nested `<<<EOD` openers inside the block content:
+    let blockContent = block.content;
+    blockContent = blankOutHeredocOpeners(blockContent);
+
+    // THEN scan for <Tag>
     const blockTagMatches = [
-      ...block.content.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g),
+      ...blockContent.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g),
     ];
     for (const match of blockTagMatches) {
       const tag = match[1];
       if (!useMap.has(tag)) {
-        // The absolute position in the full document:
         const absoluteIndex = block.startIndex + (match.index ?? 0) + 1;
         const startPos = document.positionAt(absoluteIndex);
         const range = new vscode.Range(
@@ -342,7 +349,7 @@ function validateMissingImports(
     }
   }
 
-  // 6) Check for additional validations (prisma-php.json, etc.)
+  // 6) Optionally run extra validations if "prisma-php.json" is found
   vscode.workspace.findFiles("prisma-php.json", null, 1).then((files) => {
     if (files.length > 0) {
       diagnostics = diagnostics.concat(getXmlAttributeDiagnostics(document));
