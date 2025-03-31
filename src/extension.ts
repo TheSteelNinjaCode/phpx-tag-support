@@ -369,6 +369,9 @@ function getXmlAttributeDiagnostics(
   const text = document.getText();
   const diagnostics: vscode.Diagnostic[] = [];
 
+  // Define common HTML attributes that should be exempt from the warning.
+  const commonHtmlAttributes = new Set(["href", "src", "alt", "title"]);
+
   // 1) Replace inline PHP blocks with whitespace, preserving offsets
   let noPhpText = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (phpBlock) =>
     " ".repeat(phpBlock.length)
@@ -395,7 +398,7 @@ function getXmlAttributeDiagnostics(
   // 3) Find tags (including self-closing).
   //    Group 1: the tag name
   //    Group 2: the raw attribute text
-  const tagRegex = /<(\w+)([^>]*)\/?>/g;
+  const tagRegex = /<(\w+)(?:"[^"]*"|'[^']*'|[^>"'])*\/?>/g;
   let match: RegExpExecArray | null;
   while ((match = tagRegex.exec(noPhpText))) {
     const fullTag = match[0];
@@ -405,25 +408,22 @@ function getXmlAttributeDiagnostics(
     // Calculate where the attribute text begins (for diagnostic positioning).
     const attrTextIndex = match.index + fullTag.indexOf(attrText);
 
-    // 4) Combined regex to detect:
-    //    - Normal attributes:  name="..." or name='...'
-    //    - Or a dynamic placeholder like {$attributes}, $foo, $$bar, etc.
-    //
-    // If Group 1 is present but Group 2 is missing => warn about no explicit value.
-    // If Group 1 is empty but we matched a dynamic placeholder => skip.
-    //
+    // 4) Combined regex to detect normal attributes (name="..." or name='...') and dynamic placeholders.
     const combinedRegex =
-      /([A-Za-z_:][A-Za-z0-9_.:\-]*)(\s*=\s*(".*?"|'.*?'))?|\{\$[^}]+\}|\$+\w+/g;
+      /([A-Za-z_:][A-Za-z0-9_.:\-]*)(\s*=\s*(["'“”])((?:(?!\3|<)[\s\S])*)\3)?|\{\$[^}]+\}|\$+\w+/g;
 
     let attrMatch: RegExpExecArray | null;
     while ((attrMatch = combinedRegex.exec(attrText))) {
-      // If group 1 is present, we have a normal attribute
+      // If group 1 is present, we have a normal attribute.
       if (attrMatch[1]) {
         const attrName = attrMatch[1];
         const attrAssignment = attrMatch[2];
-        // No assignment => warn
-        if (!attrAssignment) {
-          const startIndex = attrTextIndex + attrMatch.index;
+        // Only trigger a warning if there's no assignment and the attribute isn't one of the common HTML ones.
+        if (
+          !attrAssignment &&
+          !commonHtmlAttributes.has(attrName.toLowerCase())
+        ) {
+          const startIndex = attrTextIndex + (attrMatch.index ?? 0);
           const endIndex = startIndex + attrName.length;
           const startPos = document.positionAt(startIndex);
           const endPos = document.positionAt(endIndex);
@@ -436,10 +436,8 @@ function getXmlAttributeDiagnostics(
             )
           );
         }
-      } else {
-        // Otherwise, we matched a dynamic placeholder (e.g. {$attributes} or $foo).
-        // We skip complaining about it since it’s deliberate PHP code.
       }
+      // Otherwise, skip dynamic placeholders (e.g., {$attributes} or $foo).
     }
   }
 
@@ -467,7 +465,7 @@ function getTagPairDiagnostics(
     " ".repeat(comment.length)
   );
 
-  // 2) Blank out the heredoc/nowdoc *opener* itself, wherever it appears
+  // 2) Blank out the heredoc/nowdoc opener itself
   noPhpText = noPhpText.replace(/<<<[A-Za-z_][A-Za-z0-9_]*/g, (match) =>
     " ".repeat(match.length)
   );
@@ -475,22 +473,30 @@ function getTagPairDiagnostics(
     " ".repeat(match.length)
   );
 
-  // 3) Tag-pair validation
+  // 3) Tag-pair validation using an improved tag regex
   const voidElements = new Set(["input", "br", "hr", "img", "meta", "link"]);
-  const tagRegex = /<(\/?)([A-Za-z][A-Za-z0-9]*)(\s[^>]*?)?(\/?)>/g;
+  const tagRegex =
+    /<(\/?)([A-Za-z][A-Za-z0-9]*)(?:"[^"]*"|'[^']*'|[^>"'])*\s*(\/?)>/g;
   const stack: { tag: string; pos: number }[] = [];
 
   let match: RegExpExecArray | null;
   while ((match = tagRegex.exec(noPhpText))) {
+    // Optionally, log a debug substring:
+    // console.log("Matched substring =>", noPhpText.substring(match.index, match.index + 50));
+
     const isClosing = match[1] === "/";
-    const tagName = match[2].toLowerCase();
-    const selfClosingIndicator = match[4];
+    const tagName = match[2]; // keep the original case
+    const selfClosingIndicator = match[3];
     const matchIndex = match.index;
 
+    // Determine if this tag is a known void element.
+    // Only consider it a void element if its name is all lowercase.
+    const isVoidElement =
+      voidElements.has(tagName.toLowerCase()) &&
+      tagName === tagName.toLowerCase();
+
     if (isClosing) {
-      // Closing tag logic
       if (stack.length === 0) {
-        // No matching opening tag
         const pos = document.positionAt(matchIndex);
         diagnostics.push(
           new vscode.Diagnostic(
@@ -502,7 +508,6 @@ function getTagPairDiagnostics(
       } else {
         const last = stack.pop()!;
         if (last.tag !== tagName) {
-          // Mismatched tag name
           const pos = document.positionAt(matchIndex);
           diagnostics.push(
             new vscode.Diagnostic(
@@ -514,9 +519,8 @@ function getTagPairDiagnostics(
         }
       }
     } else {
-      // Opening tag logic
-      if (voidElements.has(tagName)) {
-        // Void elements in XML mode must be self-closed
+      if (isVoidElement) {
+        // Void elements in XML mode must be self-closed.
         if (selfClosingIndicator !== "/") {
           const pos = document.positionAt(matchIndex);
           diagnostics.push(
