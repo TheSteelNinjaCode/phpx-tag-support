@@ -360,73 +360,96 @@ function validateMissingImports(
 }
 
 /**
+ * Detect and remove (blank out) PHP regex strings of the form
+ * '/.../[a-z]*' or "/.../[a-z]*" to prevent them from being scanned as tags.
+ *
+ * This is a naive implementation assuming your regex literals:
+ *   - Start with a single or double quote
+ *   - Followed immediately by a forward slash
+ *   - Contain zero or more characters (non-greedy) until the next slash
+ *   - Possibly end with one or more flags (like `i`, `m`, `s`, etc.)
+ *   - End with the same quote character you started with
+ */
+function removePhpRegexLiterals(text: string): string {
+  // Explanation of the regex:
+  // (['"])       => capture a single or double quote in group #1
+  // \/           => a literal slash
+  // .*?          => any characters (non-greedy) until the next slash
+  // \/[a-z]*     => a slash followed by zero or more letters (flags)
+  // \1           => match the same quote character as captured in group #1
+  const pattern = /(['"])\/.*?\/[a-z]*\1/gi;
+  return text.replace(pattern, (match) => " ".repeat(match.length));
+}
+
+/**
+ * Sanitizes text for diagnostics by removing inline PHP blocks, comments,
+ * blanking out heredoc/nowdoc openers, and also removing PHP regex literal strings.
+ * This helps ensure our <tag> scanning won't be fooled by things in comments or regexes.
+ */
+function sanitizeForDiagnostics(text: string): string {
+  // Remove inline PHP blocks: <?php ... ?>
+  text = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (block) =>
+    " ".repeat(block.length)
+  );
+
+  // Remove single-line and multi-line comments
+  text = text.replace(/\/\/[^\r\n]*/g, (comment) => " ".repeat(comment.length));
+  text = text.replace(/\/\*[\s\S]*?\*\//g, (comment) =>
+    " ".repeat(comment.length)
+  );
+
+  // Blank out heredoc/nowdoc openers
+  text = text.replace(/<<<[A-Za-z_][A-Za-z0-9_]*/g, (match) =>
+    " ".repeat(match.length)
+  );
+  text = text.replace(/<<<'[A-Za-z_][A-Za-z0-9_]*'/g, (match) =>
+    " ".repeat(match.length)
+  );
+
+  // NEW: Remove PHP regex strings, e.g. '/some<regex>/i'
+  text = removePhpRegexLiterals(text);
+
+  return text;
+}
+
+/**
  * Returns diagnostics for XML attributes without an explicit value.
- * In "XML mode," every attribute must be assigned a value (e.g., foo="bar").
+ * Uses the sanitized text to avoid false positives from PHP blocks, comments, or heredoc openers.
  */
 function getXmlAttributeDiagnostics(
   document: vscode.TextDocument
 ): vscode.Diagnostic[] {
-  const text = document.getText();
   const diagnostics: vscode.Diagnostic[] = [];
+  const sanitizedText = sanitizeForDiagnostics(document.getText());
 
-  // Define common HTML attributes that should be exempt from the warning.
-  const commonHtmlAttributes = new Set(["href", "src", "alt", "title"]);
-
-  // 1) Replace inline PHP blocks with whitespace, preserving offsets
-  let noPhpText = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (phpBlock) =>
-    " ".repeat(phpBlock.length)
-  );
-
-  // 1a) Remove // single-line comments
-  noPhpText = noPhpText.replace(/\/\/[^\r\n]*/g, (comment) =>
-    " ".repeat(comment.length)
-  );
-
-  // 1b) Remove /* ... */ multi-line comments
-  noPhpText = noPhpText.replace(/\/\*[\s\S]*?\*\//g, (comment) =>
-    " ".repeat(comment.length)
-  );
-
-  // 2) Blank out heredoc/nowdoc openers so `<<<HTML` won’t be parsed as <HTML>
-  noPhpText = noPhpText.replace(/<<<[A-Za-z_][A-Za-z0-9_]*/g, (match) =>
-    " ".repeat(match.length)
-  );
-  noPhpText = noPhpText.replace(/<<<'[A-Za-z_][A-Za-z0-9_]*'/g, (match) =>
-    " ".repeat(match.length)
-  );
-
-  // 3) Find tags (including self-closing).
-  //    Group 1: the tag name
-  //    Group 2: the raw attribute text
-  const tagRegex = /<(\w+)(?:"[^"]*"|'[^']*'|[^>"'])*\/?>/g;
+  // Find tags (including self-closing) with their raw attribute text.
+  // Group 1: tag name; Group 2: attribute text.
+  const tagRegex = /<(\w+)((?:"[^"]*"|'[^']*'|[^>"'])*)\/?>/g;
   let match: RegExpExecArray | null;
-  while ((match = tagRegex.exec(noPhpText))) {
+
+  while ((match = tagRegex.exec(sanitizedText))) {
     const fullTag = match[0];
     const tagName = match[1];
     const attrText = match[2] || "";
 
-    // Calculate where the attribute text begins (for diagnostic positioning).
+    // Calculate the starting index for attribute text within the entire file.
     const attrTextIndex = match.index + fullTag.indexOf(attrText);
 
-    // 4) Combined regex to detect normal attributes (name="..." or name='...') and dynamic placeholders.
+    // Regex to detect attributes with or without explicit assignment.
     const combinedRegex =
-      /([A-Za-z_:][A-Za-z0-9_.:\-]*)(\s*=\s*(["'“”])((?:(?!\3|<)[\s\S])*)\3)?|\{\$[^}]+\}|\$+\w+/g;
-
+      /([A-Za-z_:][A-Za-z0-9_.:\-]*)(\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?|\{\$[^}]+\}|\$+\w+/g;
     let attrMatch: RegExpExecArray | null;
+
     while ((attrMatch = combinedRegex.exec(attrText))) {
-      // If group 1 is present, we have a normal attribute.
       if (attrMatch[1]) {
         const attrName = attrMatch[1];
         const attrAssignment = attrMatch[2];
-        // Only trigger a warning if there's no assignment and the attribute isn't one of the common HTML ones.
-        if (
-          !attrAssignment &&
-          !commonHtmlAttributes.has(attrName.toLowerCase())
-        ) {
+
+        // Warn if the attribute has no assignment.
+        if (!attrAssignment) {
           const startIndex = attrTextIndex + (attrMatch.index ?? 0);
-          const endIndex = startIndex + attrName.length;
           const startPos = document.positionAt(startIndex);
-          const endPos = document.positionAt(endIndex);
+          const endPos = document.positionAt(startIndex + attrName.length);
 
           diagnostics.push(
             new vscode.Diagnostic(
@@ -437,63 +460,34 @@ function getXmlAttributeDiagnostics(
           );
         }
       }
-      // Otherwise, skip dynamic placeholders (e.g., {$attributes} or $foo).
     }
   }
 
   return diagnostics;
 }
 
+/**
+ * Returns diagnostics for mismatched or unclosed tag pairs.
+ * Also uses the sanitized text to prevent misinterpreting PHP blocks or heredoc content as tags.
+ */
 function getTagPairDiagnostics(
   document: vscode.TextDocument
 ): vscode.Diagnostic[] {
   const diagnostics: vscode.Diagnostic[] = [];
-  const text = document.getText();
+  const sanitizedText = sanitizeForDiagnostics(document.getText());
 
-  // 1) Remove inline PHP blocks but keep heredoc/nowdoc content intact
-  let noPhpText = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (phpBlock) =>
-    " ".repeat(phpBlock.length)
-  );
-
-  // 1a) Remove // single-line comments
-  noPhpText = noPhpText.replace(/\/\/[^\r\n]*/g, (comment) =>
-    " ".repeat(comment.length)
-  );
-
-  // 1b) Remove /* ... */ multi-line comments
-  noPhpText = noPhpText.replace(/\/\*[\s\S]*?\*\//g, (comment) =>
-    " ".repeat(comment.length)
-  );
-
-  // 2) Blank out the heredoc/nowdoc opener itself
-  noPhpText = noPhpText.replace(/<<<[A-Za-z_][A-Za-z0-9_]*/g, (match) =>
-    " ".repeat(match.length)
-  );
-  noPhpText = noPhpText.replace(/<<<'[A-Za-z_][A-Za-z0-9_]*'/g, (match) =>
-    " ".repeat(match.length)
-  );
-
-  // 3) Tag-pair validation using an improved tag regex
   const voidElements = new Set(["input", "br", "hr", "img", "meta", "link"]);
+  // Regex for matching tag pairs.
   const tagRegex =
-    /<(\/?)([A-Za-z][A-Za-z0-9]*)(?:"[^"]*"|'[^']*'|[^>"'])*\s*(\/?)>/g;
+    /<(\/?)([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?))*\s*(\/?)>/g;
   const stack: { tag: string; pos: number }[] = [];
-
   let match: RegExpExecArray | null;
-  while ((match = tagRegex.exec(noPhpText))) {
-    // Optionally, log a debug substring:
-    // console.log("Matched substring =>", noPhpText.substring(match.index, match.index + 50));
 
+  while ((match = tagRegex.exec(sanitizedText))) {
     const isClosing = match[1] === "/";
-    const tagName = match[2]; // keep the original case
+    const tagName = match[2].toLowerCase();
     const selfClosingIndicator = match[3];
     const matchIndex = match.index;
-
-    // Determine if this tag is a known void element.
-    // Only consider it a void element if its name is all lowercase.
-    const isVoidElement =
-      voidElements.has(tagName.toLowerCase()) &&
-      tagName === tagName.toLowerCase();
 
     if (isClosing) {
       if (stack.length === 0) {
@@ -519,8 +513,7 @@ function getTagPairDiagnostics(
         }
       }
     } else {
-      if (isVoidElement) {
-        // Void elements in XML mode must be self-closed.
+      if (voidElements.has(tagName)) {
         if (selfClosingIndicator !== "/") {
           const pos = document.positionAt(matchIndex);
           diagnostics.push(
@@ -531,16 +524,13 @@ function getTagPairDiagnostics(
             )
           );
         }
-      } else {
-        // Non-void elements: push onto stack if not self-closed
-        if (selfClosingIndicator !== "/") {
-          stack.push({ tag: tagName, pos: matchIndex });
-        }
+      } else if (selfClosingIndicator !== "/") {
+        stack.push({ tag: tagName, pos: matchIndex });
       }
     }
   }
 
-  // 4) Any unclosed tags left on stack
+  // Report any unclosed tags remaining in the stack.
   for (const unclosed of stack) {
     const pos = document.positionAt(unclosed.pos);
     diagnostics.push(
