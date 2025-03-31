@@ -1,20 +1,27 @@
 # PHPX Tag Support
 
-**PHPX Tag Support** is a Visual Studio Code extension designed to enhance your PHP development workflow by adding custom tag support for PHPX. It provides features like hover information, definition lookup, and diagnostic warnings for missing tag imports. The extension also intelligently parses PHP `use` statements—including group imports and aliases—to determine the correct source file for a tag.
+**PHPX Tag Support** is a Visual Studio Code extension designed to enhance your Prisma PHP development workflow by adding custom tag support for PHPX. It provides features like hover information, definition lookup, diagnostic warnings for missing tag imports, and intelligent parsing of PHP `use` statements—including group imports and aliases. Additionally, it includes completion suggestions for PHPX tags and advanced diagnostics for XML attributes and tag pairs.
 
 ## Features
 
 ### Hover Provider
 
-Hover over a PHPX tag (e.g., `<GoogleSearch />`) to see a tooltip displaying the full class imported via the corresponding `use` statement.
+Hover over a PHPX tag (e.g., `<GoogleSearch />`) to see a tooltip displaying the full class imported via the corresponding `use` statement. If the tag is not found, a helpful message is displayed.
 
 ### Definition Provider
 
-Ctrl+Click (or F12) on a tag opens the Peek Definition view, showing the contents of the source file. The extension ensures that even single definitions use the peek view by updating VS Code’s configuration.
+Ctrl+Click (or F12) on a tag opens the Peek Definition view, showing the contents of the source file. The extension ensures that even single definitions use the peek view by updating VS Code’s configuration. It also supports resolving definitions using a `class-log.json` file or `use` imports.
 
 ### Diagnostic Warnings
 
-The extension scans your PHP files for custom tags and flags any tag without a corresponding `use` import. It supports group imports and aliasing to ensure accurate diagnostics.
+The extension scans your PHP files for custom tags and flags any tag without a corresponding `use` import. It supports group imports, aliasing, and heredoc/nowdoc filtering to ensure accurate diagnostics. Additional validations include:
+
+- Missing XML attribute values in "XML mode."
+- Unmatched or improperly closed tags.
+
+### Tag Completion Suggestions
+
+Provides intelligent completion suggestions for PHPX tags based on `use` imports. Suggestions are triggered when typing `<` in PHP files.
 
 ### Group Import & Alias Support
 
@@ -56,7 +63,14 @@ Ctrl+Click (or F12) on a tag opens the inline Peek Definition view. Alternativel
 
 ### Diagnostics
 
-If a tag is missing its import, a warning (e.g., “Missing import for component `<Toggle />`”) will be shown inline.
+If a tag is missing its import, a warning (e.g., “⚠️ Missing import for component `<Toggle />`”) will be shown inline. Additional diagnostics include:
+
+- Warnings for missing XML attribute values.
+- Errors for unmatched or improperly closed tags.
+
+### Completion Suggestions
+
+Start typing `<` in a PHP file to see suggestions for available PHPX tags based on your `use` imports.
 
 ## Extension Commands
 

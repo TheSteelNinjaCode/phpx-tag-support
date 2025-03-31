@@ -356,13 +356,23 @@ function getXmlAttributeDiagnostics(
     " ".repeat(phpBlock.length)
   );
 
-  // 2) Blank out heredoc/nowdoc openers so `<<<HTML` isn’t parsed as <HTML> tag
-  noPhpText = noPhpText.replace(/<<<[A-Za-z_][A-Za-z0-9_]*/g, (match) => {
-    return " ".repeat(match.length);
-  });
-  noPhpText = noPhpText.replace(/<<<'[A-Za-z_][A-Za-z0-9_]*'/g, (match) => {
-    return " ".repeat(match.length);
-  });
+  // 1a) Remove // single-line comments
+  noPhpText = noPhpText.replace(/\/\/[^\r\n]*/g, (comment) =>
+    " ".repeat(comment.length)
+  );
+
+  // 1b) Remove /* ... */ multi-line comments
+  noPhpText = noPhpText.replace(/\/\*[\s\S]*?\*\//g, (comment) =>
+    " ".repeat(comment.length)
+  );
+
+  // 2) Blank out heredoc/nowdoc openers so `<<<HTML` won’t be parsed as <HTML>
+  noPhpText = noPhpText.replace(/<<<[A-Za-z_][A-Za-z0-9_]*/g, (match) =>
+    " ".repeat(match.length)
+  );
+  noPhpText = noPhpText.replace(/<<<'[A-Za-z_][A-Za-z0-9_]*'/g, (match) =>
+    " ".repeat(match.length)
+  );
 
   // 3) Find tags (including self-closing).
   //    Group 1: the tag name
@@ -377,13 +387,9 @@ function getXmlAttributeDiagnostics(
     // Calculate where the attribute text begins (for diagnostic positioning).
     const attrTextIndex = match.index + fullTag.indexOf(attrText);
 
-    //
     // 4) Combined regex to detect:
     //    - Normal attributes:  name="..." or name='...'
     //    - Or a dynamic placeholder like {$attributes}, $foo, $$bar, etc.
-    //
-    // Group 1: the attribute name (e.g. "class")
-    // Group 2: the optional assignment (e.g. = "value")
     //
     // If Group 1 is present but Group 2 is missing => warn about no explicit value.
     // If Group 1 is empty but we matched a dynamic placeholder => skip.
