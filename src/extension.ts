@@ -275,17 +275,28 @@ function validateMissingImports(
 
   const originalText = document.getText();
 
-  // 1) Blank out `<<<LABEL` openers to avoid seeing them as <LABEL> tags:
-  const textWithoutOpeners = blankOutHeredocOpeners(originalText);
+  let cleanedText = originalText;
+
+  // Remove single-line comments
+  cleanedText = cleanedText.replace(/\/\/[^\n\r]*/g, (comment) =>
+    " ".repeat(comment.length)
+  );
+
+  // Remove multi-line comments
+  cleanedText = cleanedText.replace(/\/\*[\s\S]*?\*\//g, (comment) =>
+    " ".repeat(comment.length)
+  );
+
+  // Remove heredoc openers
+  cleanedText = blankOutHeredocOpeners(cleanedText);
 
   // 2) Build shortName → fullClass map
   const useMap = parsePhpUseStatements(originalText);
   let diagnostics: vscode.Diagnostic[] = [];
 
   // 3) Find <Tag> in normal code (excluding heredoc openers)
-  const tagMatches = [
-    ...textWithoutOpeners.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g),
-  ];
+  const tagMatches = [...cleanedText.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g)];
+
   for (const match of tagMatches) {
     const tag = match[1];
     if (!useMap.has(tag)) {
@@ -439,19 +450,23 @@ function getTagPairDiagnostics(
     " ".repeat(phpBlock.length)
   );
 
+  // 1a) Remove // single-line comments
+  noPhpText = noPhpText.replace(/\/\/[^\r\n]*/g, (comment) =>
+    " ".repeat(comment.length)
+  );
+
+  // 1b) Remove /* ... */ multi-line comments
+  noPhpText = noPhpText.replace(/\/\*[\s\S]*?\*\//g, (comment) =>
+    " ".repeat(comment.length)
+  );
+
   // 2) Blank out the heredoc/nowdoc *opener* itself, wherever it appears
-  //    This ensures "<<<HTML" won't be misread as "<HTML>"
-  //    - The following two regexes remove the literal substring `<<<HTML` or `<<<'HTML'`
-  //      from anywhere in the line (including "return <<<HTML").
   noPhpText = noPhpText.replace(/<<<[A-Za-z_][A-Za-z0-9_]*/g, (match) =>
     " ".repeat(match.length)
   );
   noPhpText = noPhpText.replace(/<<<'[A-Za-z_][A-Za-z0-9_]*'/g, (match) =>
     " ".repeat(match.length)
   );
-
-  // (Optional) If you ever need to blank out the closing identifier (e.g. `HTML;`),
-  // you could do a similar replacement. But typically it's not parsed as a tag, so it’s safe.
 
   // 3) Tag-pair validation
   const voidElements = new Set(["input", "br", "hr", "img", "meta", "link"]);
