@@ -263,9 +263,10 @@ function removePhpComments(text: string): string {
   let result = text;
 
   // Remove // single-line comments
-  result = result.replace(/\/\/[^\r\n]*/g, (comment) =>
-    " ".repeat(comment.length)
-  );
+  result = result.replace(/(^|[^:])\/\/[^\r\n]*/g, (match, prefix) => {
+    // keep prefix, blank out rest
+    return prefix + " ".repeat(match.length - prefix.length);
+  });
 
   // Remove /* ... */ multi-line comments
   result = result.replace(/\/\*[\s\S]*?\*\//g, (comment) =>
@@ -382,52 +383,175 @@ function removePhpRegexLiterals(text: string): string {
 }
 
 /**
+ * Replaces both "{$variable}" and "$variable" occurrences with spaces
+ * so that they won't be mistaken for tags by the regex parser.
+ */
+function removePhpInterpolations(text: string): string {
+  // Pattern explanation:
+  //   \{\$[^}]+\}  ->  matches things like {$attributes}, {$foo}, etc.
+  //   |            ->  OR
+  //   \$[A-Za-z_]\w*
+  //         ->  matches $foo, $bar, $someVar123, etc. (basic case)
+  return text.replace(/\{\$[^}]+\}|\$[A-Za-z_]\w*/g, (match) => {
+    return " ".repeat(match.length);
+  });
+}
+
+/**
+ * Removes certain PHP keywords/operators (false, true, null, ? :, =>, ->, !==, ===)
+ * *outside* of quoted strings. This prevents them from appearing as HTML attributes
+ * if they're near `<svg>` or any other tag.
+ */
+function removeOperatorsAndBooleansOutsideQuotes(text: string): string {
+  let result = "";
+  let inString = false;
+  let quoteChar = "";
+  let i = 0;
+
+  // Helper to see if the next chunk of text matches a token
+  function startsWithToken(token: string): boolean {
+    return text.slice(i, i + token.length) === token;
+  }
+
+  while (i < text.length) {
+    const ch = text[i];
+
+    if (!inString) {
+      // We are outside of any string. Check for known tokens:
+      // (1) false | true | null
+      // (2) !== | === | -> | =>
+      // (3) ? : (with optional spaces)
+      if (startsWithToken("false")) {
+        // Make sure the next char isn't a letter/digit so we don't clobber "falsely".
+        if (!/[A-Za-z0-9_]/.test(text[i + 5] || "")) {
+          result += "     "; // 5 letters
+          i += 5;
+          continue;
+        }
+      } else if (startsWithToken("true")) {
+        if (!/[A-Za-z0-9_]/.test(text[i + 4] || "")) {
+          result += "    "; // 4 letters
+          i += 4;
+          continue;
+        }
+      } else if (startsWithToken("null")) {
+        if (!/[A-Za-z0-9_]/.test(text[i + 4] || "")) {
+          result += "    "; // 4 letters
+          i += 4;
+          continue;
+        }
+      } else if (startsWithToken("!==")) {
+        result += "   "; // 3 chars
+        i += 3;
+        continue;
+      } else if (startsWithToken("===")) {
+        result += "   ";
+        i += 3;
+        continue;
+      } else if (startsWithToken("->")) {
+        result += "  ";
+        i += 2;
+        continue;
+      } else if (startsWithToken("=>")) {
+        result += "  ";
+        i += 2;
+        continue;
+      } else if (ch === "?") {
+        // We found a "?" outside quotes. Now we'll see if there's a ":" outside quotes
+        // that matches this question mark (i.e. it's a ternary operator).
+        let questionPos = i;
+        let localInString = false;
+        let localQuote = "";
+        let foundColon = -1;
+
+        // We start scanning from the next character after '?'
+        let j = i + 1;
+
+        // We'll parse until we either find a colon ':' outside quotes OR hit the end of text.
+        while (j < text.length) {
+          const c2 = text[j];
+          if (!localInString) {
+            // Are we starting a quoted string inside the ternary chunk?
+            if (c2 === "'" || c2 === '"') {
+              localInString = true;
+              localQuote = c2;
+            } else if (c2 === ":") {
+              // Found the matching colon outside of any nested quotes
+              foundColon = j;
+              break;
+            }
+          } else {
+            // We are inside a local string, so we only exit if we see the matching close-quote
+            if (c2 === localQuote) {
+              localInString = false;
+              localQuote = "";
+            }
+          }
+          j++;
+        }
+
+        if (foundColon !== -1) {
+          // We found a real ternary "? ... :". Remove everything from
+          // the question mark up to and including the colon:
+          const length = foundColon - questionPos + 1;
+          result += " ".repeat(length);
+          i = foundColon + 1; // jump past the colon
+          continue;
+        } else {
+          // No colon was found outside quotes. Treat this "?" as just a single char to blank out
+          result += " ";
+          i++;
+          continue;
+        }
+      }
+
+      // Not a removable token, so check if we’re starting a quote
+      if (ch === "'" || ch === '"') {
+        inString = true;
+        quoteChar = ch;
+        result += ch;
+      } else {
+        result += ch;
+      }
+    } else {
+      // We are inside a quoted string—copy verbatim
+      result += ch;
+      if (ch === quoteChar) {
+        inString = false;
+      }
+    }
+
+    i++;
+  }
+
+  return result;
+}
+
+/**
  * Sanitizes text for diagnostics by removing inline PHP blocks, comments,
  * blanking out heredoc/nowdoc openers, and also removing PHP regex literal strings.
  * This helps ensure our <tag> scanning won't be fooled by things in comments or regexes.
  */
 function sanitizeForDiagnostics(text: string): string {
-  // Remove inline PHP blocks: <?php ... ?>
+  // 1) Remove inline PHP blocks like <?php ... ?> or <?= ... ?>
   text = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (block) =>
     " ".repeat(block.length)
   );
 
-  // Remove single-line and multi-line comments
-  text = text.replace(/\/\/[^\r\n]*/g, (comment) => " ".repeat(comment.length));
-  text = text.replace(/\/\*[\s\S]*?\*\//g, (comment) =>
-    " ".repeat(comment.length)
-  );
+  // 2) Remove single-line comments (but skip those with ://)
+  text = removePhpComments(text);
 
-  // --- NEW: Completely remove (blank out) heredoc/nowdoc blocks ---
-  // Captures something like:
-  //
-  //   <<<HTML
-  //   ... content ...
-  //   HTML;
-  //
-  // or
-  //
-  //   <<<'HTML'
-  //   ... content ...
-  //   HTML;
-  //
-  // and replaces *everything*, including the markers, with whitespace.
-  const heredocPattern =
-    /<<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
-  text = text.replace(heredocPattern, (fullMatch) =>
-    " ".repeat(fullMatch.length)
-  );
+  // 3) Blank out heredoc/nowdoc openers
+  text = blankOutHeredocOpeners(text);
 
-  // Blank out heredoc/nowdoc openers (redundant if we remove entire blocks):
-  text = text.replace(/<<<[A-Za-z_][A-Za-z0-9_]*/g, (match) =>
-    " ".repeat(match.length)
-  );
-  text = text.replace(/<<<'[A-Za-z_][A-Za-z0-9_]*'/g, (match) =>
-    " ".repeat(match.length)
-  );
-
-  // Remove PHP regex strings (e.g. '/some<regex>/i')
+  // 4) Remove PHP regex literals (e.g. /foo/i)
   text = removePhpRegexLiterals(text);
+
+  // 5) Remove/blank out any {$variable} so it is not seen as a tag
+  text = removePhpInterpolations(text);
+
+  // 6) Use the new robust outside-quote stripper
+  text = removeOperatorsAndBooleansOutsideQuotes(text);
 
   return text;
 }
@@ -446,14 +570,8 @@ function analyzeAttributes(
     const tagName = match[1];
     const attrText = match[2] ?? "";
 
-    // position *within* this snippet
-    const matchIndexInSnippet = match.index;
-    // absolute position in the real file
-    const matchIndex = offset + matchIndexInSnippet;
-
     // similarly for attribute text
     const attrTextIndexInSnippet = fullTag.indexOf(attrText);
-    const attrTextIndex = offset + match.index + attrTextIndexInSnippet;
 
     // Now do the combinedRegex for each attribute
     const combinedRegex =
@@ -556,30 +674,15 @@ function getTagPairDiagnostics(
 
   const voidElements = new Set(["input", "br", "hr", "img", "meta", "link"]);
   // Regex for matching tag pairs.
-  const tagRegex = new RegExp(
-    String.raw`<(\/?)([A-Za-z][A-Za-z0-9-]*)
-      (?:\s+
-        (?:[A-Za-z_:][A-Za-z0-9_.:-]*  # attribute name
-          (?:\s*=\s*
-            # (A) double-quotes with escapes
-            "(\\.|[^"\\])*"
-            # (B) single-quotes with escapes
-            |'(\\.|[^'\\])*'
-            # (C) unquoted fallback
-            |[^\s>]+
-          )?
-        )
-      )*
-      \s*(\/?)>`,
-    "g"
-  );
+  const tagRegex =
+    /<(\/?)([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?))*\s*(\/?)>/g;
 
   const stack: { tag: string; pos: number }[] = [];
   let match: RegExpExecArray | null;
 
   while ((match = tagRegex.exec(sanitizedText))) {
     const isClosing = match[1] === "/";
-    const tagName = match[2].toLowerCase();
+    const tagName = match[2];
     const selfClosingIndicator = match[3];
     const matchIndex = match.index;
 
