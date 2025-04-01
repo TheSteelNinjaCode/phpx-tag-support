@@ -197,6 +197,55 @@ export function activate(context: vscode.ExtensionContext) {
     "<"
   );
   context.subscriptions.push(completionProvider);
+
+  // Create a decoration type for the curly braces with the desired color.
+  const braceDecorationType = vscode.window.createTextEditorDecorationType({
+    color: "#569CD6",
+  });
+
+  function updateJsVariableDecorations() {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      return;
+    }
+    const text = editor.document.getText();
+    // Updated regex to match any expression inside double curly braces.
+    const regex = /{{\s*(.*?)\s*}}/g;
+    let match;
+    const decorations: vscode.DecorationOptions[] = [];
+
+    while ((match = regex.exec(text)) !== null) {
+      // Calculate positions for the left and right curly braces.
+      const startIndex = match.index;
+      const matchLength = match[0].length;
+
+      // Left braces: from start to start + 2
+      const leftStart = editor.document.positionAt(startIndex);
+      const leftEnd = editor.document.positionAt(startIndex + 2);
+      decorations.push({ range: new vscode.Range(leftStart, leftEnd) });
+
+      // Right braces: from end - 2 to end
+      const rightStart = editor.document.positionAt(
+        startIndex + matchLength - 2
+      );
+      const rightEnd = editor.document.positionAt(startIndex + matchLength);
+      decorations.push({ range: new vscode.Range(rightStart, rightEnd) });
+    }
+
+    // Apply the decoration to the editor.
+    editor.setDecorations(braceDecorationType, decorations);
+  }
+
+  // Update decorations when the active editor or document changes.
+  vscode.window.onDidChangeActiveTextEditor(updateJsVariableDecorations);
+  vscode.workspace.onDidChangeTextDocument((e) => {
+    if (
+      vscode.window.activeTextEditor &&
+      e.document === vscode.window.activeTextEditor.document
+    ) {
+      updateJsVariableDecorations();
+    }
+  });
 }
 
 /**
@@ -825,55 +874,6 @@ function getLastPart(path: string): string {
   const parts = path.split("\\");
   return parts[parts.length - 1];
 }
-
-// Create a decoration type with your desired styling.
-// Create a decoration type for the curly braces with the desired color.
-const braceDecorationType = vscode.window.createTextEditorDecorationType({
-  color: "#569CD6",
-});
-
-function updateJsVariableDecorations() {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor) {
-    return;
-  }
-  const text = editor.document.getText();
-  // Regex to match the pattern: double curly braces with a variable in between.
-  // Adjust the inner pattern if needed.
-  const regex = /{{\s*[\w.]+\s*}}/g;
-  let match;
-  const decorations: vscode.DecorationOptions[] = [];
-
-  while ((match = regex.exec(text)) !== null) {
-    // Calculate positions for the left and right curly braces.
-    const startIndex = match.index;
-    const matchLength = match[0].length;
-
-    // Left braces: from start to start + 2
-    const leftStart = editor.document.positionAt(startIndex);
-    const leftEnd = editor.document.positionAt(startIndex + 2);
-    decorations.push({ range: new vscode.Range(leftStart, leftEnd) });
-
-    // Right braces: from end - 2 to end
-    const rightStart = editor.document.positionAt(startIndex + matchLength - 2);
-    const rightEnd = editor.document.positionAt(startIndex + matchLength);
-    decorations.push({ range: new vscode.Range(rightStart, rightEnd) });
-  }
-
-  // Apply the decoration to the editor.
-  editor.setDecorations(braceDecorationType, decorations);
-}
-
-// Update decorations when the active editor or document changes.
-vscode.window.onDidChangeActiveTextEditor(updateJsVariableDecorations);
-vscode.workspace.onDidChangeTextDocument((e) => {
-  if (
-    vscode.window.activeTextEditor &&
-    e.document === vscode.window.activeTextEditor.document
-  ) {
-    updateJsVariableDecorations();
-  }
-});
 
 // Called when your extension is deactivated
 export function deactivate() {}
