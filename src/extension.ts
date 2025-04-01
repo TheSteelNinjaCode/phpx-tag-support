@@ -527,6 +527,10 @@ function removeOperatorsAndBooleansOutsideQuotes(text: string): string {
   return result;
 }
 
+function removeNormalPhpStrings(text: string): string {
+  return text.replace(/\\(['"])/g, "$1");
+}
+
 /**
  * Sanitizes text for diagnostics by removing inline PHP blocks, comments,
  * blanking out heredoc/nowdoc openers, and also removing PHP regex literal strings.
@@ -550,7 +554,10 @@ function sanitizeForDiagnostics(text: string): string {
   // 5) Remove/blank out any {$variable} so it is not seen as a tag
   text = removePhpInterpolations(text);
 
-  // 6) Use the new robust outside-quote stripper
+  // 6) remove normal quoted strings (top-level)
+  text = removeNormalPhpStrings(text);
+
+  // 7) Use the new robust outside-quote stripper
   text = removeOperatorsAndBooleansOutsideQuotes(text);
 
   return text;
@@ -671,6 +678,7 @@ function getTagPairDiagnostics(
 ): vscode.Diagnostic[] {
   const diagnostics: vscode.Diagnostic[] = [];
   const sanitizedText = sanitizeForDiagnostics(document.getText());
+  console.log("🚀 ~ sanitizedText:", sanitizedText);
 
   const voidElements = new Set(["input", "br", "hr", "img", "meta", "link"]);
   // Regex for matching tag pairs.
@@ -817,6 +825,55 @@ function getLastPart(path: string): string {
   const parts = path.split("\\");
   return parts[parts.length - 1];
 }
+
+// Create a decoration type with your desired styling.
+// Create a decoration type for the curly braces with the desired color.
+const braceDecorationType = vscode.window.createTextEditorDecorationType({
+  color: "#569CD6",
+});
+
+function updateJsVariableDecorations() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    return;
+  }
+  const text = editor.document.getText();
+  // Regex to match the pattern: double curly braces with a variable in between.
+  // Adjust the inner pattern if needed.
+  const regex = /{{\s*[\w.]+\s*}}/g;
+  let match;
+  const decorations: vscode.DecorationOptions[] = [];
+
+  while ((match = regex.exec(text)) !== null) {
+    // Calculate positions for the left and right curly braces.
+    const startIndex = match.index;
+    const matchLength = match[0].length;
+
+    // Left braces: from start to start + 2
+    const leftStart = editor.document.positionAt(startIndex);
+    const leftEnd = editor.document.positionAt(startIndex + 2);
+    decorations.push({ range: new vscode.Range(leftStart, leftEnd) });
+
+    // Right braces: from end - 2 to end
+    const rightStart = editor.document.positionAt(startIndex + matchLength - 2);
+    const rightEnd = editor.document.positionAt(startIndex + matchLength);
+    decorations.push({ range: new vscode.Range(rightStart, rightEnd) });
+  }
+
+  // Apply the decoration to the editor.
+  editor.setDecorations(braceDecorationType, decorations);
+}
+
+// Update decorations when the active editor or document changes.
+vscode.window.onDidChangeActiveTextEditor(updateJsVariableDecorations);
+vscode.workspace.onDidChangeTextDocument((e) => {
+  if (
+    vscode.window.activeTextEditor &&
+    e.document === vscode.window.activeTextEditor.document
+  ) {
+    updateJsVariableDecorations();
+  }
+});
 
 // Called when your extension is deactivated
 export function deactivate() {}
