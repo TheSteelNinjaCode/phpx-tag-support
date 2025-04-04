@@ -31,6 +31,10 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.languages.createDiagnosticCollection("phpx-tags");
   context.subscriptions.push(diagnosticCollection);
 
+  const jsVarDiagnostics =
+    vscode.languages.createDiagnosticCollection("js-vars");
+  context.subscriptions.push(jsVarDiagnostics);
+
   // --- Register hover provider for PHP tags ---
   const hoverProvider = vscode.languages.registerHoverProvider("php", {
     provideHover(document, position) {
@@ -236,14 +240,60 @@ export function activate(context: vscode.ExtensionContext) {
     editor.setDecorations(braceDecorationType, decorations);
   }
 
+  function isValidJsExpression(expr: string): boolean {
+    try {
+      new Function(`return (${expr});`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function validateJsVariablesInCurlyBraces(
+    document: vscode.TextDocument,
+    diagnosticCollection: vscode.DiagnosticCollection
+  ) {
+    const text = document.getText();
+    const regex = /{{\s*(.*?)\s*}}/g;
+    const diagnostics: vscode.Diagnostic[] = [];
+
+    let match: RegExpExecArray | null;
+    const validJsExpr = /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*$/;
+
+    while ((match = regex.exec(text)) !== null) {
+      const expr = match[1].trim();
+      if (!isValidJsExpression(expr)) {
+        const startIndex = match.index + match[0].indexOf(expr);
+        const endIndex = startIndex + expr.length;
+        const startPos = document.positionAt(startIndex);
+        const endPos = document.positionAt(endIndex);
+
+        diagnostics.push(
+          new vscode.Diagnostic(
+            new vscode.Range(startPos, endPos),
+            `⚠️ Invalid JavaScript expression in {{ ... }}.`,
+            vscode.DiagnosticSeverity.Warning
+          )
+        );
+      }
+    }
+
+    diagnosticCollection.set(document.uri, diagnostics);
+  }
+
+  function updateAllValidations(document: vscode.TextDocument) {
+    updateJsVariableDecorations();
+    validateJsVariablesInCurlyBraces(document, jsVarDiagnostics);
+  }
+
   // Update decorations when the active editor or document changes.
-  vscode.window.onDidChangeActiveTextEditor(updateJsVariableDecorations);
-  vscode.workspace.onDidChangeTextDocument((e) => {
-    if (
-      vscode.window.activeTextEditor &&
-      e.document === vscode.window.activeTextEditor.document
-    ) {
-      updateJsVariableDecorations();
+  vscode.workspace.onDidChangeTextDocument((e) =>
+    updateAllValidations(e.document)
+  );
+  vscode.workspace.onDidSaveTextDocument(updateAllValidations);
+  vscode.window.onDidChangeActiveTextEditor((editor) => {
+    if (editor) {
+      updateAllValidations(editor.document);
     }
   });
 }
