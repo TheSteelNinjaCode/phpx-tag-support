@@ -604,7 +604,10 @@ const validateMissingImports = (
   const originalText = document.getText();
   let noCommentsText = removePhpComments(originalText);
   noCommentsText = blankOutHeredocOpeners(noCommentsText);
-  const useMap = parsePhpUseStatements(originalText);
+
+  // Use the sanitized version (without comments) to parse imports.
+  const useMap = parsePhpUseStatements(noCommentsText);
+
   const diagnostics: vscode.Diagnostic[] = [];
   const tagMatches = [...noCommentsText.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g)];
   tagMatches.forEach((match) => {
