@@ -249,10 +249,71 @@ export function activate(context: vscode.ExtensionContext) {
     }
   }
 
+  const nativeFunctionDecorationType =
+    vscode.window.createTextEditorDecorationType({
+      color: "#D16969", // Customize this color as needed.
+      fontWeight: "bold",
+    });
+
+  const nativePropertyDecorationType =
+    vscode.window.createTextEditorDecorationType({
+      color: "#4EC9B0", // Another example color.
+    });
+
+  function updateNativeTokenDecorations() {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== "php") {
+      return;
+    }
+
+    const text = editor.document.getText();
+    const jsExprRegex = /{{\s*(.*?)\s*}}/g;
+    const nativeFuncRegex = /\b(toUpperCase|toLowerCase|trim|split)\b/g;
+    const nativePropRegex = /\b(length|name|prototype)\b/g;
+
+    const funcDecorations: vscode.DecorationOptions[] = [];
+    const propDecorations: vscode.DecorationOptions[] = [];
+
+    let match: RegExpExecArray | null;
+    while ((match = jsExprRegex.exec(text)) !== null) {
+      const expr = match[1]; // Extract the JS expression.
+      // Calculate the start index for the captured expression.
+      const exprStartIndex = match.index + match[0].indexOf(expr);
+
+      // Look for native function names.
+      let funcMatch: RegExpExecArray | null;
+      while ((funcMatch = nativeFuncRegex.exec(expr)) !== null) {
+        const tokenStart = exprStartIndex + funcMatch.index;
+        const tokenEnd = tokenStart + funcMatch[0].length;
+        const startPos = editor.document.positionAt(tokenStart);
+        const endPos = editor.document.positionAt(tokenEnd);
+        funcDecorations.push({ range: new vscode.Range(startPos, endPos) });
+      }
+
+      // Look for native property names.
+      let propMatch: RegExpExecArray | null;
+      while ((propMatch = nativePropRegex.exec(expr)) !== null) {
+        const tokenStart = exprStartIndex + propMatch.index;
+        const tokenEnd = tokenStart + propMatch[0].length;
+        const startPos = editor.document.positionAt(tokenStart);
+        const endPos = editor.document.positionAt(tokenEnd);
+        propDecorations.push({ range: new vscode.Range(startPos, endPos) });
+      }
+    }
+
+    // Apply the decorations to the editor.
+    editor.setDecorations(nativeFunctionDecorationType, funcDecorations);
+    editor.setDecorations(nativePropertyDecorationType, propDecorations);
+  }
+
   function validateJsVariablesInCurlyBraces(
     document: vscode.TextDocument,
     diagnosticCollection: vscode.DiagnosticCollection
   ) {
+    if (document.languageId !== "php") {
+      return; // Only analyze PHP files.
+    }
+
     const text = document.getText();
     const regex = /{{\s*(.*?)\s*}}/g;
     const diagnostics: vscode.Diagnostic[] = [];
@@ -284,6 +345,7 @@ export function activate(context: vscode.ExtensionContext) {
   function updateAllValidations(document: vscode.TextDocument) {
     updateJsVariableDecorations();
     validateJsVariablesInCurlyBraces(document, jsVarDiagnostics);
+    updateNativeTokenDecorations();
   }
 
   // Update decorations when the active editor or document changes.
