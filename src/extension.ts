@@ -81,6 +81,9 @@ const addImportCommand = async (
 export function activate(context: vscode.ExtensionContext) {
   console.log("PHPX tag support is now active!");
 
+  // Load the dynamic components from class-log.json.
+  loadComponentsFromClassLog();
+
   // Force Peek Definition for Go to Definition globally.
   updateEditorConfiguration();
 
@@ -279,7 +282,7 @@ const registerPhpCompletionProvider = () => {
       provideCompletionItems(document, position) {
         const completions: vscode.CompletionItem[] = [];
 
-        // Existing component completions
+        // Existing component completions from use statements.
         const useMap = parsePhpUseStatements(document.getText());
         const line = document.lineAt(position.line);
         const lessThanIndex = line.text.lastIndexOf("<", position.character);
@@ -304,9 +307,8 @@ const registerPhpCompletionProvider = () => {
           completions.push(item);
         }
 
-        // Read additional components from "class-log.json"
-        // (Assume you have a function getComponentsFromClassLog() that returns a Map<string, string>
-        // mapping shortName -> fullyQualifiedName)
+        // Add completions from the class-log.json data.
+        // Inside registerPhpCompletionProvider:
         const componentsMap = getComponentsFromClassLog();
         componentsMap.forEach((fullComponent, shortName) => {
           const compItem = new vscode.CompletionItem(
@@ -314,20 +316,17 @@ const registerPhpCompletionProvider = () => {
             vscode.CompletionItemKind.Class
           );
           compItem.detail = `Component (from class-log)`;
-          // Trigger auto-import when accepted.
           compItem.command = {
             title: "Add import",
             command: ADD_IMPORT_COMMAND,
             arguments: [document, fullComponent],
           };
-          // Set filterText to include variations if needed.
-          compItem.filterText = shortName; // e.g., "Collapsible Collap"
-          // Insert just the short name.
-          compItem.insertText = new vscode.SnippetString(shortName);
+          compItem.filterText = shortName;
+          compItem.insertText = new vscode.SnippetString(`<${shortName}`);
           completions.push(compItem);
         });
 
-        // Add a snippet completion for "phpxclass" template.
+        // Add the snippet completion for "phpxclass" template.
         const snippetCompletion = new vscode.CompletionItem(
           "phpxclass",
           vscode.CompletionItemKind.Snippet
@@ -361,14 +360,13 @@ class \${2:ClassName} extends PHPX
 }
 `
         );
-        // Ensure the snippet appears only when the prefix "phpxclass" is typed.
         snippetCompletion.filterText = "phpxclass";
         completions.push(snippetCompletion);
 
         return completions;
       },
     },
-    "<" // trigger character (this can be adjusted)
+    "<" // Trigger character.
   );
 };
 
@@ -376,13 +374,16 @@ class \${2:ClassName} extends PHPX
  *                     HELPER: READ COMPONENTS FROM CLASS LOG       *
  * ────────────────────────────────────────────────────────────── */
 
-// This helper function demonstrates reading the class-log.json.
-// In a real-world scenario, you’d likely cache this data and update when needed.
-const getComponentsFromClassLog = (): Map<string, string> => {
-  const components = new Map<string, string>();
+// Global cache for components
+let componentsCache = new Map<string, string>();
+
+/**
+ * Asynchronously loads the components from class-log.json and caches them.
+ */
+async function loadComponentsFromClassLog(): Promise<void> {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
-    return components;
+    return;
   }
   const workspaceFolder = workspaceFolders[0];
   const jsonUri = vscode.Uri.joinPath(
@@ -391,21 +392,28 @@ const getComponentsFromClassLog = (): Map<string, string> => {
     "class-log.json"
   );
   try {
-    // Synchronously reading file content is generally not recommended,
-    // but for simplicity you could use a cached or asynchronous approach.
-    const data = vscode.workspace.fs.readFile(jsonUri);
-    // If you wish, use then() to process it asynchronously.
-    // For this sample, assume we have the JSON content.
-    // (Alternatively, maintain a global cache and trigger an update on file change.)
+    const data = await vscode.workspace.fs.readFile(jsonUri);
+    const jsonStr = Buffer.from(data).toString("utf8").trim();
+    if (jsonStr) {
+      const jsonMapping = JSON.parse(jsonStr);
+      // Iterate over each fully qualified component name in the JSON
+      Object.keys(jsonMapping).forEach((fqcn) => {
+        // Use your helper to get the short name (e.g. "Collapsible" from "Lib\\PHPX\\PHPXUI\\Collapsible")
+        const shortName = getLastPart(fqcn);
+        componentsCache.set(shortName, fqcn);
+      });
+    }
   } catch (error) {
     console.error("Error reading class-log.json:", error);
   }
+}
 
-  // Dummy data for demonstration purposes.
-  components.set("Button", "Lib\\PHPX\\Components\\Button");
-  components.set("Card", "Lib\\PHPX\\Components\\Card");
-  return components;
-};
+/**
+ * Returns the cached components map.
+ */
+function getComponentsFromClassLog(): Map<string, string> {
+  return componentsCache;
+}
 
 /* ────────────────────────────────────────────────────────────── *
  *                     DECORATION AND VALIDATION                     *
