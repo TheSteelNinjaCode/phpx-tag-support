@@ -26,8 +26,14 @@ const HEREDOC_PATTERN =
   /<<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
 
 /**
- * Command implementation to add a use import.
- * It receives the active document and the fully qualified class name.
+ * Escapes special regex characters in a string.
+ */
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Modified auto-import command that groups use statements if a group import exists.
  */
 const addImportCommand = async (
   document: vscode.TextDocument,
@@ -35,42 +41,74 @@ const addImportCommand = async (
 ) => {
   const text = document.getText();
 
-  // Don't add the import if it already exists.
+  // If already imported (as a single statement), do nothing.
   if (text.includes(`use ${fullComponent};`)) {
     return;
   }
 
+  // Compute the group prefix and the short component name.
+  const lastSlash = fullComponent.lastIndexOf("\\");
+  const groupPrefix = fullComponent.substring(0, lastSlash);
+  const componentName = fullComponent.substring(lastSlash + 1);
+
+  // Build a regex to match an existing group import like:
+  // use Lib\PHPX\PPIcons\{Eye, Dot};
+  const groupImportRegex = new RegExp(
+    `use\\s+${escapeRegex(groupPrefix)}\\\\\\{([^}]+)\\};`,
+    "m"
+  );
+
   const edit = new vscode.WorkspaceEdit();
-  let insertPosition: vscode.Position;
+  const groupMatch = groupImportRegex.exec(text);
 
-  // Check whether the file starts with a PHP declaration.
-  if (/^\s*<\?php/.test(text)) {
-    // File starts with <?php.
+  if (groupMatch) {
+    // Found an existing group import.
+    // Parse the comma-separated components from inside the braces.
+    let existingComponents = groupMatch[1]
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
 
-    // First, try to locate an existing namespace declaration.
-    const namespaceRegex = /^namespace\s+.+?;/m;
-    const nsMatch = namespaceRegex.exec(text);
+    if (!existingComponents.includes(componentName)) {
+      // Add the new component and (optionally) sort.
+      existingComponents.push(componentName);
+      existingComponents.sort();
 
-    if (nsMatch) {
-      // Insert after the namespace declaration.
-      const nsPosition = document.positionAt(nsMatch.index);
-      insertPosition = new vscode.Position(nsPosition.line + 1, 0);
-    } else {
-      // No namespace found—assume the <?php tag is on the first line.
-      // Insert right after the <?php line.
-      const firstLine = document.lineAt(0);
-      // If the opening tag is on a single line, we insert on the next.
-      insertPosition = new vscode.Position(firstLine.lineNumber + 1, 0);
+      // Update: Remove the extra escape before the closing curly brace.
+      const newGroupImport = `use ${groupPrefix}\\{${existingComponents.join(
+        ", "
+      )}\};`;
+      const startPos = document.positionAt(groupMatch.index);
+      const endPos = document.positionAt(
+        groupMatch.index + groupMatch[0].length
+      );
+      const groupRange = new vscode.Range(startPos, endPos);
+      edit.replace(document.uri, groupRange, newGroupImport + "\n");
     }
-    // Prepare the new use statement.
-    edit.insert(document.uri, insertPosition, `use ${fullComponent};\n`);
   } else {
-    // No PHP block exists: add one at the top.
-    insertPosition = new vscode.Position(0, 0);
-    const newPhpBlock = `<?php\nuse ${fullComponent};\n?>\n\n`;
-    edit.insert(document.uri, insertPosition, newPhpBlock);
-  }
+    // No existing group import found; fall back to a new separate use statement.
+    let insertPosition: vscode.Position;
+    if (/^\s*<\?php/.test(text)) {
+      const namespaceRegex = /^namespace\s+.+?;/m;
+      const nsMatch = namespaceRegex.exec(text);
 
+      if (nsMatch) {
+        // Insert after the namespace declaration.
+        const nsPosition = document.positionAt(nsMatch.index);
+        insertPosition = new vscode.Position(nsPosition.line + 1, 0);
+      } else {
+        // Insert just after the <?php line.
+        const firstLine = document.lineAt(0);
+        insertPosition = new vscode.Position(firstLine.lineNumber + 1, 0);
+      }
+      edit.insert(document.uri, insertPosition, `use ${fullComponent};\n`);
+    } else {
+      // No PHP block exists; insert a new one at the top.
+      insertPosition = new vscode.Position(0, 0);
+      const newPhpBlock = `<?php\nuse ${fullComponent};\n?>\n\n`;
+      edit.insert(document.uri, insertPosition, newPhpBlock);
+    }
+  }
   await vscode.workspace.applyEdit(edit);
 };
 
