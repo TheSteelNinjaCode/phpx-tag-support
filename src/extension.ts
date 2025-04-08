@@ -33,7 +33,8 @@ function escapeRegex(text: string): string {
 }
 
 /**
- * Modified auto-import command that groups use statements if a group import exists.
+ * Modified auto-import command that groups use statements if a group import exists,
+ * or if separate use statements for the same namespace exist.
  */
 const addImportCommand = async (
   document: vscode.TextDocument,
@@ -51,30 +52,25 @@ const addImportCommand = async (
   const groupPrefix = fullComponent.substring(0, lastSlash);
   const componentName = fullComponent.substring(lastSlash + 1);
 
-  // Build a regex to match an existing group import like:
-  // use Lib\PHPX\PPIcons\{Eye, Dot};
+  const edit = new vscode.WorkspaceEdit();
+
+  // Try to match a grouped import (with curly braces) first.
   const groupImportRegex = new RegExp(
     `use\\s+${escapeRegex(groupPrefix)}\\\\\\{([^}]+)\\};`,
     "m"
   );
-
-  const edit = new vscode.WorkspaceEdit();
   const groupMatch = groupImportRegex.exec(text);
 
   if (groupMatch) {
-    // Found an existing group import.
-    // Parse the comma-separated components from inside the braces.
+    // A grouped import already exists.
     let existingComponents = groupMatch[1]
       .split(",")
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
-
     if (!existingComponents.includes(componentName)) {
-      // Add the new component and (optionally) sort.
       existingComponents.push(componentName);
       existingComponents.sort();
-
-      // Update: Remove the extra escape before the closing curly brace.
+      // Note: only escape the opening curly brace; the closing brace stays as is.
       const newGroupImport = `use ${groupPrefix}\\{${existingComponents.join(
         ", "
       )}\};`;
@@ -86,27 +82,58 @@ const addImportCommand = async (
       edit.replace(document.uri, groupRange, newGroupImport + "\n");
     }
   } else {
-    // No existing group import found; fall back to a new separate use statement.
-    let insertPosition: vscode.Position;
-    if (/^\s*<\?php/.test(text)) {
-      const namespaceRegex = /^namespace\s+.+?;/m;
-      const nsMatch = namespaceRegex.exec(text);
-
-      if (nsMatch) {
-        // Insert after the namespace declaration.
-        const nsPosition = document.positionAt(nsMatch.index);
-        insertPosition = new vscode.Position(nsPosition.line + 1, 0);
-      } else {
-        // Insert just after the <?php line.
-        const firstLine = document.lineAt(0);
-        insertPosition = new vscode.Position(firstLine.lineNumber + 1, 0);
+    // Look for separate use statements from the same group.
+    const sepRegex = new RegExp(
+      `use\\s+${escapeRegex(groupPrefix)}\\\\([A-Za-z0-9_]+);`,
+      "gm"
+    );
+    const matchArray: { component: string; index: number; length: number }[] =
+      [];
+    let m;
+    while ((m = sepRegex.exec(text)) !== null) {
+      matchArray.push({
+        component: m[1].trim(),
+        index: m.index,
+        length: m[0].length,
+      });
+    }
+    if (matchArray.length > 0) {
+      // One or more separate use statements exist; replace them with a grouped one.
+      let existingComponents = matchArray.map((x) => x.component);
+      if (!existingComponents.includes(componentName)) {
+        existingComponents.push(componentName);
       }
-      edit.insert(document.uri, insertPosition, `use ${fullComponent};\n`);
+      // Remove duplicates and sort.
+      existingComponents = Array.from(new Set(existingComponents)).sort();
+      const newGroupImport = `use ${groupPrefix}\\{${existingComponents.join(
+        ", "
+      )}\};`;
+      // Determine the range covering all matching separate use statements.
+      const firstMatch = matchArray[0];
+      const lastMatch = matchArray[matchArray.length - 1];
+      const startPos = document.positionAt(firstMatch.index);
+      const endPos = document.positionAt(lastMatch.index + lastMatch.length);
+      const groupRange = new vscode.Range(startPos, endPos);
+      edit.replace(document.uri, groupRange, newGroupImport + "\n");
     } else {
-      // No PHP block exists; insert a new one at the top.
-      insertPosition = new vscode.Position(0, 0);
-      const newPhpBlock = `<?php\nuse ${fullComponent};\n?>\n\n`;
-      edit.insert(document.uri, insertPosition, newPhpBlock);
+      // No existing group or separate imports found; insert a new use statement.
+      let insertPosition: vscode.Position;
+      if (/^\s*<\?php/.test(text)) {
+        const namespaceRegex = /^namespace\s+.+?;/m;
+        const nsMatch = namespaceRegex.exec(text);
+        if (nsMatch) {
+          const nsPosition = document.positionAt(nsMatch.index);
+          insertPosition = new vscode.Position(nsPosition.line + 1, 0);
+        } else {
+          const firstLine = document.lineAt(0);
+          insertPosition = new vscode.Position(firstLine.lineNumber + 1, 0);
+        }
+        edit.insert(document.uri, insertPosition, `use ${fullComponent};\n`);
+      } else {
+        insertPosition = new vscode.Position(0, 0);
+        const newPhpBlock = `<?php\nuse ${fullComponent};\n?>\n\n`;
+        edit.insert(document.uri, insertPosition, newPhpBlock);
+      }
     }
   }
   await vscode.workspace.applyEdit(edit);
