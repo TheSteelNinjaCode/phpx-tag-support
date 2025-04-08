@@ -79,7 +79,8 @@ const addImportCommand = async (
         groupMatch.index + groupMatch[0].length
       );
       const groupRange = new vscode.Range(startPos, endPos);
-      edit.replace(document.uri, groupRange, newGroupImport + "\n");
+      // Removed the extra "\n" appended.
+      edit.replace(document.uri, groupRange, newGroupImport);
     }
   } else {
     // Look for separate use statements from the same group.
@@ -114,7 +115,8 @@ const addImportCommand = async (
       const startPos = document.positionAt(firstMatch.index);
       const endPos = document.positionAt(lastMatch.index + lastMatch.length);
       const groupRange = new vscode.Range(startPos, endPos);
-      edit.replace(document.uri, groupRange, newGroupImport + "\n");
+      // Replace without adding an extra newline.
+      edit.replace(document.uri, groupRange, newGroupImport);
     } else {
       // No existing group or separate imports found; insert a new use statement.
       let insertPosition: vscode.Position;
@@ -128,6 +130,7 @@ const addImportCommand = async (
           const firstLine = document.lineAt(0);
           insertPosition = new vscode.Position(firstLine.lineNumber + 1, 0);
         }
+        // Insert without an extra newline.
         edit.insert(document.uri, insertPosition, `use ${fullComponent};\n`);
       } else {
         insertPosition = new vscode.Position(0, 0);
