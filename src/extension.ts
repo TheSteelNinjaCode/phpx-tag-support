@@ -1,20 +1,120 @@
 import * as vscode from "vscode";
 
+/* ────────────────────────────────────────────────────────────── *
+ *                        INTERFACES & CONSTANTS                    *
+ * ────────────────────────────────────────────────────────────── */
+
 interface HeredocBlock {
   content: string;
   startIndex: number;
 }
 
-/**
- * Activates the PHPX extension.
- * Registers hover and definition providers, plus document change listeners.
- * Forces Ctrl+Click (Go to Definition) to open Peek Definition.
- */
+const PHP_LANGUAGE = "php";
+
+// Colors for decorations
+const BRACE_COLOR = "#569CD6";
+const NATIVE_FUNC_COLOR = "#D16969";
+const NATIVE_PROP_COLOR = "#4EC9B0";
+
+// Regex patterns
+const PHP_TAG_REGEX = /<\/?[A-Z][A-Za-z0-9]*/;
+const JS_EXPR_REGEX = /{{\s*(.*?)\s*}}/g;
+const HEREDOC_PATTERN =
+  /<<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
+
+/* ────────────────────────────────────────────────────────────── *
+ *                       EXTENSION ACTIVATION                       *
+ * ────────────────────────────────────────────────────────────── */
+
 export function activate(context: vscode.ExtensionContext) {
   console.log("PHPX tag support is now active!");
 
-  // Force Peek Definition for Go to Definition
+  // Force Peek Definition for Go to Definition globally.
+  updateEditorConfiguration();
+
+  // Create diagnostic collections.
+  const diagnosticCollection =
+    vscode.languages.createDiagnosticCollection("phpx-tags");
+  const jsVarDiagnostics =
+    vscode.languages.createDiagnosticCollection("js-vars");
+  context.subscriptions.push(diagnosticCollection, jsVarDiagnostics);
+
+  // Register language features for PHP.
+  context.subscriptions.push(
+    registerPhpHoverProvider(),
+    registerPhpDefinitionProvider(),
+    registerPhpCompletionProvider()
+  );
+
+  // Register commands.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "phpx-tag-support.peekTagDefinition",
+      async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+          await vscode.commands.executeCommand("editor.action.peekDefinition");
+        }
+      }
+    ),
+    vscode.commands.registerCommand("phpx-tag-support.hoverProvider", () => {
+      vscode.window.showInformationMessage(
+        "Hello World from phpx-tag-support!"
+      );
+    })
+  );
+
+  // Create decoration types for curly braces and native tokens.
+  const braceDecorationType = vscode.window.createTextEditorDecorationType({
+    color: BRACE_COLOR,
+  });
+  const nativeFunctionDecorationType =
+    vscode.window.createTextEditorDecorationType({
+      color: NATIVE_FUNC_COLOR,
+      fontWeight: "bold",
+    });
+  const nativePropertyDecorationType =
+    vscode.window.createTextEditorDecorationType({
+      color: NATIVE_PROP_COLOR,
+    });
+
+  // Combined update validations function.
+  const updateAllValidations = (document: vscode.TextDocument): void => {
+    updateJsVariableDecorations(document, braceDecorationType);
+    validateJsVariablesInCurlyBraces(document, jsVarDiagnostics);
+    updateNativeTokenDecorations(
+      document,
+      nativeFunctionDecorationType,
+      nativePropertyDecorationType
+    );
+    validateMissingImports(document, diagnosticCollection);
+  };
+
+  // Register event listeners.
+  vscode.workspace.onDidChangeTextDocument(
+    (e) => updateAllValidations(e.document),
+    null,
+    context.subscriptions
+  );
+  vscode.workspace.onDidSaveTextDocument(
+    updateAllValidations,
+    null,
+    context.subscriptions
+  );
+  vscode.window.onDidChangeActiveTextEditor((editor) => {
+    if (editor) {
+      updateAllValidations(editor.document);
+    }
+  });
+}
+
+/* ────────────────────────────────────────────────────────────── *
+ *                    EDITOR CONFIGURATION UPDATE                   *
+ * ────────────────────────────────────────────────────────────── */
+
+const updateEditorConfiguration = (): void => {
   const editorConfig = vscode.workspace.getConfiguration("editor");
+  // Use peek for single and multiple go-to definition actions.
   editorConfig.update(
     "gotoLocation.single",
     "peek",
@@ -25,29 +125,22 @@ export function activate(context: vscode.ExtensionContext) {
     "peek",
     vscode.ConfigurationTarget.Global
   );
+};
 
-  // Collection for diagnostics
-  const diagnosticCollection =
-    vscode.languages.createDiagnosticCollection("phpx-tags");
-  context.subscriptions.push(diagnosticCollection);
+/* ────────────────────────────────────────────────────────────── *
+ *                        LANGUAGE PROVIDERS                        *
+ * ────────────────────────────────────────────────────────────── */
 
-  const jsVarDiagnostics =
-    vscode.languages.createDiagnosticCollection("js-vars");
-  context.subscriptions.push(jsVarDiagnostics);
-
-  // --- Register hover provider for PHP tags ---
-  const hoverProvider = vscode.languages.registerHoverProvider("php", {
+// Hover provider for PHP tags.
+const registerPhpHoverProvider = () => {
+  return vscode.languages.registerHoverProvider(PHP_LANGUAGE, {
     provideHover(document, position) {
-      // Match <Tag or </Tag
-      const range = document.getWordRangeAtPosition(
-        position,
-        /<\/?[A-Z][A-Za-z0-9]*/
-      );
+      const range = document.getWordRangeAtPosition(position, PHP_TAG_REGEX);
       if (!range) {
         return;
       }
-      const word = document.getText(range); // e.g. "<GoogleSearch" or "GoogleSearch"
-      const tagName = word.replace(/[</]/g, ""); // remove '<' or '</'
+      const word = document.getText(range);
+      const tagName = word.replace(/[</]/g, "");
       const useMap = parsePhpUseStatements(document.getText());
       if (useMap.has(tagName)) {
         const fullClass = useMap.get(tagName)!;
@@ -60,115 +153,71 @@ export function activate(context: vscode.ExtensionContext) {
       );
     },
   });
-  context.subscriptions.push(hoverProvider);
+};
 
-  // --- Register definition provider for PHP tags ---
-  const definitionProvider = vscode.languages.registerDefinitionProvider(
-    "php",
-    {
-      async provideDefinition(document, position) {
-        const range = document.getWordRangeAtPosition(
-          position,
-          /<\/?[A-Z][A-Za-z0-9]*/
-        );
-        if (!range) {
-          return;
-        }
-        const word = document.getText(range);
-        const tagName = word.replace(/[</]/g, "");
-        const workspaceFolder = vscode.workspace.getWorkspaceFolder(
-          document.uri
-        );
-        if (!workspaceFolder) {
-          return;
-        }
-        const jsonUri = vscode.Uri.joinPath(
-          workspaceFolder.uri,
-          "settings",
-          "class-log.json"
-        );
-        let mapping: { filePath: string } | undefined;
-        try {
-          const data = await vscode.workspace.fs.readFile(jsonUri);
-          const jsonStr = Buffer.from(data).toString("utf8").trim();
-          if (jsonStr) {
-            const jsonMapping = JSON.parse(jsonStr);
-            for (const fqcn in jsonMapping) {
-              if (getLastPart(fqcn) === tagName) {
-                mapping = jsonMapping[fqcn];
-                break;
-              }
-            }
-          } else {
-            console.error("class-log.json is empty.");
-          }
-        } catch (error) {
-          console.error("Error reading class-log.json:", error);
-        }
-        if (!mapping) {
-          const useMap = parsePhpUseStatements(document.getText());
-          if (!useMap.has(tagName)) {
-            return;
-          }
-          const fullClass = useMap.get(tagName)!;
-          mapping = { filePath: fullClass.replace(/\\\\/g, "/") + ".php" };
-        } else {
-          mapping.filePath = mapping.filePath.replace(/\\/g, "/");
-        }
-        const sourceRoot = vscode.workspace
-          .getConfiguration("phpx-tag-support")
-          .get("sourceRoot", "src");
-        const fullPath = vscode.Uri.file(
-          `${workspaceFolder.uri.fsPath}/${sourceRoot}/${mapping.filePath}`
-        );
-        return new vscode.Location(fullPath, new vscode.Position(0, 0));
-      },
-    }
-  );
-  context.subscriptions.push(definitionProvider);
-
-  // --- Listen for document changes and active editor changes ---
-  const updateDiagnostics = (document: vscode.TextDocument) => {
-    validateMissingImports(document, diagnosticCollection);
-  };
-
-  vscode.workspace.onDidChangeTextDocument((e) =>
-    updateDiagnostics(e.document)
-  );
-  vscode.workspace.onDidSaveTextDocument(updateDiagnostics);
-  vscode.window.onDidChangeActiveTextEditor((editor) => {
-    if (editor) {
-      updateDiagnostics(editor.document);
-    }
-  });
-
-  // --- Optional command to manually trigger Peek Definition ---
-  const peekCommand = vscode.commands.registerCommand(
-    "phpx-tag-support.peekTagDefinition",
-    async () => {
-      const editor = vscode.window.activeTextEditor;
-      if (!editor) {
+// Definition provider for PHP tags.
+const registerPhpDefinitionProvider = () => {
+  return vscode.languages.registerDefinitionProvider(PHP_LANGUAGE, {
+    async provideDefinition(document, position) {
+      const range = document.getWordRangeAtPosition(position, PHP_TAG_REGEX);
+      if (!range) {
         return;
       }
-      await vscode.commands.executeCommand("editor.action.peekDefinition");
-    }
-  );
-  context.subscriptions.push(peekCommand);
-
-  // --- Example "hoverProvider" command from package.json ---
-  const disposable = vscode.commands.registerCommand(
-    "phpx-tag-support.hoverProvider",
-    () => {
-      vscode.window.showInformationMessage(
-        "Hello World from phpx-tag-support!"
+      const word = document.getText(range);
+      const tagName = word.replace(/[</]/g, "");
+      const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+      if (!workspaceFolder) {
+        return;
+      }
+      const jsonUri = vscode.Uri.joinPath(
+        workspaceFolder.uri,
+        "settings",
+        "class-log.json"
       );
-    }
-  );
-  context.subscriptions.push(disposable);
 
-  // Register a completion provider for PHP files that triggers on '<'
-  const completionProvider = vscode.languages.registerCompletionItemProvider(
-    "php",
+      let mapping: { filePath: string } | undefined;
+      try {
+        const data = await vscode.workspace.fs.readFile(jsonUri);
+        const jsonStr = Buffer.from(data).toString("utf8").trim();
+        if (jsonStr) {
+          const jsonMapping = JSON.parse(jsonStr);
+          for (const fqcn in jsonMapping) {
+            if (getLastPart(fqcn) === tagName) {
+              mapping = jsonMapping[fqcn];
+              break;
+            }
+          }
+        } else {
+          console.error("class-log.json is empty.");
+        }
+      } catch (error) {
+        console.error("Error reading class-log.json:", error);
+      }
+      if (!mapping) {
+        const useMap = parsePhpUseStatements(document.getText());
+        if (!useMap.has(tagName)) {
+          return;
+        }
+        const fullClass = useMap.get(tagName)!;
+        mapping = { filePath: fullClass.replace(/\\\\/g, "/") + ".php" };
+      } else {
+        mapping.filePath = mapping.filePath.replace(/\\/g, "/");
+      }
+      const sourceRoot = vscode.workspace
+        .getConfiguration("phpx-tag-support")
+        .get("sourceRoot", "src");
+      const fullPath = vscode.Uri.file(
+        `${workspaceFolder.uri.fsPath}/${sourceRoot}/${mapping.filePath}`
+      );
+      return new vscode.Location(fullPath, new vscode.Position(0, 0));
+    },
+  });
+};
+
+// Completion provider for PHP tags.
+const registerPhpCompletionProvider = () => {
+  return vscode.languages.registerCompletionItemProvider(
+    PHP_LANGUAGE,
     {
       provideCompletionItems(document, position) {
         const useMap = parsePhpUseStatements(document.getText());
@@ -200,273 +249,149 @@ export function activate(context: vscode.ExtensionContext) {
     },
     "<"
   );
-  context.subscriptions.push(completionProvider);
+};
 
-  // Create a decoration type for the curly braces with the desired color.
-  const braceDecorationType = vscode.window.createTextEditorDecorationType({
-    color: "#569CD6",
-  });
+/* ────────────────────────────────────────────────────────────── *
+ *                     DECORATION AND VALIDATION                     *
+ * ────────────────────────────────────────────────────────────── */
 
-  function updateJsVariableDecorations() {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) {
-      return;
-    }
-    const text = editor.document.getText();
-    // Updated regex to match any expression inside double curly braces.
-    const regex = /{{\s*(.*?)\s*}}/g;
-    let match;
-    const decorations: vscode.DecorationOptions[] = [];
-
-    while ((match = regex.exec(text)) !== null) {
-      // Calculate positions for the left and right curly braces.
-      const startIndex = match.index;
-      const matchLength = match[0].length;
-
-      // Left braces: from start to start + 2
-      const leftStart = editor.document.positionAt(startIndex);
-      const leftEnd = editor.document.positionAt(startIndex + 2);
-      decorations.push({ range: new vscode.Range(leftStart, leftEnd) });
-
-      // Right braces: from end - 2 to end
-      const rightStart = editor.document.positionAt(
-        startIndex + matchLength - 2
-      );
-      const rightEnd = editor.document.positionAt(startIndex + matchLength);
-      decorations.push({ range: new vscode.Range(rightStart, rightEnd) });
-    }
-
-    // Apply the decoration to the editor.
-    editor.setDecorations(braceDecorationType, decorations);
-  }
-
-  function isValidJsExpression(expr: string): boolean {
-    try {
-      new Function(`return (${expr});`);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  const nativeFunctionDecorationType =
-    vscode.window.createTextEditorDecorationType({
-      color: "#D16969", // Customize this color as needed.
-      fontWeight: "bold",
-    });
-
-  const nativePropertyDecorationType =
-    vscode.window.createTextEditorDecorationType({
-      color: "#4EC9B0", // Another example color.
-    });
-
-  function updateNativeTokenDecorations() {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.document.languageId !== "php") {
-      return;
-    }
-
-    const text = editor.document.getText();
-    const jsExprRegex = /{{\s*(.*?)\s*}}/g;
-    const nativeFuncRegex = /\b(toUpperCase|toLowerCase|trim|split)\b/g;
-    const nativePropRegex = /\b(length|name|prototype)\b/g;
-
-    const funcDecorations: vscode.DecorationOptions[] = [];
-    const propDecorations: vscode.DecorationOptions[] = [];
-
-    let match: RegExpExecArray | null;
-    while ((match = jsExprRegex.exec(text)) !== null) {
-      const expr = match[1]; // Extract the JS expression.
-      // Calculate the start index for the captured expression.
-      const exprStartIndex = match.index + match[0].indexOf(expr);
-
-      // Look for native function names.
-      let funcMatch: RegExpExecArray | null;
-      while ((funcMatch = nativeFuncRegex.exec(expr)) !== null) {
-        const tokenStart = exprStartIndex + funcMatch.index;
-        const tokenEnd = tokenStart + funcMatch[0].length;
-        const startPos = editor.document.positionAt(tokenStart);
-        const endPos = editor.document.positionAt(tokenEnd);
-        funcDecorations.push({ range: new vscode.Range(startPos, endPos) });
-      }
-
-      // Look for native property names.
-      let propMatch: RegExpExecArray | null;
-      while ((propMatch = nativePropRegex.exec(expr)) !== null) {
-        const tokenStart = exprStartIndex + propMatch.index;
-        const tokenEnd = tokenStart + propMatch[0].length;
-        const startPos = editor.document.positionAt(tokenStart);
-        const endPos = editor.document.positionAt(tokenEnd);
-        propDecorations.push({ range: new vscode.Range(startPos, endPos) });
-      }
-    }
-
-    // Apply the decorations to the editor.
-    editor.setDecorations(nativeFunctionDecorationType, funcDecorations);
-    editor.setDecorations(nativePropertyDecorationType, propDecorations);
-  }
-
-  function validateJsVariablesInCurlyBraces(
-    document: vscode.TextDocument,
-    diagnosticCollection: vscode.DiagnosticCollection
-  ) {
-    if (document.languageId !== "php") {
-      return; // Only analyze PHP files.
-    }
-
-    const text = document.getText();
-    const regex = /{{\s*(.*?)\s*}}/g;
-    const diagnostics: vscode.Diagnostic[] = [];
-
-    let match: RegExpExecArray | null;
-    const validJsExpr = /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*$/;
-
-    while ((match = regex.exec(text)) !== null) {
-      const expr = match[1].trim();
-      if (!isValidJsExpression(expr)) {
-        const startIndex = match.index + match[0].indexOf(expr);
-        const endIndex = startIndex + expr.length;
-        const startPos = document.positionAt(startIndex);
-        const endPos = document.positionAt(endIndex);
-
-        diagnostics.push(
-          new vscode.Diagnostic(
-            new vscode.Range(startPos, endPos),
-            `⚠️ Invalid JavaScript expression in {{ ... }}.`,
-            vscode.DiagnosticSeverity.Warning
-          )
-        );
-      }
-    }
-
-    diagnosticCollection.set(document.uri, diagnostics);
-  }
-
-  function updateAllValidations(document: vscode.TextDocument) {
-    updateJsVariableDecorations();
-    validateJsVariablesInCurlyBraces(document, jsVarDiagnostics);
-    updateNativeTokenDecorations();
-  }
-
-  // Update decorations when the active editor or document changes.
-  vscode.workspace.onDidChangeTextDocument((e) =>
-    updateAllValidations(e.document)
-  );
-  vscode.workspace.onDidSaveTextDocument(updateAllValidations);
-  vscode.window.onDidChangeActiveTextEditor((editor) => {
-    if (editor) {
-      updateAllValidations(editor.document);
-    }
-  });
-}
-
-/**
- * Captures any heredoc or nowdoc blocks of the form:
- *    <<<LABEL
- *    ... content ...
- *    LABEL;
- *
- *    <<<'LABEL'
- *    ... content ...
- *    LABEL;
- *
- * Then returns an array of { content, startIndex }.
- * The startIndex is where the *actual* content begins, so you can map tags to correct positions.
- */
-function extractAllHeredocBlocks(text: string): HeredocBlock[] {
-  const blocks: HeredocBlock[] = [];
-  // Matches:
-  //    <<<LABEL
-  //    (content)
-  //    LABEL;
-  //
-  // or  <<<'LABEL'
-  //    (content)
-  //    LABEL;
-  //
-  // Group 1: optional quote
-  // Group 2: label (the identifier)
-  // Group 3: the body
-  const pattern =
-    /<<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
-
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(text))) {
-    const [, , , blockContent] = match;
-    // The blockContent starts at pattern.lastIndex minus the length of blockContent plus the newline.
-    // However, simpler is to say: start of content is match.index + offset to the group(3).
-    // We'll do a quick calculation:
-    const fullMatchIndex = match.index; // Where the `<<<LABEL` begins
-    const opener = match[0]; // Full matched text: `<<<LABEL\n...\nLABEL;`
-    // We can find where group(3) starts by measuring lengths:
-    const group3Start = match.index + match[0].indexOf(blockContent);
-
-    blocks.push({
-      content: blockContent,
-      startIndex: group3Start,
-    });
-  }
-  return blocks;
-}
-
-/**
- * Replaces heredoc/nowdoc openers like `<<<EOD`, `<<< EOD`, `<<<'EOD'`, etc.
- * with spaces so they aren't detected as <EOD> tags.
- */
-function blankOutHeredocOpeners(text: string): string {
-  // Notice the `\s*` after `<<<`.
-  return text.replace(/<<<\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?/g, (match) =>
-    " ".repeat(match.length)
-  );
-}
-
-function removePhpComments(text: string): string {
-  let result = text;
-
-  // Remove // single-line comments
-  result = result.replace(/(^|[^:])\/\/[^\r\n]*/g, (match, prefix) => {
-    // keep prefix, blank out rest
-    return prefix + " ".repeat(match.length - prefix.length);
-  });
-
-  // Remove /* ... */ multi-line comments
-  result = result.replace(/\/\*[\s\S]*?\*\//g, (comment) =>
-    " ".repeat(comment.length)
-  );
-
-  return result;
-}
-
-/**
- * Use this new function in your diagnostics.
- */
-function validateMissingImports(
+// Update curly brace decorations within JS expressions.
+const updateJsVariableDecorations = (
   document: vscode.TextDocument,
-  diagnosticCollection: vscode.DiagnosticCollection
-) {
-  if (document.languageId !== "php") {
+  decorationType: vscode.TextEditorDecorationType
+): void => {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
     return;
   }
 
+  const text = document.getText();
+  const decorations: vscode.DecorationOptions[] = [];
+
+  let match: RegExpExecArray | null;
+  while ((match = JS_EXPR_REGEX.exec(text)) !== null) {
+    const startIndex = match.index;
+    const matchLength = match[0].length;
+
+    // Left curly braces: first two characters.
+    const leftStart = document.positionAt(startIndex);
+    const leftEnd = document.positionAt(startIndex + 2);
+    decorations.push({ range: new vscode.Range(leftStart, leftEnd) });
+
+    // Right curly braces: last two characters.
+    const rightStart = document.positionAt(startIndex + matchLength - 2);
+    const rightEnd = document.positionAt(startIndex + matchLength);
+    decorations.push({ range: new vscode.Range(rightStart, rightEnd) });
+  }
+  editor.setDecorations(decorationType, decorations);
+};
+
+// Validate JS expressions within double curly braces.
+const isValidJsExpression = (expr: string): boolean => {
+  try {
+    new Function(`return (${expr});`);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const validateJsVariablesInCurlyBraces = (
+  document: vscode.TextDocument,
+  diagnosticCollection: vscode.DiagnosticCollection
+): void => {
+  if (document.languageId !== PHP_LANGUAGE) {
+    return; // Only run for PHP files.
+  }
+  const text = document.getText();
+  const diagnostics: vscode.Diagnostic[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = JS_EXPR_REGEX.exec(text)) !== null) {
+    const expr = match[1].trim();
+    if (!isValidJsExpression(expr)) {
+      const startIndex = match.index + match[0].indexOf(expr);
+      const endIndex = startIndex + expr.length;
+      const startPos = document.positionAt(startIndex);
+      const endPos = document.positionAt(endIndex);
+      diagnostics.push(
+        new vscode.Diagnostic(
+          new vscode.Range(startPos, endPos),
+          `⚠️ Invalid JavaScript expression in {{ ... }}.`,
+          vscode.DiagnosticSeverity.Warning
+        )
+      );
+    }
+  }
+  diagnosticCollection.set(document.uri, diagnostics);
+};
+
+// Highlight native JS functions and properties within curly braces.
+const updateNativeTokenDecorations = (
+  document: vscode.TextDocument,
+  funcDecoType: vscode.TextEditorDecorationType,
+  propDecoType: vscode.TextEditorDecorationType
+): void => {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || document.languageId !== PHP_LANGUAGE) {
+    return;
+  }
+  const text = document.getText();
+  const funcDecorations: vscode.DecorationOptions[] = [];
+  const propDecorations: vscode.DecorationOptions[] = [];
+
+  // Regex for matching inside curly brace JS expressions.
+  const nativeFuncRegex = /\b(toUpperCase|toLowerCase|trim|split)\b/g;
+  const nativePropRegex = /\b(length|name|prototype)\b/g;
+
+  let exprMatch: RegExpExecArray | null;
+  while ((exprMatch = JS_EXPR_REGEX.exec(text)) !== null) {
+    const jsExpr = exprMatch[1];
+    const exprStartIndex = exprMatch.index + exprMatch[0].indexOf(jsExpr);
+
+    let funcMatch: RegExpExecArray | null;
+    while ((funcMatch = nativeFuncRegex.exec(jsExpr)) !== null) {
+      const tokenStart = exprStartIndex + funcMatch.index;
+      const tokenEnd = tokenStart + funcMatch[0].length;
+      const startPos = document.positionAt(tokenStart);
+      const endPos = document.positionAt(tokenEnd);
+      funcDecorations.push({ range: new vscode.Range(startPos, endPos) });
+    }
+    let propMatch: RegExpExecArray | null;
+    while ((propMatch = nativePropRegex.exec(jsExpr)) !== null) {
+      const tokenStart = exprStartIndex + propMatch.index;
+      const tokenEnd = tokenStart + propMatch[0].length;
+      const startPos = document.positionAt(tokenStart);
+      const endPos = document.positionAt(tokenEnd);
+      propDecorations.push({ range: new vscode.Range(startPos, endPos) });
+    }
+  }
+  editor.setDecorations(funcDecoType, funcDecorations);
+  editor.setDecorations(propDecoType, propDecorations);
+};
+
+/* ────────────────────────────────────────────────────────────── *
+ *                      PHP DIAGNOSTIC FUNCTIONS                    *
+ * ────────────────────────────────────────────────────────────── */
+
+const validateMissingImports = (
+  document: vscode.TextDocument,
+  diagnosticCollection: vscode.DiagnosticCollection
+): void => {
+  if (document.languageId !== PHP_LANGUAGE) {
+    return;
+  }
   const originalText = document.getText();
-
-  // 1) Remove PHP comments so that `<Something>` inside comments is ignored
   let noCommentsText = removePhpComments(originalText);
-
-  // 2) Blank out `<<<LABEL` openers in that text to avoid seeing them as <LABEL> tags
   noCommentsText = blankOutHeredocOpeners(noCommentsText);
 
-  // 3) Build shortName → fullClass map
   const useMap = parsePhpUseStatements(originalText);
-  let diagnostics: vscode.Diagnostic[] = [];
+  const diagnostics: vscode.Diagnostic[] = [];
 
-  // 4) Find <Tag> in "normal" code (excluding heredoc openers, excluding comments)
+  // Validate main code for missing imports.
   const tagMatches = [...noCommentsText.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g)];
-  for (const match of tagMatches) {
+  tagMatches.forEach((match) => {
     const tag = match[1];
-    // If not imported, issue a warning
     if (!useMap.has(tag)) {
-      // match.index + 1 because `<Tag` -> the Tag starts at +1 offset
       const start = document.positionAt((match.index ?? 0) + 1);
       const range = new vscode.Range(start, start.translate(0, tag.length));
       diagnostics.push(
@@ -477,21 +402,16 @@ function validateMissingImports(
         )
       );
     }
-  }
+  });
 
-  // 5) Parse tags inside each heredoc block
+  // Validate heredoc blocks.
   const heredocBlocks = extractAllHeredocBlocks(originalText);
-
-  for (const block of heredocBlocks) {
-    // FIRST blank out any nested `<<<EOD` openers inside the block content:
-    let blockContent = block.content;
-    blockContent = blankOutHeredocOpeners(blockContent);
-
-    // THEN scan for <Tag>
+  heredocBlocks.forEach((block) => {
+    let blockContent = blankOutHeredocOpeners(block.content);
     const blockTagMatches = [
       ...blockContent.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g),
     ];
-    for (const match of blockTagMatches) {
+    blockTagMatches.forEach((match) => {
       const tag = match[1];
       if (!useMap.has(tag)) {
         const absoluteIndex = block.startIndex + (match.index ?? 0) + 1;
@@ -508,101 +428,98 @@ function validateMissingImports(
           )
         );
       }
-    }
-  }
+    });
+  });
 
-  // 6) Optionally run extra validations if "prisma-php.json" is found
+  // Optionally run extra validations if "prisma-php.json" is found.
   vscode.workspace.findFiles("prisma-php.json", null, 1).then((files) => {
     if (files.length > 0) {
-      diagnostics = diagnostics.concat(getXmlAttributeDiagnostics(document));
-      diagnostics = diagnostics.concat(getTagPairDiagnostics(document));
+      const xmlDiagnostics = getXmlAttributeDiagnostics(document).concat(
+        getTagPairDiagnostics(document)
+      );
+      diagnostics.push(...xmlDiagnostics);
     }
     diagnosticCollection.set(document.uri, diagnostics);
   });
-}
+};
 
-/**
- * Detect and remove (blank out) PHP regex strings of the form
- * '/.../[a-z]*' or "/.../[a-z]*" to prevent them from being scanned as tags.
- *
- * This is a naive implementation assuming your regex literals:
- *   - Start with a single or double quote
- *   - Followed immediately by a forward slash
- *   - Contain zero or more characters (non-greedy) until the next slash
- *   - Possibly end with one or more flags (like `i`, `m`, `s`, etc.)
- *   - End with the same quote character you started with
- */
-function removePhpRegexLiterals(text: string): string {
-  // Explanation of the regex:
-  // (['"])       => capture a single or double quote in group #1
-  // \/           => a literal slash
-  // .*?          => any characters (non-greedy) until the next slash
-  // \/[a-z]*     => a slash followed by zero or more letters (flags)
-  // \1           => match the same quote character as captured in group #1
+/* ────────────────────────────────────────────────────────────── *
+ *                       PHP SANITIZATION UTILS                     *
+ * ────────────────────────────────────────────────────────────── */
+
+const extractAllHeredocBlocks = (text: string): HeredocBlock[] => {
+  const blocks: HeredocBlock[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = HEREDOC_PATTERN.exec(text)) !== null) {
+    const blockContent = match[3];
+    const group3Start = match.index + match[0].indexOf(blockContent);
+    blocks.push({ content: blockContent, startIndex: group3Start });
+  }
+  return blocks;
+};
+
+const blankOutHeredocOpeners = (text: string): string =>
+  text.replace(/<<<\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?/g, (match) =>
+    " ".repeat(match.length)
+  );
+
+const removePhpComments = (text: string): string => {
+  let result = text;
+  // Remove single-line comments.
+  result = result.replace(
+    /(^|[^:])\/\/[^\r\n]*/g,
+    (match, prefix) =>
+      prefix + " ".repeat(match.length - (prefix ? prefix.length : 0))
+  );
+  // Remove multi-line comments.
+  result = result.replace(/\/\*[\s\S]*?\*\//g, (comment) =>
+    " ".repeat(comment.length)
+  );
+  return result;
+};
+
+const removePhpRegexLiterals = (text: string): string => {
   const pattern = /(['"])\/.*?\/[a-z]*\1/gi;
   return text.replace(pattern, (match) => " ".repeat(match.length));
-}
+};
 
-/**
- * Replaces both "{$variable}" and "$variable" occurrences with spaces
- * so that they won't be mistaken for tags by the regex parser.
- */
-function removePhpInterpolations(text: string): string {
-  // Pattern explanation:
-  //   \{\$[^}]+\}  ->  matches things like {$attributes}, {$foo}, etc.
-  //   |            ->  OR
-  //   \$[A-Za-z_]\w*
-  //         ->  matches $foo, $bar, $someVar123, etc. (basic case)
-  return text.replace(/\{\$[^}]+\}|\$[A-Za-z_]\w*/g, (match) => {
-    return " ".repeat(match.length);
-  });
-}
+const removePhpInterpolations = (text: string): string =>
+  text.replace(/\{\$[^}]+\}|\$[A-Za-z_]\w*/g, (match) =>
+    " ".repeat(match.length)
+  );
 
-/**
- * Removes certain PHP keywords/operators (false, true, null, ? :, =>, ->, !==, ===)
- * *outside* of quoted strings. This prevents them from appearing as HTML attributes
- * if they're near `<svg>` or any other tag.
- */
-function removeOperatorsAndBooleansOutsideQuotes(text: string): string {
+const removeOperatorsAndBooleansOutsideQuotes = (text: string): string => {
   let result = "";
   let inString = false;
   let quoteChar = "";
   let i = 0;
 
-  // Helper to see if the next chunk of text matches a token
-  function startsWithToken(token: string): boolean {
-    return text.slice(i, i + token.length) === token;
-  }
+  const startsWithToken = (token: string): boolean =>
+    text.slice(i, i + token.length) === token;
 
   while (i < text.length) {
     const ch = text[i];
-
     if (!inString) {
-      // We are outside of any string. Check for known tokens:
-      // (1) false | true | null
-      // (2) !== | === | -> | =>
-      // (3) ? : (with optional spaces)
-      if (startsWithToken("false")) {
-        // Make sure the next char isn't a letter/digit so we don't clobber "falsely".
-        if (!/[A-Za-z0-9_]/.test(text[i + 5] || "")) {
-          result += "     "; // 5 letters
-          i += 5;
-          continue;
-        }
-      } else if (startsWithToken("true")) {
-        if (!/[A-Za-z0-9_]/.test(text[i + 4] || "")) {
-          result += "    "; // 4 letters
-          i += 4;
-          continue;
-        }
-      } else if (startsWithToken("null")) {
-        if (!/[A-Za-z0-9_]/.test(text[i + 4] || "")) {
-          result += "    "; // 4 letters
-          i += 4;
-          continue;
-        }
+      if (startsWithToken("false") && !/[A-Za-z0-9_]/.test(text[i + 5] || "")) {
+        result += "     ";
+        i += 5;
+        continue;
+      } else if (
+        startsWithToken("true") &&
+        !/[A-Za-z0-9_]/.test(text[i + 4] || "")
+      ) {
+        result += "    ";
+        i += 4;
+        continue;
+      } else if (
+        startsWithToken("null") &&
+        !/[A-Za-z0-9_]/.test(text[i + 4] || "")
+      ) {
+        result += "    ";
+        i += 4;
+        continue;
       } else if (startsWithToken("!==")) {
-        result += "   "; // 3 chars
+        result += "   ";
         i += 3;
         continue;
       } else if (startsWithToken("===")) {
@@ -618,150 +535,99 @@ function removeOperatorsAndBooleansOutsideQuotes(text: string): string {
         i += 2;
         continue;
       } else if (ch === "?") {
-        // We found a "?" outside quotes. Now we'll see if there's a ":" outside quotes
-        // that matches this question mark (i.e. it's a ternary operator).
-        let questionPos = i;
+        const questionPos = i;
         let localInString = false;
         let localQuote = "";
         let foundColon = -1;
-
-        // We start scanning from the next character after '?'
         let j = i + 1;
-
-        // We'll parse until we either find a colon ':' outside quotes OR hit the end of text.
         while (j < text.length) {
           const c2 = text[j];
           if (!localInString) {
-            // Are we starting a quoted string inside the ternary chunk?
             if (c2 === "'" || c2 === '"') {
               localInString = true;
               localQuote = c2;
             } else if (c2 === ":") {
-              // Found the matching colon outside of any nested quotes
               foundColon = j;
               break;
             }
-          } else {
-            // We are inside a local string, so we only exit if we see the matching close-quote
-            if (c2 === localQuote) {
-              localInString = false;
-              localQuote = "";
-            }
+          } else if (c2 === localQuote) {
+            localInString = false;
           }
           j++;
         }
-
         if (foundColon !== -1) {
-          // We found a real ternary "? ... :". Remove everything from
-          // the question mark up to and including the colon:
           const length = foundColon - questionPos + 1;
           result += " ".repeat(length);
-          i = foundColon + 1; // jump past the colon
+          i = foundColon + 1;
           continue;
         } else {
-          // No colon was found outside quotes. Treat this "?" as just a single char to blank out
           result += " ";
           i++;
           continue;
         }
       }
-
-      // Not a removable token, so check if we’re starting a quote
       if (ch === "'" || ch === '"') {
         inString = true;
         quoteChar = ch;
-        result += ch;
-      } else {
-        result += ch;
       }
+      result += ch;
     } else {
-      // We are inside a quoted string—copy verbatim
       result += ch;
       if (ch === quoteChar) {
         inString = false;
       }
     }
-
     i++;
   }
-
   return result;
-}
+};
 
-function removeNormalPhpStrings(text: string): string {
-  return text.replace(/\\(['"])/g, "$1");
-}
+const removeNormalPhpStrings = (text: string): string =>
+  text.replace(/\\(['"])/g, "$1");
 
-/**
- * Sanitizes text for diagnostics by removing inline PHP blocks, comments,
- * blanking out heredoc/nowdoc openers, and also removing PHP regex literal strings.
- * This helps ensure our <tag> scanning won't be fooled by things in comments or regexes.
- */
-function sanitizeForDiagnostics(text: string): string {
-  // 1) Remove inline PHP blocks like <?php ... ?> or <?= ... ?>
+const sanitizeForDiagnostics = (text: string): string => {
   text = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (block) =>
     " ".repeat(block.length)
   );
-
-  // 2) Remove single-line comments (but skip those with ://)
   text = removePhpComments(text);
-
-  // 3) Blank out heredoc/nowdoc openers
   text = blankOutHeredocOpeners(text);
-
-  // 4) Remove PHP regex literals (e.g. /foo/i)
   text = removePhpRegexLiterals(text);
-
-  // 5) Remove/blank out any {$variable} so it is not seen as a tag
   text = removePhpInterpolations(text);
-
-  // 6) remove normal quoted strings (top-level)
   text = removeNormalPhpStrings(text);
-
-  // 7) Use the new robust outside-quote stripper
   text = removeOperatorsAndBooleansOutsideQuotes(text);
-
   return text;
-}
+};
 
-function analyzeAttributes(
+/* ────────────────────────────────────────────────────────────── *
+ *                    XML & TAG PAIR DIAGNOSTICS                    *
+ * ────────────────────────────────────────────────────────────── */
+
+const analyzeAttributes = (
   code: string,
   offset: number,
   document: vscode.TextDocument
-): vscode.Diagnostic[] {
+): vscode.Diagnostic[] => {
   const diagnostics: vscode.Diagnostic[] = [];
   const tagRegex = /<(\w+)((?:"[^"]*"|'[^']*'|[^>"'])*)\/?>/g;
-
   let match: RegExpExecArray | null;
-  while ((match = tagRegex.exec(code))) {
+
+  while ((match = tagRegex.exec(code)) !== null) {
     const fullTag = match[0];
     const tagName = match[1];
-    const attrText = match[2] ?? "";
-
-    // similarly for attribute text
+    const attrText = match[2] || "";
     const attrTextIndexInSnippet = fullTag.indexOf(attrText);
-
-    // Now do the combinedRegex for each attribute
     const combinedRegex =
       /([A-Za-z_:][A-Za-z0-9_.:\-]*)(\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?|\{\$[^}]+\}|\$+\w+/g;
-
     let attrMatch: RegExpExecArray | null;
-    while ((attrMatch = combinedRegex.exec(attrText))) {
+    while ((attrMatch = combinedRegex.exec(attrText)) !== null) {
       const attrName = attrMatch[1];
       const attrAssignment = attrMatch[2];
-
-      // If the attribute is missing a value, we create a Diagnostic
       if (attrName && !attrAssignment) {
-        // position in snippet:
         const startIndexInSnippet =
           attrTextIndexInSnippet + (attrMatch.index ?? 0);
-        // absolute position in real file
         const startIndex = offset + match.index + startIndexInSnippet;
-
-        // Build the range
         const startPos = document.positionAt(startIndex);
         const endPos = document.positionAt(startIndex + attrName.length);
-
         diagnostics.push(
           new vscode.Diagnostic(
             new vscode.Range(startPos, endPos),
@@ -773,83 +639,40 @@ function analyzeAttributes(
     }
   }
   return diagnostics;
-}
+};
 
-/**
- * Returns diagnostics for XML attributes without an explicit value.
- * Uses the sanitized text to avoid false positives from PHP blocks, comments, or heredoc openers.
- */
-function getXmlAttributeDiagnostics(
+const getXmlAttributeDiagnostics = (
   document: vscode.TextDocument
-): vscode.Diagnostic[] {
+): vscode.Diagnostic[] => {
   const originalText = document.getText();
   let diagnostics: vscode.Diagnostic[] = [];
-
-  //
-  // (A) Analyze main code outside heredocs
-  //
-  // 1) Create a copy of text where the *heredoc bodies* are removed,
-  //    but everything else is sanitized. That way your main HTML/JSX
-  //    code is cleanly analyzed.
-  //
-  //    – This is what sanitizeForDiagnostics() already does.
-  //    – But do NOT remove the entire heredoc block from the originalText here.
-  //      Just remove them in the sanitized copy used for "main" analysis.
-  //
   const sanitizedMain = sanitizeForDiagnostics(originalText);
+  diagnostics.push(...analyzeAttributes(sanitizedMain, 0, document));
 
-  // 2) Run your existing “find tags + check attributes” logic on `sanitizedMain`.
-  //    That code sees no heredoc content, which is good.
-  const mainDiagnostics = analyzeAttributes(sanitizedMain, 0, document);
-  diagnostics.push(...mainDiagnostics);
-
-  //
-  // (B) Analyze each heredoc block *as if* it’s separate HTML
-  //
   const heredocBlocks = extractAllHeredocBlocks(originalText);
-
-  for (const block of heredocBlocks) {
-    // 1) Make a sanitized copy of just that heredoc’s content
-    let blockContent = block.content;
-    // Optionally remove nested comments, remove nested heredoc openers, etc.
-    blockContent = removePhpComments(blockContent);
+  heredocBlocks.forEach((block) => {
+    let blockContent = removePhpComments(block.content);
     blockContent = blankOutHeredocOpeners(blockContent);
     blockContent = removePhpRegexLiterals(blockContent);
-
-    // 2) Analyze the block as if it’s standalone HTML
-    //    But we must shift *all positions* by block.startIndex
-    //    so that your diagnostics point to correct lines in the original doc.
-    const blockDiagnostics = analyzeAttributes(
-      blockContent,
-      block.startIndex,
-      document
+    diagnostics.push(
+      ...analyzeAttributes(blockContent, block.startIndex, document)
     );
-    diagnostics.push(...blockDiagnostics);
-  }
-
+  });
   return diagnostics;
-}
+};
 
-/**
- * Returns diagnostics for mismatched or unclosed tag pairs.
- * Also uses the sanitized text to prevent misinterpreting PHP blocks or heredoc content as tags.
- */
-function getTagPairDiagnostics(
+const getTagPairDiagnostics = (
   document: vscode.TextDocument
-): vscode.Diagnostic[] {
+): vscode.Diagnostic[] => {
   const diagnostics: vscode.Diagnostic[] = [];
   const sanitizedText = sanitizeForDiagnostics(document.getText());
-  console.log("🚀 ~ sanitizedText:", sanitizedText);
-
   const voidElements = new Set(["input", "br", "hr", "img", "meta", "link"]);
-  // Regex for matching tag pairs.
   const tagRegex =
     /<(\/?)([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?))*\s*(\/?)>/g;
-
   const stack: { tag: string; pos: number }[] = [];
   let match: RegExpExecArray | null;
 
-  while ((match = tagRegex.exec(sanitizedText))) {
+  while ((match = tagRegex.exec(sanitizedText)) !== null) {
     const isClosing = match[1] === "/";
     const tagName = match[2];
     const selfClosingIndicator = match[3];
@@ -895,9 +718,7 @@ function getTagPairDiagnostics(
       }
     }
   }
-
-  // Report any unclosed tags remaining in the stack.
-  for (const unclosed of stack) {
+  stack.forEach((unclosed) => {
     const pos = document.positionAt(unclosed.pos);
     diagnostics.push(
       new vscode.Diagnostic(
@@ -906,20 +727,19 @@ function getTagPairDiagnostics(
         vscode.DiagnosticSeverity.Warning
       )
     );
-  }
-
+  });
   return diagnostics;
-}
+};
 
-/**
- * Parse all "use" statements (including group imports) from the given text.
- * Returns a Map of shortName -> fullClass.
- */
-function parsePhpUseStatements(text: string): Map<string, string> {
+/* ────────────────────────────────────────────────────────────── *
+ *                    PHP IMPORT STATEMENT PARSING                   *
+ * ────────────────────────────────────────────────────────────── */
+
+const parsePhpUseStatements = (text: string): Map<string, string> => {
   const shortNameMap = new Map<string, string>();
   const useRegex = /use\s+([^;]+);/g;
   let match: RegExpExecArray | null;
-  while ((match = useRegex.exec(text))) {
+  while ((match = useRegex.exec(text)) !== null) {
     const importBody = match[1].trim();
     if (!importBody) {
       continue;
@@ -932,30 +752,24 @@ function parsePhpUseStatements(text: string): Map<string, string> {
         .substring(braceOpenIndex + 1, braceCloseIndex)
         .trim();
       const items = insideBraces.split(",");
-      for (let rawItem of items) {
-        rawItem = rawItem.trim();
-        if (!rawItem) {
-          continue;
+      items.forEach((rawItem) => {
+        const item = rawItem.trim();
+        if (item) {
+          processSingleImport(prefix, item, shortNameMap);
         }
-        processSingleImport(prefix, rawItem, shortNameMap);
-      }
+      });
     } else {
       processSingleImport("", importBody, shortNameMap);
     }
   }
   return shortNameMap;
-}
+};
 
-/**
- * Processes a single import piece like:
- *   - "Lib\PHPX\Toggle"
- *   - "Lib\PHPX\Toggle as MyToggle"
- */
-function processSingleImport(
+const processSingleImport = (
   prefix: string,
   item: string,
   shortNameMap: Map<string, string>
-) {
+): void => {
   const asMatch = /\bas\b\s+([\w]+)/i.exec(item);
   if (asMatch) {
     const aliasName = asMatch[1];
@@ -967,25 +781,18 @@ function processSingleImport(
     const shortName = getLastPart(item);
     shortNameMap.set(shortName, fullClass);
   }
-}
+};
 
-/**
- * Joins a prefix and item ensuring we don't lose backslashes.
- */
-function joinPath(prefix: string, item: string): string {
-  if (prefix.endsWith("\\")) {
-    return prefix + item;
-  }
-  return prefix + "\\" + item;
-}
+const joinPath = (prefix: string, item: string): string =>
+  prefix.endsWith("\\") ? prefix + item : prefix + "\\" + item;
 
-/**
- * Returns the last part of a backslash-separated string.
- */
-function getLastPart(path: string): string {
+const getLastPart = (path: string): string => {
   const parts = path.split("\\");
   return parts[parts.length - 1];
-}
+};
 
-// Called when your extension is deactivated
-export function deactivate() {}
+/* ────────────────────────────────────────────────────────────── *
+ *                          EXTENSION DEACTIVATION                  *
+ * ────────────────────────────────────────────────────────────── */
+
+export function deactivate(): void {}
