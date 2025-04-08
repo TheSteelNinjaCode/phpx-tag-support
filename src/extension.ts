@@ -214,14 +214,16 @@ const registerPhpDefinitionProvider = () => {
   });
 };
 
-// Completion provider for PHP tags.
+// Completion provider for PHP tags and custom snippet insertion.
 const registerPhpCompletionProvider = () => {
   return vscode.languages.registerCompletionItemProvider(
     PHP_LANGUAGE,
     {
       provideCompletionItems(document, position) {
+        const completions: vscode.CompletionItem[] = [];
+
+        // Existing component completions
         const useMap = parsePhpUseStatements(document.getText());
-        const completionItems: vscode.CompletionItem[] = [];
         const line = document.lineAt(position.line);
         const lessThanIndex = line.text.lastIndexOf("<", position.character);
         let replaceRange: vscode.Range | undefined;
@@ -242,12 +244,51 @@ const registerPhpCompletionProvider = () => {
           if (replaceRange) {
             item.range = replaceRange;
           }
-          completionItems.push(item);
+          completions.push(item);
         }
-        return completionItems;
+
+        // Add a snippet completion for "phpxclass" template
+        const snippetCompletion = new vscode.CompletionItem(
+          "phpxclass",
+          vscode.CompletionItemKind.Snippet
+        );
+        snippetCompletion.detail = "PHPX Class Template";
+        snippetCompletion.insertText = new vscode.SnippetString(
+          `<?php
+
+namespace \${1:Lib\\PHPX\\Components};
+
+use Lib\\PHPX\\PHPX;
+
+class \${2:ClassName} extends PHPX
+{
+    public function __construct(array \$props = [])
+    {
+        parent::__construct(\$props);
+    }
+
+    public function render(): string
+    {
+        \$attributes = \$this->getAttributes();
+        \$class = \$this->getMergeClasses();
+
+        return <<<HTML
+        <div class="{\$class}" {\$attributes}>
+            {\$this->children}
+        </div>
+        HTML;
+    }
+}
+`
+        );
+        // Ensure the snippet appears only when the prefix "phpxclass" is typed.
+        snippetCompletion.filterText = "phpxclass";
+        completions.push(snippetCompletion);
+
+        return completions;
       },
     },
-    "<"
+    "<" // trigger character (can be adjusted)
   );
 };
 
@@ -267,18 +308,13 @@ const updateJsVariableDecorations = (
 
   const text = document.getText();
   const decorations: vscode.DecorationOptions[] = [];
-
   let match: RegExpExecArray | null;
   while ((match = JS_EXPR_REGEX.exec(text)) !== null) {
     const startIndex = match.index;
     const matchLength = match[0].length;
-
-    // Left curly braces: first two characters.
     const leftStart = document.positionAt(startIndex);
     const leftEnd = document.positionAt(startIndex + 2);
     decorations.push({ range: new vscode.Range(leftStart, leftEnd) });
-
-    // Right curly braces: last two characters.
     const rightStart = document.positionAt(startIndex + matchLength - 2);
     const rightEnd = document.positionAt(startIndex + matchLength);
     decorations.push({ range: new vscode.Range(rightStart, rightEnd) });
@@ -286,7 +322,6 @@ const updateJsVariableDecorations = (
   editor.setDecorations(decorationType, decorations);
 };
 
-// Validate JS expressions within double curly braces.
 const isValidJsExpression = (expr: string): boolean => {
   try {
     new Function(`return (${expr});`);
@@ -301,7 +336,7 @@ const validateJsVariablesInCurlyBraces = (
   diagnosticCollection: vscode.DiagnosticCollection
 ): void => {
   if (document.languageId !== PHP_LANGUAGE) {
-    return; // Only run for PHP files.
+    return;
   }
   const text = document.getText();
   const diagnostics: vscode.Diagnostic[] = [];
@@ -325,7 +360,6 @@ const validateJsVariablesInCurlyBraces = (
   diagnosticCollection.set(document.uri, diagnostics);
 };
 
-// Highlight native JS functions and properties within curly braces.
 const updateNativeTokenDecorations = (
   document: vscode.TextDocument,
   funcDecoType: vscode.TextEditorDecorationType,
@@ -338,16 +372,12 @@ const updateNativeTokenDecorations = (
   const text = document.getText();
   const funcDecorations: vscode.DecorationOptions[] = [];
   const propDecorations: vscode.DecorationOptions[] = [];
-
-  // Regex for matching inside curly brace JS expressions.
   const nativeFuncRegex = /\b(toUpperCase|toLowerCase|trim|split)\b/g;
   const nativePropRegex = /\b(length|name|prototype)\b/g;
-
   let exprMatch: RegExpExecArray | null;
   while ((exprMatch = JS_EXPR_REGEX.exec(text)) !== null) {
     const jsExpr = exprMatch[1];
     const exprStartIndex = exprMatch.index + exprMatch[0].indexOf(jsExpr);
-
     let funcMatch: RegExpExecArray | null;
     while ((funcMatch = nativeFuncRegex.exec(jsExpr)) !== null) {
       const tokenStart = exprStartIndex + funcMatch.index;
@@ -383,11 +413,8 @@ const validateMissingImports = (
   const originalText = document.getText();
   let noCommentsText = removePhpComments(originalText);
   noCommentsText = blankOutHeredocOpeners(noCommentsText);
-
   const useMap = parsePhpUseStatements(originalText);
   const diagnostics: vscode.Diagnostic[] = [];
-
-  // Validate main code for missing imports.
   const tagMatches = [...noCommentsText.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g)];
   tagMatches.forEach((match) => {
     const tag = match[1];
@@ -403,8 +430,6 @@ const validateMissingImports = (
       );
     }
   });
-
-  // Validate heredoc blocks.
   const heredocBlocks = extractAllHeredocBlocks(originalText);
   heredocBlocks.forEach((block) => {
     let blockContent = blankOutHeredocOpeners(block.content);
@@ -430,8 +455,6 @@ const validateMissingImports = (
       }
     });
   });
-
-  // Optionally run extra validations if "prisma-php.json" is found.
   vscode.workspace.findFiles("prisma-php.json", null, 1).then((files) => {
     if (files.length > 0) {
       const xmlDiagnostics = getXmlAttributeDiagnostics(document).concat(
@@ -465,13 +488,11 @@ const blankOutHeredocOpeners = (text: string): string =>
 
 const removePhpComments = (text: string): string => {
   let result = text;
-  // Remove single-line comments.
   result = result.replace(
     /(^|[^:])\/\/[^\r\n]*/g,
     (match, prefix) =>
       prefix + " ".repeat(match.length - (prefix ? prefix.length : 0))
   );
-  // Remove multi-line comments.
   result = result.replace(/\/\*[\s\S]*?\*\//g, (comment) =>
     " ".repeat(comment.length)
   );
@@ -493,10 +514,8 @@ const removeOperatorsAndBooleansOutsideQuotes = (text: string): string => {
   let inString = false;
   let quoteChar = "";
   let i = 0;
-
   const startsWithToken = (token: string): boolean =>
     text.slice(i, i + token.length) === token;
-
   while (i < text.length) {
     const ch = text[i];
     if (!inString) {
@@ -610,7 +629,6 @@ const analyzeAttributes = (
   const diagnostics: vscode.Diagnostic[] = [];
   const tagRegex = /<(\w+)((?:"[^"]*"|'[^']*'|[^>"'])*)\/?>/g;
   let match: RegExpExecArray | null;
-
   while ((match = tagRegex.exec(code)) !== null) {
     const fullTag = match[0];
     const tagName = match[1];
@@ -648,7 +666,6 @@ const getXmlAttributeDiagnostics = (
   let diagnostics: vscode.Diagnostic[] = [];
   const sanitizedMain = sanitizeForDiagnostics(originalText);
   diagnostics.push(...analyzeAttributes(sanitizedMain, 0, document));
-
   const heredocBlocks = extractAllHeredocBlocks(originalText);
   heredocBlocks.forEach((block) => {
     let blockContent = removePhpComments(block.content);
@@ -671,13 +688,11 @@ const getTagPairDiagnostics = (
     /<(\/?)([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?))*\s*(\/?)>/g;
   const stack: { tag: string; pos: number }[] = [];
   let match: RegExpExecArray | null;
-
   while ((match = tagRegex.exec(sanitizedText)) !== null) {
     const isClosing = match[1] === "/";
     const tagName = match[2];
     const selfClosingIndicator = match[3];
     const matchIndex = match.index;
-
     if (isClosing) {
       if (stack.length === 0) {
         const pos = document.positionAt(matchIndex);
@@ -751,8 +766,7 @@ const parsePhpUseStatements = (text: string): Map<string, string> => {
       const insideBraces = importBody
         .substring(braceOpenIndex + 1, braceCloseIndex)
         .trim();
-      const items = insideBraces.split(",");
-      items.forEach((rawItem) => {
+      insideBraces.split(",").forEach((rawItem) => {
         const item = rawItem.trim();
         if (item) {
           processSingleImport(prefix, item, shortNameMap);
