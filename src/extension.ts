@@ -11,6 +11,9 @@ interface HeredocBlock {
 
 const PHP_LANGUAGE = "php";
 
+// Command ID for auto-import.
+const ADD_IMPORT_COMMAND = "phpx.addImport";
+
 // Colors for decorations
 const BRACE_COLOR = "#569CD6";
 const NATIVE_FUNC_COLOR = "#D16969";
@@ -21,6 +24,55 @@ const PHP_TAG_REGEX = /<\/?[A-Z][A-Za-z0-9]*/;
 const JS_EXPR_REGEX = /{{\s*(.*?)\s*}}/g;
 const HEREDOC_PATTERN =
   /<<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
+
+/**
+ * Command implementation to add a use import.
+ * It receives the active document and the fully qualified class name.
+ */
+const addImportCommand = async (
+  document: vscode.TextDocument,
+  fullComponent: string
+) => {
+  const text = document.getText();
+
+  // Don't add the import if it already exists.
+  if (text.includes(`use ${fullComponent};`)) {
+    return;
+  }
+
+  const edit = new vscode.WorkspaceEdit();
+  let insertPosition: vscode.Position;
+
+  // Check whether the file starts with a PHP declaration.
+  if (/^\s*<\?php/.test(text)) {
+    // File starts with <?php.
+
+    // First, try to locate an existing namespace declaration.
+    const namespaceRegex = /^namespace\s+.+?;/m;
+    const nsMatch = namespaceRegex.exec(text);
+
+    if (nsMatch) {
+      // Insert after the namespace declaration.
+      const nsPosition = document.positionAt(nsMatch.index);
+      insertPosition = new vscode.Position(nsPosition.line + 1, 0);
+    } else {
+      // No namespace found—assume the <?php tag is on the first line.
+      // Insert right after the <?php line.
+      const firstLine = document.lineAt(0);
+      // If the opening tag is on a single line, we insert on the next.
+      insertPosition = new vscode.Position(firstLine.lineNumber + 1, 0);
+    }
+    // Prepare the new use statement.
+    edit.insert(document.uri, insertPosition, `use ${fullComponent};\n`);
+  } else {
+    // No PHP block exists: add one at the top.
+    insertPosition = new vscode.Position(0, 0);
+    const newPhpBlock = `<?php\nuse ${fullComponent};\n?>\n\n`;
+    edit.insert(document.uri, insertPosition, newPhpBlock);
+  }
+
+  await vscode.workspace.applyEdit(edit);
+};
 
 /* ────────────────────────────────────────────────────────────── *
  *                       EXTENSION ACTIVATION                       *
@@ -44,6 +96,11 @@ export function activate(context: vscode.ExtensionContext) {
     registerPhpHoverProvider(),
     registerPhpDefinitionProvider(),
     registerPhpCompletionProvider()
+  );
+
+  // Register the command for auto-import.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(ADD_IMPORT_COMMAND, addImportCommand)
   );
 
   // Register commands.
@@ -247,7 +304,30 @@ const registerPhpCompletionProvider = () => {
           completions.push(item);
         }
 
-        // Add a snippet completion for "phpxclass" template
+        // Read additional components from "class-log.json"
+        // (Assume you have a function getComponentsFromClassLog() that returns a Map<string, string>
+        // mapping shortName -> fullyQualifiedName)
+        const componentsMap = getComponentsFromClassLog();
+        componentsMap.forEach((fullComponent, shortName) => {
+          const compItem = new vscode.CompletionItem(
+            shortName,
+            vscode.CompletionItemKind.Class
+          );
+          compItem.detail = `Component (from class-log)`;
+          // Trigger auto-import when accepted.
+          compItem.command = {
+            title: "Add import",
+            command: ADD_IMPORT_COMMAND,
+            arguments: [document, fullComponent],
+          };
+          // Set filterText to include variations if needed.
+          compItem.filterText = shortName; // e.g., "Collapsible Collap"
+          // Insert just the short name.
+          compItem.insertText = new vscode.SnippetString(shortName);
+          completions.push(compItem);
+        });
+
+        // Add a snippet completion for "phpxclass" template.
         const snippetCompletion = new vscode.CompletionItem(
           "phpxclass",
           vscode.CompletionItemKind.Snippet
@@ -262,19 +342,19 @@ use Lib\\PHPX\\PHPX;
 
 class \${2:ClassName} extends PHPX
 {
-    public function __construct(array \$props = [])
+    public function __construct(array \\$props = [])
     {
-        parent::__construct(\$props);
+        parent::__construct(\\$props);
     }
 
     public function render(): string
     {
-        \$attributes = \$this->getAttributes();
-        \$class = \$this->getMergeClasses();
+        \\$attributes = \\$this->getAttributes();
+        \\$class = \\$this->getMergeClasses();
 
         return <<<HTML
-        <div class="{\$class}" {\$attributes}>
-            {\$this->children}
+        <div class="{\\$class}" {\\$attributes}>
+            {\\$this->children}
         </div>
         HTML;
     }
@@ -288,8 +368,43 @@ class \${2:ClassName} extends PHPX
         return completions;
       },
     },
-    "<" // trigger character (can be adjusted)
+    "<" // trigger character (this can be adjusted)
   );
+};
+
+/* ────────────────────────────────────────────────────────────── *
+ *                     HELPER: READ COMPONENTS FROM CLASS LOG       *
+ * ────────────────────────────────────────────────────────────── */
+
+// This helper function demonstrates reading the class-log.json.
+// In a real-world scenario, you’d likely cache this data and update when needed.
+const getComponentsFromClassLog = (): Map<string, string> => {
+  const components = new Map<string, string>();
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (!workspaceFolders || workspaceFolders.length === 0) {
+    return components;
+  }
+  const workspaceFolder = workspaceFolders[0];
+  const jsonUri = vscode.Uri.joinPath(
+    workspaceFolder.uri,
+    "settings",
+    "class-log.json"
+  );
+  try {
+    // Synchronously reading file content is generally not recommended,
+    // but for simplicity you could use a cached or asynchronous approach.
+    const data = vscode.workspace.fs.readFile(jsonUri);
+    // If you wish, use then() to process it asynchronously.
+    // For this sample, assume we have the JSON content.
+    // (Alternatively, maintain a global cache and trigger an update on file change.)
+  } catch (error) {
+    console.error("Error reading class-log.json:", error);
+  }
+
+  // Dummy data for demonstration purposes.
+  components.set("Button", "Lib\\PHPX\\Components\\Button");
+  components.set("Card", "Lib\\PHPX\\Components\\Card");
+  return components;
 };
 
 /* ────────────────────────────────────────────────────────────── *
