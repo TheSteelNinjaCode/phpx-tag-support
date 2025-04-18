@@ -913,6 +913,7 @@ const getTagPairDiagnostics = (
   );
 
   const voids = new Set(["input", "br", "hr", "img", "meta", "link"]);
+
   const tagRx =
     /<(\/?)([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'(?:\\.|[^'])*'|[^\s>]+))?))*\s*(\/?)>/g;
   const stack: { tag: string; pos: number }[] = [];
@@ -947,6 +948,15 @@ const getTagPairDiagnostics = (
           );
         }
       }
+    } else if (!selfClose && voids.has(tag)) {
+      const p = document.positionAt(idx);
+      diagnostics.push(
+        new vscode.Diagnostic(
+          new vscode.Range(p, p.translate(0, tag.length + 2)),
+          `Void tag <${tag}> must be self‑closed in XML (e.g. <${tag}/>).`,
+          vscode.DiagnosticSeverity.Warning
+        )
+      );
     } else if (!selfClose && !voids.has(tag)) {
       stack.push({ tag, pos: idx });
     }
