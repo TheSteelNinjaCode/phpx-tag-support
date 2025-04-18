@@ -152,6 +152,18 @@ export function activate(context: vscode.ExtensionContext) {
   // Load the dynamic components from class-log.json.
   loadComponentsFromClassLog();
 
+  // watch for changes to class‑log.json
+  const watcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(
+      vscode.workspace.workspaceFolders![0],
+      "settings/class-log.json"
+    )
+  );
+  watcher.onDidChange(() => loadComponentsFromClassLog());
+  watcher.onDidCreate(() => loadComponentsFromClassLog());
+  watcher.onDidDelete(() => componentsCache.clear());
+  context.subscriptions.push(watcher);
+
   // Force Peek Definition for Go to Definition globally.
   updateEditorConfiguration();
 
@@ -347,7 +359,9 @@ const registerPhpCompletionProvider = () => {
   return vscode.languages.registerCompletionItemProvider(
     PHP_LANGUAGE,
     {
-      provideCompletionItems(document, position) {
+      async provideCompletionItems(document, position) {
+        await loadComponentsFromClassLog();
+
         const completions: vscode.CompletionItem[] = [];
 
         // Existing component completions from use statements.
@@ -529,12 +543,18 @@ const validateJsVariablesInCurlyBraces = (
   if (document.languageId !== PHP_LANGUAGE) {
     return;
   }
-  const text = document.getText();
+
+  const originalText = document.getText();
+  // 1️⃣ blank out *all* PHP literals/comments/regex so we don't pick up "{{…}}" inside them
+  const sanitizedText = sanitizeForDiagnostics(originalText);
+
   const diagnostics: vscode.Diagnostic[] = [];
   let match: RegExpExecArray | null;
-  while ((match = JS_EXPR_REGEX.exec(text)) !== null) {
+  // 2️⃣ run your existing JS_EXPR_REGEX *against* the sanitized text
+  while ((match = JS_EXPR_REGEX.exec(sanitizedText)) !== null) {
     const expr = match[1].trim();
     if (!isValidJsExpression(expr)) {
+      // calculate positions *in* the original text (indexes line up thanks to blanking)
       const startIndex = match.index + match[0].indexOf(expr);
       const endIndex = startIndex + expr.length;
       const startPos = document.positionAt(startIndex);
@@ -548,6 +568,7 @@ const validateJsVariablesInCurlyBraces = (
       );
     }
   }
+
   diagnosticCollection.set(document.uri, diagnostics);
 };
 
@@ -807,7 +828,7 @@ const sanitizeForDiagnostics = (text: string): string => {
   text = removePhpRegexLiterals(text);
   text = removePhpInterpolations(text);
   text = removeNormalPhpStrings(text);
-  text = removeOperatorsAndBooleansOutsideQuotes(text);
+  // text = removeOperatorsAndBooleansOutsideQuotes(text);
   return text;
 };
 
@@ -876,67 +897,73 @@ const getTagPairDiagnostics = (
   document: vscode.TextDocument
 ): vscode.Diagnostic[] => {
   const diagnostics: vscode.Diagnostic[] = [];
-  const sanitizedText = sanitizeForDiagnostics(document.getText());
-  const voidElements = new Set(["input", "br", "hr", "img", "meta", "link"]);
-  const tagRegex =
-    /<(\/?)([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?))*\s*(\/?)>/g;
+
+  // 1️⃣ sanitize to blank‑out PHP/etc.
+  const sanitized = sanitizeForDiagnostics(document.getText());
+
+  // 2️⃣ rebuild “tagOnly” but preserve original match‑length by padding
+  const tagOnly = sanitized.replace(
+    /<\s*(\/?)([A-Za-z][A-Za-z0-9-]*)(\s+(?:[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'(?:\\.|[^'])*'|[^\s>]+))?))*\s*(\/?)>/g,
+    (match, closingSlash, tagName, attrs, selfClosingSlash) => {
+      // core is what we really want to match on
+      const core = `<${closingSlash}${tagName}${selfClosingSlash ? "/" : ""}>`;
+      // pad with spaces so it's exactly as long as the original match
+      return core + " ".repeat(match.length - core.length);
+    }
+  );
+
+  const voids = new Set(["input", "br", "hr", "img", "meta", "link"]);
+  const tagRx =
+    /<(\/?)([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'(?:\\.|[^'])*'|[^\s>]+))?))*\s*(\/?)>/g;
   const stack: { tag: string; pos: number }[] = [];
-  let match: RegExpExecArray | null;
-  while ((match = tagRegex.exec(sanitizedText)) !== null) {
-    const isClosing = match[1] === "/";
-    const tagName = match[2];
-    const selfClosingIndicator = match[3];
-    const matchIndex = match.index;
+  let m: RegExpExecArray | null;
+
+  while ((m = tagRx.exec(tagOnly)) !== null) {
+    const isClosing = m[1] === "/";
+    const tag = m[2];
+    const selfClose = m[3] === "/";
+    const idx = m.index;
+
     if (isClosing) {
-      if (stack.length === 0) {
-        const pos = document.positionAt(matchIndex);
+      if (!stack.length) {
+        const p = document.positionAt(idx);
         diagnostics.push(
           new vscode.Diagnostic(
-            new vscode.Range(pos, pos.translate(0, tagName.length + 3)),
-            `Extra closing tag </${tagName}> found.`,
+            new vscode.Range(p, p.translate(0, tag.length + 3)),
+            `Extra closing tag </${tag}> found.`,
             vscode.DiagnosticSeverity.Warning
           )
         );
       } else {
         const last = stack.pop()!;
-        if (last.tag !== tagName) {
-          const pos = document.positionAt(matchIndex);
+        if (last.tag !== tag) {
+          const p = document.positionAt(idx);
           diagnostics.push(
             new vscode.Diagnostic(
-              new vscode.Range(pos, pos.translate(0, tagName.length + 3)),
-              `Mismatched closing tag: expected </${last.tag}> but found </${tagName}>.`,
+              new vscode.Range(p, p.translate(0, tag.length + 3)),
+              `Mismatched closing tag: expected </${last.tag}> but found </${tag}>.`,
               vscode.DiagnosticSeverity.Warning
             )
           );
         }
       }
-    } else {
-      if (voidElements.has(tagName)) {
-        if (selfClosingIndicator !== "/") {
-          const pos = document.positionAt(matchIndex);
-          diagnostics.push(
-            new vscode.Diagnostic(
-              new vscode.Range(pos, pos.translate(0, tagName.length)),
-              `In XML mode, <${tagName}> must be self-closed (e.g., <${tagName} ... />).`,
-              vscode.DiagnosticSeverity.Warning
-            )
-          );
-        }
-      } else if (selfClosingIndicator !== "/") {
-        stack.push({ tag: tagName, pos: matchIndex });
-      }
+    } else if (!selfClose && !voids.has(tag)) {
+      stack.push({ tag, pos: idx });
     }
   }
-  stack.forEach((unclosed) => {
-    const pos = document.positionAt(unclosed.pos);
+
+  // any leftovers in stack are unclosed opening tags
+  for (const unclosed of stack) {
+    const p = document.positionAt(unclosed.pos);
     diagnostics.push(
       new vscode.Diagnostic(
-        new vscode.Range(pos, pos.translate(0, unclosed.tag.length)),
+        new vscode.Range(p, p.translate(0, unclosed.tag.length + 2)),
         `Missing closing tag for <${unclosed.tag}>.`,
         vscode.DiagnosticSeverity.Warning
       )
     );
-  });
+  }
+
   return diagnostics;
 };
 
