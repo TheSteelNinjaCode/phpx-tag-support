@@ -1,4 +1,13 @@
 import * as vscode from "vscode";
+import {
+  CodeActionProvider,
+  CodeAction,
+  CodeActionKind,
+  TextDocument,
+  Range,
+  CancellationToken,
+  CodeActionContext,
+} from "vscode";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                    *
@@ -24,6 +33,45 @@ const PHP_TAG_REGEX = /<\/?[A-Z][A-Za-z0-9]*/;
 const JS_EXPR_REGEX = /{{\s*(.*?)\s*}}/g;
 const HEREDOC_PATTERN =
   /<<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
+
+class ImportComponentCodeActionProvider implements CodeActionProvider {
+  public provideCodeActions(
+    document: TextDocument,
+    range: Range,
+    context: CodeActionContext
+  ): CodeAction[] {
+    const fixes: CodeAction[] = [];
+    const missingImportRe =
+      /Missing import for component\s+<([A-Za-z0-9_]+)\s*\/?>/;
+
+    for (const diag of context.diagnostics) {
+      const m = diag.message.match(missingImportRe);
+      if (!m) {
+        continue;
+      }
+
+      const tagName = m[1];
+      const fullComponent = getComponentsFromClassLog().get(tagName);
+      if (!fullComponent) {
+        continue;
+      }
+
+      const action = new CodeAction(
+        `Import <${tagName}/> from ${fullComponent}`,
+        CodeActionKind.QuickFix
+      );
+      action.command = {
+        title: "Import component",
+        command: ADD_IMPORT_COMMAND,
+        arguments: [document, fullComponent],
+      };
+      action.diagnostics = [diag];
+      fixes.push(action);
+    }
+
+    return fixes;
+  }
+}
 
 /**
  * Escapes special regex characters in a string.
@@ -148,6 +196,14 @@ const addImportCommand = async (
 
 export function activate(context: vscode.ExtensionContext) {
   console.log("PHPX tag support is now active!");
+
+  context.subscriptions.push(
+    vscode.languages.registerCodeActionsProvider(
+      PHP_LANGUAGE,
+      new ImportComponentCodeActionProvider(),
+      { providedCodeActionKinds: [CodeActionKind.QuickFix] }
+    )
+  );
 
   // Load the dynamic components from class-log.json.
   loadComponentsFromClassLog();
