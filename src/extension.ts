@@ -5,7 +5,6 @@ import {
   CodeActionKind,
   TextDocument,
   Range,
-  CancellationToken,
   CodeActionContext,
 } from "vscode";
 
@@ -465,13 +464,16 @@ const registerPhpCompletionProvider = () => {
         });
 
         // Add the snippet completion for "phpxclass" template.
-        const snippetCompletion = new vscode.CompletionItem(
-          "phpxclass",
-          vscode.CompletionItemKind.Snippet
-        );
-        snippetCompletion.detail = "PHPX Class Template";
-        snippetCompletion.insertText = new vscode.SnippetString(
-          `<?php
+        const linePrefix = document
+          .lineAt(position)
+          .text.substring(0, position.character);
+        if (/^\s*phpx?c?l?a?s?s?$/i.test(linePrefix)) {
+          const snippetCompletion = new vscode.CompletionItem(
+            "phpxclass",
+            vscode.CompletionItemKind.Snippet
+          );
+          snippetCompletion.detail = "PHPX Class Template";
+          snippetCompletion.insertText = new vscode.SnippetString(`<?php
 
 namespace \${1:Lib\\PHPX\\Components};
 
@@ -496,15 +498,18 @@ class \${2:ClassName} extends PHPX
         HTML;
     }
 }
-`
-        );
-        snippetCompletion.filterText = "phpxclass";
-        completions.push(snippetCompletion);
-
+`);
+          snippetCompletion.filterText = "phpxclass";
+          completions.push(snippetCompletion);
+        }
         return completions;
       },
     },
-    "<" // Trigger character.
+    "<",
+    "p",
+    "h",
+    "x",
+    "P" // Trigger character.
   );
 };
 
