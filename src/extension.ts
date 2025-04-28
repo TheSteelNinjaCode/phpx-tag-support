@@ -7,6 +7,7 @@ import {
   Range,
   CodeActionContext,
 } from "vscode";
+import * as path from "path";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                    *
@@ -414,16 +415,19 @@ const registerPhpCompletionProvider = () => {
   return vscode.languages.registerCompletionItemProvider(
     PHP_LANGUAGE,
     {
-      async provideCompletionItems(document, position) {
+      async provideCompletionItems(
+        document: vscode.TextDocument,
+        position: vscode.Position
+      ) {
+        // 1️⃣ Don’t fire inside "<?…"
         const prefixLine = document.lineAt(position.line).text;
         const prefix = prefixLine.substring(0, position.character);
-
         if (/^[ \t]*<\?[=a-z]*$/.test(prefix)) {
           return [];
         }
 
+        // 2️⃣ Load your class-log and existing component completions…
         await loadComponentsFromClassLog();
-
         const completions: vscode.CompletionItem[] = [];
 
         // Existing component completions from use statements.
@@ -469,23 +473,26 @@ const registerPhpCompletionProvider = () => {
           completions.push(compItem);
         });
 
-        // Add the snippet completion for "phpxclass" template.
-        const linePrefix = document
-          .lineAt(position)
-          .text.substring(0, position.character);
+        // 3️⃣ Now handle the "phpxclass" snippet
+        const linePrefix = prefixLine;
         if (/^\s*phpx?c?l?a?s?s?$/i.test(linePrefix)) {
-          const snippetCompletion = new vscode.CompletionItem(
-            "phpxclass",
-            vscode.CompletionItemKind.Snippet
-          );
-          snippetCompletion.detail = "PHPX Class Template";
-          snippetCompletion.insertText = new vscode.SnippetString(`<?php
+          // Determine saved‐file name or fallback to placeholder
+          let classNamePlaceholder: string;
+          if (!document.isUntitled && document.uri.fsPath.endsWith(".php")) {
+            classNamePlaceholder = path.basename(document.uri.fsPath, ".php");
+          } else {
+            classNamePlaceholder = "${2:ClassName}";
+          }
+
+          // Build snippet
+          const snippet = new vscode.SnippetString(
+            `<?php
 
 namespace \${1:Lib\\PHPX\\Components};
 
 use Lib\\PHPX\\PHPX;
 
-class \${2:ClassName} extends PHPX
+class ${classNamePlaceholder} extends PHPX
 {
     public function __construct(array \\$props = [])
     {
@@ -495,7 +502,7 @@ class \${2:ClassName} extends PHPX
     public function render(): string
     {
         \\$attributes = \\$this->getAttributes();
-        \\$class = \\$this->getMergeClasses();
+        \\$class      = \\$this->getMergeClasses();
 
         return <<<HTML
         <div class="{\\$class}" {\\$attributes}>
@@ -505,9 +512,21 @@ class \${2:ClassName} extends PHPX
     }
 }
 `);
-          snippetCompletion.filterText = "phpxclass";
+
+          const snippetCompletion = new vscode.CompletionItem(
+            "phpxclass",
+            vscode.CompletionItemKind.Snippet
+          );
+          snippetCompletion.detail = "PHPX Class Template";
+          snippetCompletion.insertText = snippet;
+
+          // Replace the typed trigger (e.g. "phpxclass")
+          const start = position.translate(0, -linePrefix.trim().length);
+          snippetCompletion.range = new vscode.Range(start, position);
+
           completions.push(snippetCompletion);
         }
+
         return completions;
       },
     },
@@ -515,7 +534,7 @@ class \${2:ClassName} extends PHPX
     "p",
     "h",
     "x",
-    "P" // Trigger character.
+    "P" // trigger characters
   );
 };
 
