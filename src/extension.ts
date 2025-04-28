@@ -297,6 +297,71 @@ const addImportCommand = async (
   await vscode.workspace.applyEdit(edit);
 };
 
+function validatePphpCalls(
+  document: vscode.TextDocument,
+  diagCollection: vscode.DiagnosticCollection
+) {
+  const text = document.getText();
+  const diags: vscode.Diagnostic[] = [];
+
+  // match pphp.foo(arg1, arg2, …)
+  const callRe = /\b(pphp|store|searchParams)\.(\w+)\(([^)]*)\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = callRe.exec(text))) {
+    const [, varName, methodName, argsText] = m as unknown as [
+      string,
+      VarName,
+      string,
+      string
+    ];
+    const classNameMap: Record<VarName, keyof typeof classStubs> = {
+      pphp: "PPHP",
+      store: "PPHPLocalStore",
+      searchParams: "SearchParamsManager",
+    };
+    const stubList = classStubs[classNameMap[varName]];
+    const entry = stubList.find((e) => e.name === methodName);
+    if (!entry) {
+      continue;
+    }
+
+    // extract the parameter list from the signature string
+    // e.g. "fetchFunction(functionName: string, data?: Record<string, any>, abortPrevious?: boolean)"
+    const paramsPart = entry.signature.replace(/^[^(]+\(([^)]*)\):.*$/, "$1");
+    const expectedParams = paramsPart
+      .split(",")
+      .map((p) => p.trim())
+      .filter((p) => !!p);
+
+    // count what the user actually passed
+    const passedCount = argsText.trim() === "" ? 0 : argsText.split(",").length;
+
+    // figure out how many *required* parameters there are
+    const requiredCount = expectedParams.filter((p) => !p.includes("?")).length;
+
+    if (passedCount < requiredCount || passedCount > expectedParams.length) {
+      // figure out where in the document this call happened
+      const callStart = document.positionAt(m.index);
+      const callEnd = document.positionAt(m.index + m[0].length);
+      const range = new vscode.Range(callStart, callEnd);
+
+      diags.push(
+        new vscode.Diagnostic(
+          range,
+          `\`${methodName}()\` expects ${requiredCount}${
+            requiredCount !== expectedParams.length
+              ? ` to ${expectedParams.length}`
+              : ""
+          } arguments, but got ${passedCount}.`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    }
+  }
+
+  diagCollection.set(document.uri, diags);
+}
+
 /* ────────────────────────────────────────────────────────────── *
  *                       EXTENSION ACTIVATION                       *
  * ────────────────────────────────────────────────────────────── */
@@ -401,6 +466,10 @@ export function activate(context: vscode.ExtensionContext) {
       color: NATIVE_PROP_COLOR,
     });
 
+  const pphpSigDiags =
+    vscode.languages.createDiagnosticCollection("pphp-signatures");
+  context.subscriptions.push(pphpSigDiags);
+
   // Combined update validations function.
   const updateAllValidations = (document: vscode.TextDocument): void => {
     updateJsVariableDecorations(document, braceDecorationType);
@@ -414,6 +483,22 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   // Register event listeners.
+  vscode.workspace.onDidChangeTextDocument(
+    (e) => validatePphpCalls(e.document, pphpSigDiags),
+    null,
+    context.subscriptions
+  );
+
+  vscode.window.onDidChangeActiveTextEditor(
+    (editor) => {
+      if (editor) {
+        validatePphpCalls(editor.document, pphpSigDiags);
+      }
+    },
+    null,
+    context.subscriptions
+  );
+
   vscode.workspace.onDidChangeTextDocument(
     (e) => updateAllValidations(e.document),
     null,
