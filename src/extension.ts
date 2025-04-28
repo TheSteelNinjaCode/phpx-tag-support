@@ -474,9 +474,36 @@ const registerPhpCompletionProvider = () => {
         });
 
         // 3️⃣ Now handle the "phpxclass" snippet
-        const linePrefix = prefixLine;
-        if (/^\s*phpx?c?l?a?s?s?$/i.test(linePrefix)) {
-          // Determine saved‐file name or fallback to placeholder
+        if (/^\s*phpx?c?l?a?s?s?$/i.test(prefixLine)) {
+          // 1️⃣ Figure out the namespace
+          const wsFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+          const cfg = vscode.workspace.getConfiguration("phpx-tag-support");
+          const sourceRoot = cfg.get<string>("sourceRoot", "src");
+          let namespacePlaceholder: string;
+
+          if (
+            !document.isUntitled &&
+            wsFolder &&
+            document.uri.fsPath.endsWith(".php")
+          ) {
+            // Compute path relative to <workspace>/sourceRoot
+            const fullFs = document.uri.fsPath;
+            const fileDir = path.dirname(fullFs);
+            const base = path.join(wsFolder.uri.fsPath, sourceRoot);
+            const rel = path.relative(base, fileDir);
+            const parts = rel
+              .split(path.sep)
+              .filter(Boolean)
+              .map((seg) => seg.replace(/[^A-Za-z0-9_]/g, ""));
+            // If it actually lived in a subfolder, use it; otherwise fallback
+            namespacePlaceholder = parts.length
+              ? parts.join("\\\\")
+              : "${1:Lib\\\\PHPX\\\\Components}";
+          } else {
+            namespacePlaceholder = "${1:Lib\\\\PHPX\\\\Components}";
+          }
+
+          // 2️⃣ Figure out the class name
           let classNamePlaceholder: string;
           if (!document.isUntitled && document.uri.fsPath.endsWith(".php")) {
             classNamePlaceholder = path.basename(document.uri.fsPath, ".php");
@@ -484,13 +511,13 @@ const registerPhpCompletionProvider = () => {
             classNamePlaceholder = "${2:ClassName}";
           }
 
-          // Build snippet
+          // 3️⃣ Build the snippet
           const snippet = new vscode.SnippetString(
             `<?php
 
-namespace \${1:Lib\\PHPX\\Components};
+namespace ${namespacePlaceholder};
 
-use Lib\\PHPX\\PHPX;
+use Lib\\\\PHPX\\\\PHPX;
 
 class ${classNamePlaceholder} extends PHPX
 {
@@ -511,20 +538,19 @@ class ${classNamePlaceholder} extends PHPX
         HTML;
     }
 }
-`);
+`
+          );
 
-          const snippetCompletion = new vscode.CompletionItem(
+          // 4️⃣ and push it
+          const start = position.translate(0, -prefixLine.trim().length);
+          const item = new vscode.CompletionItem(
             "phpxclass",
             vscode.CompletionItemKind.Snippet
           );
-          snippetCompletion.detail = "PHPX Class Template";
-          snippetCompletion.insertText = snippet;
-
-          // Replace the typed trigger (e.g. "phpxclass")
-          const start = position.translate(0, -linePrefix.trim().length);
-          snippetCompletion.range = new vscode.Range(start, position);
-
-          completions.push(snippetCompletion);
+          item.detail = "PHPX Class Template";
+          item.insertText = snippet;
+          item.range = new vscode.Range(start, position);
+          completions.push(item);
         }
 
         return completions;
@@ -534,7 +560,7 @@ class ${classNamePlaceholder} extends PHPX
     "p",
     "h",
     "x",
-    "P" // trigger characters
+    "P" // trigger chars
   );
 };
 
