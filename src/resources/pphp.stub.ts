@@ -40,6 +40,7 @@ export declare class PPHP {
   private static readonly MUSTACHE_PATTERN;
   private constructor();
   static get instance(): PPHP;
+  private scheduleInitialHydration;
   private _currentSectionId;
   private _defaultToken;
   private getNested;
@@ -64,7 +65,7 @@ export declare class PPHP {
   private makePrimitiveUpdater;
   /** atributos con plantilla {{ }} ----------------------------------------- */
   private makeAttrTemplateUpdater;
-  initBindings(): void;
+  private initBindings;
   private safeNull;
   /**
    * A custom tag function for template literals.
@@ -81,14 +82,14 @@ export declare class PPHP {
    */
   setNestedProperty(obj: any, path: string, value: any): void;
   private resetProps;
-  initializeAllReferencedProps(): void;
+  private initializeAllReferencedProps;
   private scheduleBindingUpdate;
   private flushBindings;
   private initMakeReactive;
   private getProxiedProps;
   private invokeHandler;
   private registerLoop;
-  initLoopBindings(): void;
+  private initLoopBindings;
   /**
    * Creates a reactive proxy for an object.
    * The proxy triggers only the update functions for bindings whose dependencies include the changed property.
@@ -97,7 +98,7 @@ export declare class PPHP {
   private handlePopState;
   private prefixFunctionCalls;
   private prefixIds;
-  attachWireFunctionEvents(): void;
+  private attachWireFunctionEvents;
   private handleDebounce;
   /**
    * Debounces a function to limit the rate at which it is called.
@@ -186,7 +187,7 @@ export declare class PPHP {
   parseJson(jsonString: string): any | null;
   private parseTime;
   private scheduleChange;
-  processInlineModuleScripts(): Promise<void>;
+  private processInlineModuleScripts;
   fetchFunction<T = any>(
     functionName: string,
     data?: Record<string, any>,
