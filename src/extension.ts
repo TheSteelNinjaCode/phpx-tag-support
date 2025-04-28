@@ -7,6 +7,13 @@ import {
   Range,
   CodeActionContext,
 } from "vscode";
+import {
+  SignatureHelpProvider,
+  SignatureHelp,
+  ParameterInformation,
+  SignatureInformation,
+  CancellationToken,
+} from "vscode";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -18,6 +25,8 @@ interface HeredocBlock {
   content: string;
   startIndex: number;
 }
+
+type VarName = "pphp" | "store" | "searchParams";
 
 const PHP_LANGUAGE = "php";
 
@@ -42,6 +51,95 @@ const PHP_TAG_REGEX = /<\/?[A-Z][A-Za-z0-9]*/;
 const JS_EXPR_REGEX = /{{\s*(.*?)\s*}}/g;
 const HEREDOC_PATTERN =
   /<<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
+
+class PphpHoverProvider implements vscode.HoverProvider {
+  provideHover(
+    document: TextDocument,
+    position: vscode.Position
+  ): vscode.ProviderResult<vscode.Hover> {
+    const wr = document.getWordRangeAtPosition(
+      position,
+      /(pphp|store|searchParams)\.(\w+)/
+    );
+    if (!wr) {
+      return;
+    }
+    const text = document.getText(wr);
+    const [, varName, methodName] = text.match(
+      /(pphp|store|searchParams)\.(\w+)/
+    )! as [string, VarName, string];
+    const classNameMap: Record<
+      VarName,
+      "PPHP" | "PPHPLocalStore" | "SearchParamsManager"
+    > = {
+      pphp: "PPHP",
+      store: "PPHPLocalStore",
+      searchParams: "SearchParamsManager",
+    };
+    const cls = classNameMap[varName];
+    const entry = classStubs[cls].find((e) => e.name === methodName);
+    if (!entry) {
+      return;
+    }
+
+    // show the full signature in a markdown hover
+    const md = new vscode.MarkdownString();
+    md.appendCodeblock(
+      `${methodName}${entry.signature.slice(methodName.length)}`,
+      "typescript"
+    );
+    return new vscode.Hover(md, wr);
+  }
+}
+
+class PphpSignatureHelpProvider implements SignatureHelpProvider {
+  provideSignatureHelp(
+    document: TextDocument,
+    position: vscode.Position,
+    token: CancellationToken
+  ): SignatureHelp | null {
+    // look backwards to see if we’re in a pphp.*(…) call
+    const line = document
+      .lineAt(position.line)
+      .text.slice(0, position.character);
+    const m = /(pphp|store|searchParams)\.(\w+)\($/.exec(line);
+    if (!m) {
+      return null;
+    }
+    const [_, varName, methodName] = m as unknown as [string, VarName, string];
+    const classNameMap: Record<
+      VarName,
+      "PPHP" | "PPHPLocalStore" | "SearchParamsManager"
+    > = {
+      pphp: "PPHP",
+      store: "PPHPLocalStore",
+      searchParams: "SearchParamsManager",
+    };
+    const cls = classNameMap[varName];
+    const entry = classStubs[cls].find((e) => e.name === methodName);
+    if (!entry) {
+      return null;
+    }
+
+    // parse your signature string "fetchFunction(functionName: string, data?: Record<string, any>, abortPrevious?: boolean): Promise<T|string>"
+    const sigText = entry.signature;
+    // split out params / return
+    const params = sigText
+      .replace(/^[^(]+\((.*)\):.*$/, "$1")
+      .split(/\s*,\s*/)
+      .map((p) => new ParameterInformation(p));
+    const si = new SignatureInformation(
+      `${methodName}(${params.map((pi) => pi.label).join(", ")})`
+    );
+    si.parameters = params;
+
+    const help = new SignatureHelp();
+    help.signatures = [si];
+    help.activeSignature = 0;
+    help.activeParameter = 0;
+    return help;
+  }
+}
 
 class ImportComponentCodeActionProvider implements CodeActionProvider {
   public provideCodeActions(
@@ -209,6 +307,22 @@ export function activate(context: vscode.ExtensionContext) {
   const stubPath = context.asAbsolutePath("src/resources/pphp.stub.ts");
   const stubText = fs.readFileSync(stubPath, "utf8");
   parseAllStubs(stubText);
+
+  context.subscriptions.push(
+    vscode.languages.registerHoverProvider(
+      { language: "php" },
+      new PphpHoverProvider()
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.languages.registerSignatureHelpProvider(
+      { language: "php" },
+      new PphpSignatureHelpProvider(),
+      "(",
+      "," // trigger on open-paren and comma
+    )
+  );
 
   context.subscriptions.push(
     vscode.languages.registerCodeActionsProvider(
@@ -457,7 +571,6 @@ const registerPhpCompletionProvider = () => {
         // 1️⃣ Now your existing ".-member" logic…
         const m = pphpPubLine.match(/(pphp|store|searchParams)\.\w*$/);
         if (m) {
-          type VarName = "pphp" | "store" | "searchParams";
           const varName = m[1] as VarName;
 
           const classNameMap = {
