@@ -1,0 +1,299 @@
+declare global {
+  interface EventTarget {
+    removeAllEventListeners(type: string): void;
+  }
+}
+type State = Record<string, any>;
+type Binding = {
+  dependencies: Set<string>;
+  update: () => void;
+};
+type SearchParamsListener = (params: URLSearchParams) => void;
+export declare class PPHP {
+  props: Record<string, any>;
+  bindings: Binding[];
+  private static _instance;
+  private isNavigating;
+  private responseData;
+  private activeAbortController;
+  private rawProps;
+  private state;
+  private reservedWords;
+  private pendingBindings;
+  private updateScheduled;
+  private templateStore;
+  private _proxyCache;
+  private _moduleTokens;
+  private _scopedKeys;
+  private _processedPhpSections;
+  private _processedPhpScripts;
+  private readonly builtInProps;
+  private readonly eventHandlers;
+  private readonly redirectRegex;
+  private readonly mustacheRe;
+  private readonly assignmentRe;
+  private readonly htmlEntitiesRe;
+  private readonly mutators;
+  private readonly arrayMethodCache;
+  private static readonly PATH_PATTERN;
+  private static readonly MUSTACHE_TEST;
+  private static readonly MUSTACHE_PATTERN;
+  private constructor();
+  static get instance(): PPHP;
+  private _currentSectionId;
+  private _defaultToken;
+  private getNested;
+  private setNested;
+  private hasNested;
+  private scopeKey;
+  private alreadyScoped;
+  useState<T = any>(
+    arg1: object | string,
+    arg2?: string | T,
+    arg3?: T
+  ): [
+    (() => T) & {
+      value: T;
+    },
+    (v: T) => void
+  ];
+  private extractDependencies;
+  private formatValue;
+  private registerBinding;
+  /** value / checked “primitivos” ------------------------------------------ */
+  private makePrimitiveUpdater;
+  /** atributos con plantilla {{ }} ----------------------------------------- */
+  private makeAttrTemplateUpdater;
+  initBindings(): void;
+  private safeNull;
+  /**
+   * A custom tag function for template literals.
+   * It concatenates literal parts with values and replaces any undefined or null value with an empty string.
+   */
+  private safeTag;
+  private makeSafeEvaluator;
+  /**
+   * Updates a nested property given a dot-separated path.
+   *
+   * @param obj - The object to update.
+   * @param path - Dot-separated property path (e.g., 'userModal.open').
+   * @param value - The value to assign.
+   */
+  setNestedProperty(obj: any, path: string, value: any): void;
+  private resetProps;
+  initializeAllReferencedProps(): void;
+  private scheduleBindingUpdate;
+  private flushBindings;
+  private initMakeReactive;
+  private getProxiedProps;
+  private invokeHandler;
+  private registerLoop;
+  initLoopBindings(): void;
+  /**
+   * Creates a reactive proxy for an object.
+   * The proxy triggers only the update functions for bindings whose dependencies include the changed property.
+   */
+  private makeReactive;
+  private handlePopState;
+  private prefixFunctionCalls;
+  private prefixIds;
+  attachWireFunctionEvents(): void;
+  private handleDebounce;
+  /**
+   * Debounces a function to limit the rate at which it is called.
+   *
+   * The debounced function will postpone its execution until after the specified wait time
+   * has elapsed since the last time it was invoked. If `immediate` is `true`, the function
+   * will be called at the beginning of the wait period instead of at the end.
+   *
+   * @param {Function} func - The function to debounce.
+   * @param {number} [wait=300] - The number of milliseconds to wait before invoking the function.
+   * @param {boolean} [immediate=false] - If `true`, the function is invoked immediately on the leading edge.
+   * @returns {Function} - Returns the debounced version of the original function.
+   */
+  debounce<T extends (...args: any[]) => void>(
+    func: T,
+    wait?: number,
+    immediate?: boolean
+  ): (...args: Parameters<T>) => void;
+  private handlerAutofocusAttribute;
+  private handleParsedCallback;
+  private handleUndefinedFunction;
+  private handleAfterRequest;
+  private handleResponseRedirectOrUpdate;
+  private getUpdatedHTMLContent;
+  private updateBodyContent;
+  private restoreState;
+  private appendCallbackResponse;
+  private saveState;
+  private updateElementAttributes;
+  private decodeHTML;
+  private appendAfterbegin;
+  private restoreSuspenseElement;
+  private extractJson;
+  private getRedirectUrl;
+  private fetchFileWithData;
+  private handleSuspenseElement;
+  private toggleFormElements;
+  private saveElementOriginalState;
+  private getUrlParams;
+  private createFetchOptions;
+  private parseCallback;
+  private handleInputElement;
+  private resolveContext;
+  private setCursorPosition;
+  private handleInputAppendParams;
+  private handleHiddenAttribute;
+  private handleVisibilityElementAttribute;
+  private handleElementVisibility;
+  private handleElementDisplay;
+  private handleElementChange;
+  private handleAnchorTag;
+  handleNavigation(): Promise<void>;
+  /**
+   * Tries to find the best-matching <div pp-loading-url="..."> for the current path,
+   * walking “up” the URL hierarchy until it finds a match or hits root `/`.
+   */
+  private findLoadingElement;
+  /**
+   * Fades out the main content, swaps in the “loadingElement” HTML,
+   * then fades back in—based on optional [pp-loading-transition] settings.
+   */
+  private updateContentWithTransition;
+  /**
+   * Looks for a child element with [pp-loading-transition], parses it as JSON,
+   * and returns {fadeIn, fadeOut} in milliseconds.
+   */
+  private parseTransition;
+  private fadeOut;
+  private fadeIn;
+  private updateDocumentContent;
+  private restoreScrollPositions;
+  private populateDocumentBody;
+  private saveScrollPositions;
+  private getElementKey;
+  redirect(url: string): Promise<void>;
+  /**
+   * Helper method to cancel the currently active request.
+   */
+  abortActiveRequest(): void;
+  fetch(
+    url: string,
+    options?: RequestInit,
+    abortPrevious?: boolean
+  ): Promise<Response>;
+  private isJsonLike;
+  parseJson(jsonString: string): any | null;
+  private parseTime;
+  private scheduleChange;
+  processInlineModuleScripts(): Promise<void>;
+  fetchFunction<T = any>(
+    functionName: string,
+    data?: Record<string, any>,
+    abortPrevious?: boolean
+  ): Promise<T | string>;
+  private processSyncScripts;
+  sync(...prefixes: string[]): Promise<void>;
+  fetchAndUpdateBodyContent(): Promise<void>;
+  private reRunScripts;
+  /**
+   * Copies the text content from a specified code block to the clipboard and updates an icon element
+   * to indicate success. The icon's attributes can be dynamically changed based on the copy operation.
+   *
+   * @param {HTMLElement} btnElement - The button element that triggers the copy action.
+   * @param {string} containerClass - The class name of the container element that holds the code block.
+   * @param {Object} initialIconAttr - An object holding the initial attributes for the icon element.
+   * @param {Object} successIconAttr - An object holding the attributes to apply to the icon on successful copy.
+   * @param {string} [iconSelector="img"] - A CSS selector to target the icon element within the button (default is "img").
+   * @param {number} [timeout=2000] - The duration (in milliseconds) to display the success icon before reverting back to the initial state (default is 2000ms).
+   *
+   * @returns {void} This function does not return a value.
+   *
+   * @example
+   * // Usage example:
+   * copyCode(this, 'mockup-code',
+   *   {'src': '/src/app/assets/images/content-copy.svg', 'alt': 'Copy'},
+   *   {'src': '/src/app/assets/images/content-copied.svg', 'alt': 'Copied'},
+   *   'img');
+   */
+  copyCode(
+    btnElement: HTMLLIElement,
+    containerClass: string,
+    initialIconAttr: {
+      [key: string]: string;
+    }, // Object to hold initial icon attributes
+    successIconAttr: {
+      [key: string]: string;
+    }, // Object to hold success icon attributes
+    iconSelector?: string, // Default to img for the icon
+    timeout?: number
+  ): void;
+  /**
+   * Reads a cookie value by name.
+   *
+   * @param {string} name - The name of the cookie to retrieve.
+   * @returns {string | null} - The cookie value or null if not found.
+   */
+  getCookie(name: string): string | null;
+}
+export declare class PPHPLocalStore {
+  private static instance;
+  private state;
+  private listeners;
+  private pphp;
+  private STORAGE_KEY;
+  /**
+   * Creates a new PPHPLocalStore instance.
+   *
+   * @param {State} [initialState={}] - The initial state.
+   */
+  private constructor();
+  /**
+   * Gets the singleton instance of PPHPLocalStore.
+   *
+   * @param {State} [initialState={}] - The initial state.
+   * @returns {PPHPLocalStore} - The PPHPLocalStore instance.
+   */
+  static getInstance(initialState?: State): PPHPLocalStore;
+  /**
+   * Sets the state.
+   *
+   * @param {Partial<State>} update - The state update.
+   * @param {boolean} [syncWithBackend=false] - Whether to sync the update with the backend.
+   */
+  setState(update: Partial<State>, syncWithBackend?: boolean): void;
+  /**
+   * Saves the state to localStorage.
+   */
+  private saveState;
+  /**
+   * Loads the state from localStorage.
+   */
+  private loadState;
+  /**
+   * Resets the state to its initial value.
+   *
+   * @param {string} [id] - The id of the state to reset.
+   * @param {boolean} [syncWithBackend=false] - Whether to sync the reset with the backend.
+   */
+  resetState(id?: string, syncWithBackend?: boolean): void;
+}
+export declare class SearchParamsManager {
+  private static instance;
+  private listeners;
+  private constructor();
+  static getInstance(): SearchParamsManager;
+  get params(): URLSearchParams;
+  get(key: string): string | null;
+  set(key: string, value: string): void;
+  delete(key: string): void;
+  replace(params: Record<string, string | null>): void;
+  private updateURL;
+  listen(callback: SearchParamsListener): void;
+  private notifyListeners;
+  enablePopStateListener(): void;
+}
+declare var pphp: PPHP;
+declare var store: PPHPLocalStore;
+declare var searchParams: SearchParamsManager;
+export { pphp, store, searchParams };

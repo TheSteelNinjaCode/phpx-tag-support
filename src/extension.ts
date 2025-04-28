@@ -8,6 +8,7 @@ import {
   CodeActionContext,
 } from "vscode";
 import * as path from "path";
+import * as fs from "fs";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                    *
@@ -27,6 +28,14 @@ const ADD_IMPORT_COMMAND = "phpx.addImport";
 const BRACE_COLOR = "#569CD6";
 const NATIVE_FUNC_COLOR = "#D16969";
 const NATIVE_PROP_COLOR = "#4EC9B0";
+let classStubs: Record<
+  "PPHP" | "PPHPLocalStore" | "SearchParamsManager",
+  { name: string; signature: string }[]
+> = {
+  PPHP: [],
+  PPHPLocalStore: [],
+  SearchParamsManager: [],
+};
 
 // Regex patterns
 const PHP_TAG_REGEX = /<\/?[A-Z][A-Za-z0-9]*/;
@@ -196,6 +205,10 @@ const addImportCommand = async (
 
 export function activate(context: vscode.ExtensionContext) {
   console.log("PHPX tag support is now active!");
+
+  const stubPath = context.asAbsolutePath("src/resources/pphp.stub.ts");
+  const stubText = fs.readFileSync(stubPath, "utf8");
+  parseAllStubs(stubText);
 
   context.subscriptions.push(
     vscode.languages.registerCodeActionsProvider(
@@ -419,10 +432,55 @@ const registerPhpCompletionProvider = () => {
         document: vscode.TextDocument,
         position: vscode.Position
       ) {
+        const pphpPubLine = document
+          .lineAt(position.line)
+          .text.slice(0, position.character);
+
+        // 0️⃣ Top-level variable suggestions ("pphp", "store", "searchParams")
+        //    if the user has started typing any of those three
+        const varNames = ["pphp", "store", "searchParams"] as const;
+        const pphpPubPrefix = pphpPubLine.match(/([A-Za-z_]*)$/)![1];
+        if (pphpPubPrefix.length > 0) {
+          const matches = varNames.filter((v) => v.startsWith(pphpPubPrefix));
+          if (matches.length) {
+            return matches.map<vscode.CompletionItem>((v) => {
+              const item = new vscode.CompletionItem(
+                v,
+                vscode.CompletionItemKind.Variable
+              );
+              item.insertText = v;
+              return item;
+            });
+          }
+        }
+
+        // 1️⃣ Now your existing ".-member" logic…
+        const m = pphpPubLine.match(/(pphp|store|searchParams)\.\w*$/);
+        if (m) {
+          type VarName = "pphp" | "store" | "searchParams";
+          const varName = m[1] as VarName;
+
+          const classNameMap = {
+            pphp: "PPHP",
+            store: "PPHPLocalStore",
+            searchParams: "SearchParamsManager",
+          } as const;
+
+          const members = classStubs[classNameMap[varName]];
+          return members.map((m) => {
+            const kind = m.signature.includes("(")
+              ? vscode.CompletionItemKind.Method
+              : vscode.CompletionItemKind.Property;
+            const item = new vscode.CompletionItem(m.name, kind);
+            item.detail = m.signature;
+            return item;
+          });
+        }
+
         // 1️⃣ Don’t fire inside "<?…"
         const prefixLine = document.lineAt(position.line).text;
         const prefix = prefixLine.substring(0, position.character);
-        if (/^[ \t]*<\?[=a-z]*$/.test(prefix)) {
+        if (/^[ \t]*<\?[=a-z]*$/.test(pphpPubPrefix)) {
           return [];
         }
 
@@ -556,11 +614,10 @@ class ${classNamePlaceholder} extends PHPX
         return completions;
       },
     },
-    "<",
+    ".",
     "p",
-    "h",
-    "x",
-    "P" // trigger chars
+    "s",
+    "_" // now fires on those keys too
   );
 };
 
@@ -1147,6 +1204,27 @@ const getLastPart = (path: string): string => {
   const parts = path.split("\\");
   return parts[parts.length - 1];
 };
+
+function parseAllStubs(text: string) {
+  for (const cls of Object.keys(classStubs) as (keyof typeof classStubs)[]) {
+    const re = new RegExp(
+      `export\\s+declare\\s+class\\s+${cls}\\s*{([\\s\\S]*?)^}`,
+      "m"
+    );
+    const m = text.match(re);
+    if (!m) {
+      continue;
+    }
+    const body = m[1];
+    const methodRe =
+      /(?:public\s+)?([\w$]+)(?:<[^>]+>)?\(([^)]*)\):\s*([^;]+);/g;
+    let mm: RegExpExecArray | null;
+    while ((mm = methodRe.exec(body))) {
+      const [, name, params, ret] = mm;
+      classStubs[cls].push({ name, signature: `${name}(${params}): ${ret}` });
+    }
+  }
+}
 
 /* ────────────────────────────────────────────────────────────── *
  *                          EXTENSION DEACTIVATION                  *
