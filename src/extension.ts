@@ -415,6 +415,13 @@ const registerPhpCompletionProvider = () => {
     PHP_LANGUAGE,
     {
       async provideCompletionItems(document, position) {
+        const prefixLine = document.lineAt(position.line).text;
+        const prefix = prefixLine.substring(0, position.character);
+
+        if (/^[ \t]*<\?[=a-z]*$/.test(prefix)) {
+          return [];
+        }
+
         await loadComponentsFromClassLog();
 
         const completions: vscode.CompletionItem[] = [];
@@ -438,9 +445,8 @@ const registerPhpCompletionProvider = () => {
           item.detail = `Component from ${fullClass}`;
           item.filterText = `<${shortName}`;
           item.insertText = new vscode.SnippetString(`<${shortName}`);
-          if (replaceRange) {
-            item.range = replaceRange;
-          }
+          item.range = replaceRange;
+
           completions.push(item);
         }
 
