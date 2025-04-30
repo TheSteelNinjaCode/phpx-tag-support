@@ -1020,8 +1020,6 @@ function sanitizeForDiagnosticsXML(raw: string): string {
 
   // 7️⃣ blank any PHP interpolation `{$…}` so validator never sees it as a bare attribute
   text = text.replace(/\{\$[^}]+\}/g, (m) => " ".repeat(m.length));
-
-  console.log("Sanitized text:", text);
   return text;
 }
 
