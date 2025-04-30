@@ -56,6 +56,6 @@
   "homepage": "https://prismaphp.tsnc.tech/",
   "license": "MIT",
   "dependencies": {
-    "fast-xml-parser": "^5.0.9"
+    "fast-xml-parser": "^5.2.1"
   }
 }

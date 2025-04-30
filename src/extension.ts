@@ -16,7 +16,8 @@ import {
 } from "vscode";
 import * as path from "path";
 import * as fs from "fs";
-import * as ts from "typescript";
+import ts from "typescript";
+import { XMLValidator } from "fast-xml-parser";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                    *
@@ -46,6 +47,22 @@ let classStubs: Record<
   PPHPLocalStore: [],
   SearchParamsManager: [],
 };
+const VOID_TAGS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
+]);
 
 // Regex patterns
 const PHP_TAG_REGEX = /<\/?[A-Z][A-Za-z0-9]*/;
@@ -820,6 +837,170 @@ class ${classNamePlaceholder} extends PHPX
  *                     HELPER: READ COMPONENTS FROM CLASS LOG       *
  * ────────────────────────────────────────────────────────────── */
 
+/**
+ * Converts fast-xml-parser error strings to simpler, IDE-friendly text.
+ */
+function prettifyXmlError(raw: string): string {
+  // ①  Unclosed tag
+  let m = /Expected closing tag '([^']+)'/.exec(raw);
+  if (m) {
+    return `Missing closing tag: </${m[1]}> is required to match an opening tag.`;
+  }
+
+  // ②  Attribute w/out value
+  m = /attribute '([^']+)' is without value/i.exec(raw);
+  if (m) {
+    return `Attribute ${m[1]} needs a value (e.g. ${m[1]}="…")`;
+  }
+
+  // ③  Duplicate attribute
+  m = /duplicate attribute '([^']+)'/i.exec(raw);
+  if (m) {
+    return `Attribute ${m[1]} is repeated`;
+  }
+
+  // ④  Boolean attribute no permitido
+  m = /boolean attribute '([^']+)' is not allowed/i.exec(raw);
+  if (m) {
+    return `Attribute ${m[1]} must have a value ` + `(e.g. ${m[1]}="true")`;
+  }
+
+  // ④  Generic fallback
+  return raw.replace(/^.*XML:?/i, "XML error:");
+}
+
+/**
+ * Devuelve diagnósticos XML generados por fast-xml-parser.
+ *
+ * 1.  Limpia bloques PHP/comentarios/etc. SIN eliminar \n
+ * 2.  Envuelve el fragmento con <__root> para que sea XML válido
+ * 3.  Convierte {line,col} (1-based) de FXP a VS Code (0-based)
+ */
+export const getFxpDiagnostics = (
+  doc: vscode.TextDocument
+): vscode.Diagnostic[] => {
+  const raw = doc.getText();
+  const cleaned = sanitizeForDiagnosticsXML(raw);
+  const xml = `<__root>\n${cleaned}\n</__root>`;
+  const res = XMLValidator.validate(xml);
+
+  if (res === true) {
+    return [];
+  }
+
+  const { line, col, msg } = (res as any).err as {
+    line: number;
+    col: number;
+    msg: string;
+  };
+
+  const mismatch = /Expected closing tag\s+'([^']+)'/i.exec(msg);
+  let start = new vscode.Position(line - 2, Math.max(col - 1, 0));
+
+  if (mismatch) {
+    const tag = mismatch[1];
+    const idx = cleaned.search(new RegExp(`<${tag}\\b`, "i"));
+    if (idx !== -1) {
+      start = doc.positionAt(idx);
+    }
+
+    if (VOID_TAGS.has(tag.toLowerCase())) {
+      // ---- NEW: extend the range from the '<' up to the next '>' in the original text
+      const fullText = doc.getText();
+      const absOffset = doc.offsetAt(start);
+      const closePos = fullText.indexOf(">", absOffset);
+      const endPos =
+        closePos >= 0
+          ? doc.positionAt(closePos + 1)
+          : start.translate(0, tag.length + 2);
+
+      return [
+        new vscode.Diagnostic(
+          new vscode.Range(start, endPos),
+          `Void tag <${tag}> must be self-closed (e.g. <${tag}/>).`,
+          vscode.DiagnosticSeverity.Warning
+        ),
+      ];
+    }
+  }
+
+  // fallback to your existing error‐position logic...
+  const range = new vscode.Range(start, start.translate(0, 1));
+  return [
+    new vscode.Diagnostic(
+      range,
+      prettifyXmlError(msg),
+      vscode.DiagnosticSeverity.Error
+    ),
+  ];
+};
+
+/* ------------------------------------------------------------- */
+/*  sanitizeForDiagnostics  ——  ejemplo mínimo con el helper     */
+/* ------------------------------------------------------------- */
+
+/**
+ * Return a string of identical length – every character in the matched
+ * fragment becomes a space *except* for hard‐line-breaks.
+ */
+const spacer = (s: string) => s.replace(/[^\n]/g, " ");
+
+/**
+ * 1️⃣  Blanks “// …” sequences that live **in the HTML part** (i.e. *after*
+ *     we have already removed the <?php … ?> block) and are **not** part of
+ *     a URL such as “http://”.
+ *
+ *     • Keeps the very first prefix character (>, space, `) so surrounding
+ *       markup is untouched.
+ *     • Stops at the first “<” or at the end-of-line – this preserves the
+ *       following tag so Fast-XML-Parser can still see it.
+ */
+const stripInlineSlashes = (txt: string): string =>
+  txt.replace(
+    /(^|>|[)\]}"'` \t])\s*\/\/.*?(?=<|\r?\n|$)/g,
+    (m, p) => p + spacer(m.slice(p.length))
+  );
+
+/** Blanks the interior of a {{ … }} expression but keeps the braces. */
+const blankMustaches = (txt: string) =>
+  txt.replace(/{{([\s\S]*?)}}/g, (_m, inner) => "{{" + spacer(inner) + "}}");
+
+/**
+ * 2️⃣  Main sanitiser used before sending the fragment to fast-xml-parser.
+ *     It erases every bit of PHP / string-literal / heredoc / JS etc. but
+ *     *preserves line-breaks and byte-lengths* so diagnostic offsets stay
+ *     correct.
+ */
+function sanitizeForDiagnosticsXML(raw: string): string {
+  let text = raw;
+
+  /* ---------- PHP territory ---------- */
+  // 1. whole <?php … ?> blocks
+  text = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, spacer);
+  // 2. PHP /* … */ comments that might sit outside a block (rare)
+  text = text.replace(/\/\*[\s\S]*?\*\//g, spacer);
+
+  /* ---------- HTML territory ---------- */
+  // 3.   “// …” comments that appear *in* HTML (thanks, Tailwind docs!)
+  text = stripInlineSlashes(text);
+
+  // 4.  heredoc / nowdoc blocks
+  text = text.replace(
+    /<<<['"]?[A-Za-z_]\w*['"]?[\s\S]*?\n[ \t]*[A-Za-z_]\w*;?/g,
+    spacer
+  );
+
+  // 5.  normal ‘…’ and “….” string literals
+  text = text.replace(
+    /(['"])(?:\\.|[^\\])*?\1/g,
+    (m, q) => q + " ".repeat(m.length - 2) + q
+  );
+
+  text = blankMustaches(text); // 6.  {{ … }} expressions
+
+  return text;
+}
+
 // Global cache for components
 let componentsCache = new Map<string, string>();
 
@@ -1036,10 +1217,7 @@ const validateMissingImports = (
   });
   vscode.workspace.findFiles("prisma-php.json", null, 1).then((files) => {
     if (files.length > 0) {
-      const xmlDiagnostics = getXmlAttributeDiagnostics(document).concat(
-        getTagPairDiagnostics(document)
-      );
-      diagnostics.push(...xmlDiagnostics);
+      diagnostics.push(...getFxpDiagnostics(document));
     }
     diagnosticCollection.set(document.uri, diagnostics);
   });
@@ -1088,98 +1266,6 @@ const removePhpInterpolations = (text: string): string =>
     " ".repeat(match.length)
   );
 
-const removeOperatorsAndBooleansOutsideQuotes = (text: string): string => {
-  let result = "";
-  let inString = false;
-  let quoteChar = "";
-  let i = 0;
-  const startsWithToken = (token: string): boolean =>
-    text.slice(i, i + token.length) === token;
-  while (i < text.length) {
-    const ch = text[i];
-    if (!inString) {
-      if (startsWithToken("false") && !/[A-Za-z0-9_]/.test(text[i + 5] || "")) {
-        result += "     ";
-        i += 5;
-        continue;
-      } else if (
-        startsWithToken("true") &&
-        !/[A-Za-z0-9_]/.test(text[i + 4] || "")
-      ) {
-        result += "    ";
-        i += 4;
-        continue;
-      } else if (
-        startsWithToken("null") &&
-        !/[A-Za-z0-9_]/.test(text[i + 4] || "")
-      ) {
-        result += "    ";
-        i += 4;
-        continue;
-      } else if (startsWithToken("!==")) {
-        result += "   ";
-        i += 3;
-        continue;
-      } else if (startsWithToken("===")) {
-        result += "   ";
-        i += 3;
-        continue;
-      } else if (startsWithToken("->")) {
-        result += "  ";
-        i += 2;
-        continue;
-      } else if (startsWithToken("=>")) {
-        result += "  ";
-        i += 2;
-        continue;
-      } else if (ch === "?") {
-        const questionPos = i;
-        let localInString = false;
-        let localQuote = "";
-        let foundColon = -1;
-        let j = i + 1;
-        while (j < text.length) {
-          const c2 = text[j];
-          if (!localInString) {
-            if (c2 === "'" || c2 === '"') {
-              localInString = true;
-              localQuote = c2;
-            } else if (c2 === ":") {
-              foundColon = j;
-              break;
-            }
-          } else if (c2 === localQuote) {
-            localInString = false;
-          }
-          j++;
-        }
-        if (foundColon !== -1) {
-          const length = foundColon - questionPos + 1;
-          result += " ".repeat(length);
-          i = foundColon + 1;
-          continue;
-        } else {
-          result += " ";
-          i++;
-          continue;
-        }
-      }
-      if (ch === "'" || ch === '"') {
-        inString = true;
-        quoteChar = ch;
-      }
-      result += ch;
-    } else {
-      result += ch;
-      if (ch === quoteChar) {
-        inString = false;
-      }
-    }
-    i++;
-  }
-  return result;
-};
-
 const removeNormalPhpStrings = (text: string): string =>
   text.replace(/\\(['"])/g, "$1");
 
@@ -1199,147 +1285,6 @@ const sanitizeForDiagnostics = (text: string): string => {
 /* ────────────────────────────────────────────────────────────── *
  *                    XML & TAG PAIR DIAGNOSTICS                    *
  * ────────────────────────────────────────────────────────────── */
-
-const analyzeAttributes = (
-  code: string,
-  offset: number,
-  document: vscode.TextDocument
-): vscode.Diagnostic[] => {
-  const diagnostics: vscode.Diagnostic[] = [];
-  const tagRegex = /<(\w+)((?:"[^"]*"|'[^']*'|[^>"'])*)\/?>/g;
-  let match: RegExpExecArray | null;
-  while ((match = tagRegex.exec(code)) !== null) {
-    const fullTag = match[0];
-    const tagName = match[1];
-    const attrText = match[2] || "";
-    const attrTextIndexInSnippet = fullTag.indexOf(attrText);
-    const combinedRegex =
-      /([A-Za-z_:][A-Za-z0-9_.:\-]*)(\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?|\{\$[^}]+\}|\$+\w+/g;
-    let attrMatch: RegExpExecArray | null;
-    while ((attrMatch = combinedRegex.exec(attrText)) !== null) {
-      const attrName = attrMatch[1];
-      const attrAssignment = attrMatch[2];
-      if (attrName && !attrAssignment) {
-        const startIndexInSnippet =
-          attrTextIndexInSnippet + (attrMatch.index ?? 0);
-        const startIndex = offset + match.index + startIndexInSnippet;
-        const startPos = document.positionAt(startIndex);
-        const endPos = document.positionAt(startIndex + attrName.length);
-        diagnostics.push(
-          new vscode.Diagnostic(
-            new vscode.Range(startPos, endPos),
-            `In XML mode, attribute "${attrName}" in <${tagName}> must have an explicit value (e.g., ${attrName}="value")`,
-            vscode.DiagnosticSeverity.Warning
-          )
-        );
-      }
-    }
-  }
-  return diagnostics;
-};
-
-const getXmlAttributeDiagnostics = (
-  document: vscode.TextDocument
-): vscode.Diagnostic[] => {
-  const originalText = document.getText();
-  let diagnostics: vscode.Diagnostic[] = [];
-  const sanitizedMain = sanitizeForDiagnostics(originalText);
-  diagnostics.push(...analyzeAttributes(sanitizedMain, 0, document));
-  const heredocBlocks = extractAllHeredocBlocks(originalText);
-  heredocBlocks.forEach((block) => {
-    let blockContent = removePhpComments(block.content);
-    blockContent = blankOutHeredocOpeners(blockContent);
-    blockContent = removePhpRegexLiterals(blockContent);
-    diagnostics.push(
-      ...analyzeAttributes(blockContent, block.startIndex, document)
-    );
-  });
-  return diagnostics;
-};
-
-const getTagPairDiagnostics = (
-  document: vscode.TextDocument
-): vscode.Diagnostic[] => {
-  const diagnostics: vscode.Diagnostic[] = [];
-
-  // 1️⃣ sanitize to blank‑out PHP/etc.
-  const sanitized = sanitizeForDiagnostics(document.getText());
-
-  // 2️⃣ rebuild “tagOnly” but preserve original match‑length by padding
-  const tagOnly = sanitized.replace(
-    /<\s*(\/?)([A-Za-z][A-Za-z0-9-]*)(\s+(?:[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'(?:\\.|[^'])*'|[^\s>]+))?))*\s*(\/?)>/g,
-    (match, closingSlash, tagName, attrs, selfClosingSlash) => {
-      // core is what we really want to match on
-      const core = `<${closingSlash}${tagName}${selfClosingSlash ? "/" : ""}>`;
-      // pad with spaces so it's exactly as long as the original match
-      return core + " ".repeat(match.length - core.length);
-    }
-  );
-
-  const voids = new Set(["input", "br", "hr", "img", "meta", "link"]);
-
-  const tagRx =
-    /<(\/?)([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'(?:\\.|[^'])*'|[^\s>]+))?))*\s*(\/?)>/g;
-  const stack: { tag: string; pos: number }[] = [];
-  let m: RegExpExecArray | null;
-
-  while ((m = tagRx.exec(tagOnly)) !== null) {
-    const isClosing = m[1] === "/";
-    const tag = m[2];
-    const selfClose = m[3] === "/";
-    const idx = m.index;
-
-    if (isClosing) {
-      if (!stack.length) {
-        const p = document.positionAt(idx);
-        diagnostics.push(
-          new vscode.Diagnostic(
-            new vscode.Range(p, p.translate(0, tag.length + 3)),
-            `Extra closing tag </${tag}> found.`,
-            vscode.DiagnosticSeverity.Warning
-          )
-        );
-      } else {
-        const last = stack.pop()!;
-        if (last.tag !== tag) {
-          const p = document.positionAt(idx);
-          diagnostics.push(
-            new vscode.Diagnostic(
-              new vscode.Range(p, p.translate(0, tag.length + 3)),
-              `Mismatched closing tag: expected </${last.tag}> but found </${tag}>.`,
-              vscode.DiagnosticSeverity.Warning
-            )
-          );
-        }
-      }
-    } else if (!selfClose && voids.has(tag)) {
-      const p = document.positionAt(idx);
-      diagnostics.push(
-        new vscode.Diagnostic(
-          new vscode.Range(p, p.translate(0, tag.length + 2)),
-          `Void tag <${tag}> must be self‑closed in XML (e.g. <${tag}/>).`,
-          vscode.DiagnosticSeverity.Warning
-        )
-      );
-    } else if (!selfClose && !voids.has(tag)) {
-      stack.push({ tag, pos: idx });
-    }
-  }
-
-  // any leftovers in stack are unclosed opening tags
-  for (const unclosed of stack) {
-    const p = document.positionAt(unclosed.pos);
-    diagnostics.push(
-      new vscode.Diagnostic(
-        new vscode.Range(p, p.translate(0, unclosed.tag.length + 2)),
-        `Missing closing tag for <${unclosed.tag}>.`,
-        vscode.DiagnosticSeverity.Warning
-      )
-    );
-  }
-
-  return diagnostics;
-};
 
 /* ────────────────────────────────────────────────────────────── *
  *                    PHP IMPORT STATEMENT PARSING                   *
@@ -1401,39 +1346,61 @@ const getLastPart = (path: string): string => {
 };
 
 function parseStubsWithTS(source: string) {
+  // 1) build a lookup of the class-names we care about
+  const stubNames = new Set<keyof typeof classStubs>(
+    Object.keys(classStubs) as (keyof typeof classStubs)[]
+  );
+
+  // 2) parse into a TS SourceFile
   const sf = ts.createSourceFile(
     "pphp.d.ts",
     source,
     ts.ScriptTarget.Latest,
-    true
+    /*setParentNodes*/ true
   );
-  sf.forEachChild((node) => {
-    if (ts.isClassDeclaration(node) && node.name?.text === "PPHP") {
-      node.members.forEach((member) => {
-        // skip private
-        if (
-          ts.canHaveModifiers(member) &&
-          ts
-            .getModifiers(member)
-            ?.some((m) => m.kind === ts.SyntaxKind.PrivateKeyword)
-        ) {
-          return;
-        }
 
-        if (ts.isMethodSignature(member) || ts.isMethodDeclaration(member)) {
-          const name = (member.name as ts.Identifier).text;
-          const sig = member.getText(sf);
-          classStubs.PPHP.push({ name, signature: sig });
-        } else if (
-          ts.isPropertySignature(member) ||
-          ts.isPropertyDeclaration(member)
-        ) {
-          const name = (member.name as ts.Identifier).text;
-          const type = member.type?.getText(sf) ?? "any";
-          classStubs.PPHP.push({ name, signature: `: ${type}` });
-        }
-      });
+  // 3) scan every top-level declaration
+  sf.statements.forEach((stmt) => {
+    if (!ts.isClassDeclaration(stmt) || !stmt.name) {
+      return;
     }
+
+    const name = stmt.name.text as keyof typeof classStubs;
+    if (!stubNames.has(name)) {
+      return;
+    }
+
+    // 4) for each member in that class…
+    stmt.members.forEach((member) => {
+      // skip any private members
+      if (
+        ts.canHaveModifiers(member) &&
+        ts
+          .getModifiers(member)
+          ?.some((m) => m.kind === ts.SyntaxKind.PrivateKeyword)
+      ) {
+        return;
+      }
+
+      // METHOD?
+      if (ts.isMethodSignature(member) || ts.isMethodDeclaration(member)) {
+        const mName = (member.name as ts.Identifier).text;
+        const sig = member.getText(sf).trim();
+        classStubs[name].push({ name: mName, signature: sig });
+      }
+      // PROPERTY?
+      else if (
+        ts.isPropertySignature(member) ||
+        ts.isPropertyDeclaration(member)
+      ) {
+        const pName = (member.name as ts.Identifier).text;
+        const pType = member.type?.getText(sf).trim() ?? "any";
+        // avoid duplicate if a method of same name already ran
+        if (!classStubs[name].some((e) => e.name === pName)) {
+          classStubs[name].push({ name: pName, signature: `: ${pType}` });
+        }
+      }
+    });
   });
 }
 
