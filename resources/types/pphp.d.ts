@@ -3,61 +3,68 @@ declare global {
     removeAllEventListeners(type: string): void;
   }
 }
-type State = Record<string, any>;
-type Binding = {
-  dependencies: Set<string>;
-  update: () => void;
-};
+type LocalStoreState = Record<string, any>;
 type SearchParamsListener = (params: URLSearchParams) => void;
 export declare class PPHP {
   props: Record<string, any>;
-  bindings: Binding[];
   private static _instance;
-  private isNavigating;
-  private responseData;
-  private activeAbortController;
-  private rawProps;
-  private state;
-  private reservedWords;
-  private pendingBindings;
-  private updateScheduled;
-  private templateStore;
+  private _isNavigating;
+  private _responseData;
+  private _activeAbortController;
+  private _rawProps;
+  private _elementState;
+  private _reservedWords;
+  private _bindings;
+  private _pendingBindings;
+  private _updateScheduled;
+  private _templateStore;
   private _proxyCache;
-  private _moduleTokens;
   private _scopedKeys;
   private _processedPhpSections;
   private _processedPhpScripts;
-  private readonly builtInProps;
-  private readonly eventHandlers;
-  private readonly redirectRegex;
-  private readonly mustacheRe;
-  private readonly assignmentRe;
-  private readonly htmlEntitiesRe;
-  private readonly mutators;
-  private readonly arrayMethodCache;
-  private static readonly PATH_PATTERN;
-  private static readonly MUSTACHE_TEST;
-  private static readonly MUSTACHE_PATTERN;
+  private _effects;
+  private _pendingEffects;
+  private readonly _builtInProps;
+  private readonly _eventHandlers;
+  private readonly _redirectRegex;
+  private readonly _mustacheRe;
+  private readonly _assignmentRe;
+  private readonly _htmlEntitiesRe;
+  private readonly _mutators;
+  private readonly _arrayMethodCache;
+  private static readonly _pathPattern;
+  private static readonly _mustacheTest;
+  private static readonly _mustachePattern;
   private constructor();
   static get instance(): PPHP;
   private scheduleInitialHydration;
   private _currentSectionId;
-  private _defaultToken;
   private getNested;
   private setNested;
   private hasNested;
   private scopeKey;
   private alreadyScoped;
-  useState<T = any>(
-    arg1: object | string,
-    arg2?: string | T,
-    arg3?: T
-  ): [
-    (() => T) & {
-      value: T;
-    },
-    (v: T) => void
-  ];
+  /**
+   * Run a side-effect after every reactive update.
+   * @param fn - called after each flushBindings()
+   * @returns cleanup to stop running it
+   */
+  effect(fn: () => void, deps?: (string | (() => any))[]): () => void;
+  /**
+   * Manages a stateful value scoped to the current section, providing a getter and setter.
+   *
+   * @template T - The type of the state value.
+   * @param key - A unique identifier for the state value.
+   * @param initial - The initial value of the state.
+   * @returns A tuple containing:
+   *   - A getter function to retrieve the current state value.
+   *   - A setter function to update the state value, either directly or via a function
+   *     that receives the previous value and returns the next value.
+   */
+  state<T>(
+    key: string,
+    initial: T
+  ): [(() => T) & T, (value: T | ((prev: T) => T)) => void];
   private extractDependencies;
   private formatValue;
   private registerBinding;
@@ -97,6 +104,7 @@ export declare class PPHP {
   private makeReactive;
   private handlePopState;
   private prefixFunctionCalls;
+  /** Prefix every identifier / function call that belongs to this section */
   private prefixIds;
   private attachWireFunctionEvents;
   private handleDebounce;
@@ -124,9 +132,9 @@ export declare class PPHP {
   private handleResponseRedirectOrUpdate;
   private getUpdatedHTMLContent;
   private updateBodyContent;
-  private restoreState;
+  private restoreElementState;
   private appendCallbackResponse;
-  private saveState;
+  private saveElementState;
   private updateElementAttributes;
   private decodeHTML;
   private appendAfterbegin;
@@ -211,14 +219,13 @@ export declare class PPHP {
    * @returns {void} This function does not return a value.
    *
    * @example
-   * // Usage example:
    * copyCode(this, 'mockup-code',
    *   {'src': '/src/app/assets/images/content-copy.svg', 'alt': 'Copy'},
    *   {'src': '/src/app/assets/images/content-copied.svg', 'alt': 'Copied'},
    *   'img');
    */
   copyCode(
-    btnElement: HTMLLIElement,
+    btnElement: HTMLElement,
     containerClass: string,
     initialIconAttr: {
       [key: string]: string;
@@ -246,23 +253,23 @@ export declare class PPHPLocalStore {
   /**
    * Creates a new PPHPLocalStore instance.
    *
-   * @param {State} [initialState={}] - The initial state.
+   * @param {LocalStoreState} [initialState={}] - The initial state.
    */
   private constructor();
   /**
    * Gets the singleton instance of PPHPLocalStore.
    *
-   * @param {State} [initialState={}] - The initial state.
+   * @param {LocalStoreState} [initialState={}] - The initial state.
    * @returns {PPHPLocalStore} - The PPHPLocalStore instance.
    */
-  static getInstance(initialState?: State): PPHPLocalStore;
+  static getInstance(initialState?: LocalStoreState): PPHPLocalStore;
   /**
    * Sets the state.
    *
-   * @param {Partial<State>} update - The state update.
+   * @param {Partial<LocalStoreState>} update - The state update.
    * @param {boolean} [syncWithBackend=false] - Whether to sync the update with the backend.
    */
-  setState(update: Partial<State>, syncWithBackend?: boolean): void;
+  setState(update: Partial<LocalStoreState>, syncWithBackend?: boolean): void;
   /**
    * Saves the state to localStorage.
    */

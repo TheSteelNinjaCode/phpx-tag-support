@@ -16,6 +16,7 @@ import {
 } from "vscode";
 import * as path from "path";
 import * as fs from "fs";
+import * as ts from "typescript";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                    *
@@ -369,9 +370,9 @@ function validatePphpCalls(
 export function activate(context: vscode.ExtensionContext) {
   console.log("PHPX tag support is now active!");
 
-  const stubPath = context.asAbsolutePath("resources/pphp.stub.txt");
+  const stubPath = context.asAbsolutePath("resources/types/pphp.d.ts");
   const stubText = fs.readFileSync(stubPath, "utf8");
-  parseAllStubs(stubText);
+  parseStubsWithTS(stubText);
 
   context.subscriptions.push(
     vscode.languages.registerHoverProvider(
@@ -631,16 +632,14 @@ const registerPhpCompletionProvider = () => {
         document: vscode.TextDocument,
         position: vscode.Position
       ) {
-        const pphpPubLine = document
-          .lineAt(position.line)
-          .text.slice(0, position.character);
+        const line = document.lineAt(position.line).text;
 
         // 0️⃣ Top-level variable suggestions ("pphp", "store", "searchParams")
         //    if the user has started typing any of those three
         const varNames = ["pphp", "store", "searchParams"] as const;
-        const pphpPubPrefix = pphpPubLine.match(/([A-Za-z_]*)$/)![1];
-        if (pphpPubPrefix.length > 0) {
-          const matches = varNames.filter((v) => v.startsWith(pphpPubPrefix));
+        const prefixLine = line.match(/([A-Za-z_]*)$/)![1];
+        if (prefixLine.length > 0) {
+          const matches = varNames.filter((v) => v.startsWith(prefixLine));
           if (matches.length) {
             return matches.map<vscode.CompletionItem>((v) => {
               const item = new vscode.CompletionItem(
@@ -654,7 +653,7 @@ const registerPhpCompletionProvider = () => {
         }
 
         // 1️⃣ Now your existing ".-member" logic…
-        const m = pphpPubLine.match(/(pphp|store|searchParams)\.\w*$/);
+        const m = line.match(/(pphp|store|searchParams)\.\w*$/);
         if (m) {
           const varName = m[1] as VarName;
 
@@ -676,9 +675,8 @@ const registerPhpCompletionProvider = () => {
         }
 
         // 1️⃣ Don’t fire inside "<?…"
-        const prefixLine = document.lineAt(position.line).text;
         const prefix = prefixLine.substring(0, position.character);
-        if (/^[ \t]*<\?[=a-z]*$/.test(pphpPubPrefix)) {
+        if (/^[ \t]*<\?[=a-z]*$/.test(prefix)) {
           return [];
         }
 
@@ -688,8 +686,7 @@ const registerPhpCompletionProvider = () => {
 
         // Existing component completions from use statements.
         const useMap = parsePhpUseStatements(document.getText());
-        const line = document.lineAt(position.line);
-        const lessThanIndex = line.text.lastIndexOf("<", position.character);
+        const lessThanIndex = line.lastIndexOf("<", position.character);
         let replaceRange: vscode.Range | undefined;
         if (lessThanIndex !== -1) {
           replaceRange = new vscode.Range(
@@ -1403,25 +1400,41 @@ const getLastPart = (path: string): string => {
   return parts[parts.length - 1];
 };
 
-function parseAllStubs(text: string) {
-  for (const cls of Object.keys(classStubs) as (keyof typeof classStubs)[]) {
-    const re = new RegExp(
-      `export\\s+declare\\s+class\\s+${cls}\\s*{([\\s\\S]*?)^}`,
-      "m"
-    );
-    const m = text.match(re);
-    if (!m) {
-      continue;
+function parseStubsWithTS(source: string) {
+  const sf = ts.createSourceFile(
+    "pphp.d.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true
+  );
+  sf.forEachChild((node) => {
+    if (ts.isClassDeclaration(node) && node.name?.text === "PPHP") {
+      node.members.forEach((member) => {
+        // skip private
+        if (
+          ts.canHaveModifiers(member) &&
+          ts
+            .getModifiers(member)
+            ?.some((m) => m.kind === ts.SyntaxKind.PrivateKeyword)
+        ) {
+          return;
+        }
+
+        if (ts.isMethodSignature(member) || ts.isMethodDeclaration(member)) {
+          const name = (member.name as ts.Identifier).text;
+          const sig = member.getText(sf);
+          classStubs.PPHP.push({ name, signature: sig });
+        } else if (
+          ts.isPropertySignature(member) ||
+          ts.isPropertyDeclaration(member)
+        ) {
+          const name = (member.name as ts.Identifier).text;
+          const type = member.type?.getText(sf) ?? "any";
+          classStubs.PPHP.push({ name, signature: `: ${type}` });
+        }
+      });
     }
-    const body = m[1];
-    const methodRe =
-      /(?:public\s+)?([\w$]+)(?:<[^>]+>)?\(([^)]*)\):\s*([^;]+);/g;
-    let mm: RegExpExecArray | null;
-    while ((mm = methodRe.exec(body))) {
-      const [, name, params, ret] = mm;
-      classStubs[cls].push({ name, signature: `${name}(${params}): ${ret}` });
-    }
-  }
+  });
 }
 
 /* ────────────────────────────────────────────────────────────── *
