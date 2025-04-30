@@ -849,61 +849,105 @@ export const getFxpDiagnostics = (
   doc: vscode.TextDocument
 ): vscode.Diagnostic[] => {
   const raw = doc.getText();
-  // 1. strip out PHP, heredoc markers, strings, mustaches, etc.
-  const cleaned = sanitizeForDiagnosticsXML(raw);
 
-  // 2. normalize void tags so <meta ...> → <meta .../> and the validator
-  //    will never complain “Missing closing tag </meta>”
-  const cleanedWithVoids = cleaned.replace(
+  // 0️⃣ build a sanitized copy for both XML‐validation and our own searches
+  const sanitized = sanitizeForDiagnosticsXML(raw);
+
+  // 1️⃣ wrap & void void‐tags for the XML validator
+  const voided = sanitized.replace(
     /<\s*(meta)\b([^>]*?)(?<!\/)>/gi,
     (_m, tag, attrs) => `<${tag}${attrs}/>`
   );
-
-  // 3. wrap and validate
-  const xml = `<__root>\n${cleanedWithVoids}\n</__root>`;
+  const xml = `<__root>\n${voided}\n</__root>`;
   const res = XMLValidator.validate(xml);
-
   if (res === true) {
     return [];
   }
 
+  // 2️⃣ extract parser error
   const { line, col, msg } = (res as any).err as {
     line: number;
     col: number;
     msg: string;
   };
-
-  // prettify the error text
   const pretty = prettifyXmlError(msg);
 
-  // map FXP’s 1-based XML coords back to your document (0-based),
-  // accounting for the extra <__root> line at the top.
-  const docLine = Math.max(line - 2, 0);
-  const docCol = Math.max(col - 1, 0);
-  const start = new vscode.Position(docLine, docCol);
+  // 3️⃣ map (line, col) → offset in `voided` → back into raw/sanitized
+  const xmlLines = xml.split("\n");
+  let xmlOffset = 0;
+  for (let i = 0; i < line - 1; i++) {
+    xmlOffset += xmlLines[i].length + 1;
+  }
+  xmlOffset += col - 1;
+  const wrapIndex = xml.indexOf(voided);
+  let errorOffset = xmlOffset - wrapIndex;
+  errorOffset = Math.max(0, Math.min(errorOffset, raw.length - 1));
 
-  // default underline length
-  let end = start.translate(0, 1);
-
-  // if it’s a boolean-attribute error, underline the entire name:
+  // 4️⃣ special‐case attribute‐needs‐value
   const attrMatch = /^Attribute (\w+)/.exec(pretty);
   if (attrMatch) {
-    end = start.translate(0, attrMatch[1].length);
+    const badAttr = attrMatch[1];
+    const attrRe = new RegExp(`\\b${badAttr}\\b\\s*=`, "g");
+    let bestIdx = -1;
+    // search **sanitized** so we catch heredoc and other dynamic places
+    for (const m of sanitized.matchAll(attrRe)) {
+      const idx = m.index!;
+      if (idx <= errorOffset && idx > bestIdx) {
+        bestIdx = idx;
+      }
+    }
+    if (bestIdx < 0) {
+      bestIdx = sanitized.search(attrRe);
+    }
+    if (bestIdx >= 0) {
+      // use the same offset in the real document
+      const start = doc.positionAt(bestIdx);
+      const end = start.translate(0, badAttr.length);
+      return [
+        new vscode.Diagnostic(
+          new vscode.Range(start, end),
+          pretty,
+          vscode.DiagnosticSeverity.Error
+        ),
+      ];
+    }
   }
 
+  // 5️⃣ otherwise it’s a missing‐closing‐tag—highlight exactly the unclosed opening
+  let start = doc.positionAt(errorOffset);
+  let end = start.translate(0, 1);
   let range = new vscode.Range(start, end);
 
-  // if it’s “Missing closing tag: </Foo>…”, jump to the next <Foo after 'start'
-  const m = /^Missing closing tag: <\/([^>]+)>/.exec(pretty);
-  if (m) {
-    const tag = m[1];
-    // compute offset of our diagnostic start
-    const startOffset = doc.offsetAt(start);
-    // find the *next* opening <tag after that offset
-    const openIdx = raw.indexOf(`<${tag}`, startOffset);
-    if (openIdx !== -1) {
-      const openingPos = doc.positionAt(openIdx + 1);
-      range = new vscode.Range(openingPos, openingPos.translate(0, tag.length));
+  const closeMatch = /^Missing closing tag: <\/([^>]+)>/.exec(pretty);
+  if (closeMatch) {
+    const tag = closeMatch[1];
+    // all `<tag...>` without a slash before `>`
+    const openRe = new RegExp(`<${tag}\\b([^>]*?)(?<!\\/)\\>`, "g");
+    const opens = Array.from(raw.matchAll(openRe), (m) => m.index!).sort(
+      (a, b) => a - b
+    );
+    // all `</tag>`
+    const closeRe = new RegExp(`</${tag}>`, "g");
+    const closes = Array.from(raw.matchAll(closeRe), (m) => m.index!).sort(
+      (a, b) => a - b
+    );
+
+    // pair closes off against opens
+    const unmatched = [...opens];
+    for (const c of closes) {
+      for (let i = unmatched.length - 1; i >= 0; i--) {
+        if (unmatched[i] < c) {
+          unmatched.splice(i, 1);
+          break;
+        }
+      }
+    }
+
+    // first leftover open is the culprit
+    const badOpen = unmatched[0];
+    if (badOpen !== null) {
+      const pos = doc.positionAt(badOpen + 1); // skip the '<'
+      range = new vscode.Range(pos, pos.translate(0, tag.length));
     }
   }
 
