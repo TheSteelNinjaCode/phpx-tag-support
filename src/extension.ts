@@ -1,23 +1,21 @@
-import * as vscode from "vscode";
-import {
-  CodeActionProvider,
-  CodeAction,
-  CodeActionKind,
-  TextDocument,
-  Range,
-  CodeActionContext,
-} from "vscode";
-import {
-  SignatureHelpProvider,
-  SignatureHelp,
-  ParameterInformation,
-  SignatureInformation,
-  CancellationToken,
-} from "vscode";
-import * as path from "path";
 import * as fs from "fs";
-import ts from "typescript";
+import * as path from "path";
+import * as vscode from "vscode";
 import { XMLValidator } from "fast-xml-parser";
+import ts from "typescript";
+import {
+  CancellationToken,
+  CodeAction,
+  CodeActionContext,
+  CodeActionKind,
+  CodeActionProvider,
+  ParameterInformation,
+  Range,
+  SignatureHelp,
+  SignatureHelpProvider,
+  SignatureInformation,
+  TextDocument,
+} from "vscode";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                    *
@@ -29,6 +27,14 @@ interface HeredocBlock {
 }
 
 type VarName = "pphp" | "store" | "searchParams";
+const classNameMap: Record<
+  VarName,
+  "PPHP" | "PPHPLocalStore" | "SearchParamsManager"
+> = {
+  pphp: "PPHP",
+  store: "PPHPLocalStore",
+  searchParams: "SearchParamsManager",
+};
 
 const PHP_LANGUAGE = "php";
 
@@ -47,22 +53,6 @@ let classStubs: Record<
   PPHPLocalStore: [],
   SearchParamsManager: [],
 };
-const VOID_TAGS = new Set([
-  "area",
-  "base",
-  "br",
-  "col",
-  "embed",
-  "hr",
-  "img",
-  "input",
-  "link",
-  "meta",
-  "param",
-  "source",
-  "track",
-  "wbr",
-]);
 
 // Regex patterns
 const PHP_TAG_REGEX = /<\/?[A-Z][A-Za-z0-9]*/;
@@ -86,14 +76,6 @@ class PphpHoverProvider implements vscode.HoverProvider {
     const [, varName, methodName] = text.match(
       /(pphp|store|searchParams)\.(\w+)/
     )! as [string, VarName, string];
-    const classNameMap: Record<
-      VarName,
-      "PPHP" | "PPHPLocalStore" | "SearchParamsManager"
-    > = {
-      pphp: "PPHP",
-      store: "PPHPLocalStore",
-      searchParams: "SearchParamsManager",
-    };
     const cls = classNameMap[varName];
     const entry = classStubs[cls].find((e) => e.name === methodName);
     if (!entry) {
@@ -125,23 +107,13 @@ class PphpSignatureHelpProvider implements SignatureHelpProvider {
       return null;
     }
     const [_, varName, methodName] = m as unknown as [string, VarName, string];
-    const classNameMap: Record<
-      VarName,
-      "PPHP" | "PPHPLocalStore" | "SearchParamsManager"
-    > = {
-      pphp: "PPHP",
-      store: "PPHPLocalStore",
-      searchParams: "SearchParamsManager",
-    };
     const cls = classNameMap[varName];
     const entry = classStubs[cls].find((e) => e.name === methodName);
     if (!entry) {
       return null;
     }
 
-    // parse your signature string "fetchFunction(functionName: string, data?: Record<string, any>, abortPrevious?: boolean): Promise<T|string>"
     const sigText = entry.signature;
-    // split out params / return
     const params = sigText
       .replace(/^[^(]+\((.*)\):.*$/, "$1")
       .split(/\s*,\s*/)
@@ -894,44 +866,28 @@ export const getFxpDiagnostics = (
     msg: string;
   };
 
-  const mismatch = /Expected closing tag\s+'([^']+)'/i.exec(msg);
-  let start = new vscode.Position(line - 2, Math.max(col - 1, 0));
+  // 1️⃣ prettify the error text
+  const pretty = prettifyXmlError(msg);
 
-  if (mismatch) {
-    const tag = mismatch[1];
-    const idx = cleaned.search(new RegExp(`<${tag}\\b`, "i"));
+  // 2️⃣ default to FXP’s position (still works as a fallback)
+  let start = new vscode.Position(line - 1, Math.max(col - 1, 0));
+  let range = new vscode.Range(start, start.translate(0, 1));
+
+  // 3️⃣ if it’s “Missing closing tag: </Foo>…”, jump back to the opening <Foo>
+  const m = /^Missing closing tag: <\/([^>]+)>/.exec(pretty);
+  if (m) {
+    const tag = m[1];
+    const openRe = new RegExp(`<${tag}\\b`, "g");
+    const idx = raw.search(openRe);
     if (idx !== -1) {
-      start = doc.positionAt(idx);
-    }
-
-    if (VOID_TAGS.has(tag.toLowerCase())) {
-      // ---- NEW: extend the range from the '<' up to the next '>' in the original text
-      const fullText = doc.getText();
-      const absOffset = doc.offsetAt(start);
-      const closePos = fullText.indexOf(">", absOffset);
-      const endPos =
-        closePos >= 0
-          ? doc.positionAt(closePos + 1)
-          : start.translate(0, tag.length + 2);
-
-      return [
-        new vscode.Diagnostic(
-          new vscode.Range(start, endPos),
-          `Void tag <${tag}> must be self-closed (e.g. <${tag}/>).`,
-          vscode.DiagnosticSeverity.Warning
-        ),
-      ];
+      // +1 so we land on the tag name itself, not the '<'
+      const openingPos = doc.positionAt(idx + 1);
+      range = new vscode.Range(openingPos, openingPos.translate(0, tag.length));
     }
   }
 
-  // fallback to your existing error‐position logic...
-  const range = new vscode.Range(start, start.translate(0, 1));
   return [
-    new vscode.Diagnostic(
-      range,
-      prettifyXmlError(msg),
-      vscode.DiagnosticSeverity.Error
-    ),
+    new vscode.Diagnostic(range, pretty, vscode.DiagnosticSeverity.Error),
   ];
 };
 
