@@ -980,20 +980,8 @@ const blankMustaches = (txt: string) =>
 function sanitizeForDiagnosticsXML(raw: string): string {
   let text = raw;
 
-  // 0️⃣ strip out every PHP-style /* … */ comment (including /** … */) so
-  //    any <tags> inside them never make it to the XML validator
-  text = raw.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
-
-  // 1️⃣ Remove entire <?php … ?> and <?= … ?> blocks in one go:
-  text = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (m) => " ".repeat(m.length));
-
-  // 2️⃣ Then blank any standalone "<?" or "<?=" that didn't have a closing "?>"
-  text = text.replace(/<\?(?:php|=)?/g, (m) => " ".repeat(m.length));
-
-  // 3️⃣ Strip HTML‐style “//…” comments…
-  text = stripInlineSlashes(text);
-
-  // 4️⃣ Preserve the INSIDE of heredoc/nowdoc, blank only the markers
+  // ── 1️⃣ Preserve heredoc/nowdoc interior ─────────────────────────
+  // Blank only the opening <<<… and closing …; lines; keep the real HTML intact.
   text = text.replace(
     /<<<['"]?([A-Za-z_]\w*)['"]?\r?\n([\s\S]*?)\r?\n\s*\1\s*;?/g,
     (fullMatch) => {
@@ -1002,24 +990,41 @@ function sanitizeForDiagnosticsXML(raw: string): string {
         .map(
           (line, i) =>
             i === 0 || i === lines.length - 1
-              ? " ".repeat(line.length) // blank the <<<… and closing lines
-              : line // keep your real HTML intact
+              ? " ".repeat(line.length) // blank only the markers
+              : line // keep interior
         )
         .join("\n");
     }
   );
 
-  // 5️⃣ Blank out all normal '…' and "…" string literals
+  // ── 2️⃣ Strip out PHP-style /* … */ comments ────────────────────
+  text = text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
+
+  // ── 3️⃣ Strip out single-line // comments in PHP ────────────────
+  text = text.replace(/^\/\/.*$/gm, (m) => " ".repeat(m.length));
+
+  // ── 4️⃣ Strip any <?php … ?> blocks but only the tags ─────────────
+  //    (we blank the <?php / ?> markers, not the entire content)
+  text = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (m) => " ".repeat(m.length));
+  text = text.replace(/<\?(?:php|=)?/g, (m) => " ".repeat(m.length));
+
+  // ── 5️⃣ Strip HTML-style “//…” comments (outside PHP) ────────────
+  text = stripInlineSlashes(text);
+
+  // ── 6️⃣ Blank out all normal '…' and "…" string literals ─────────
   text = text.replace(
     /(['"])(?:\\.|[^\\])*?\1/g,
     (m, q) => q + " ".repeat(m.length - 2) + q
   );
 
-  // 6️⃣ Blank {{ … }} JS‐in‐Mustache
+  // ── 7️⃣ Blank {{ … }} JS-in-Mustache ─────────────────────────────
   text = blankMustaches(text);
 
-  // 7️⃣ blank any PHP interpolation `{$…}` so validator never sees it as a bare attribute
+  // ── 8️⃣ Blank any PHP interpolation `{$…}` ───────────────────────
   text = text.replace(/\{\$[^}]+\}/g, (m) => " ".repeat(m.length));
+
+  // ── 9️⃣ Remove && and single & operators ─────────────────────────────
+  text = text.replace(/&&|&/g, (match) => " ".repeat(match.length));
   return text;
 }
 
