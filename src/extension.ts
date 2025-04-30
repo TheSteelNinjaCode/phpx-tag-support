@@ -359,7 +359,7 @@ function validatePphpCalls(
 export function activate(context: vscode.ExtensionContext) {
   console.log("PHPX tag support is now active!");
 
-  const stubPath = context.asAbsolutePath("resources/types/pphp.d.ts");
+  const stubPath = context.asAbsolutePath("resources/types/pphp.d.txt");
   const stubText = fs.readFileSync(stubPath, "utf8");
   parseStubsWithTS(stubText);
 
