@@ -841,19 +841,26 @@ function prettifyXmlError(raw: string): string {
   return raw.replace(/^.*XML:?/i, "XML error:");
 }
 
-/**
- * Devuelve diagnósticos XML generados por fast-xml-parser.
- *
- * 1.  Limpia bloques PHP/comentarios/etc. SIN eliminar \n
- * 2.  Envuelve el fragmento con <__root> para que sea XML válido
- * 3.  Convierte {line,col} (1-based) de FXP a VS Code (0-based)
- */
+/* ────────────────────────────────────────────────────────────── *
+ *                    XML & TAG PAIR DIAGNOSTICS                    *
+ * ────────────────────────────────────────────────────────────── */
+
 export const getFxpDiagnostics = (
   doc: vscode.TextDocument
 ): vscode.Diagnostic[] => {
   const raw = doc.getText();
+  // 1. strip out PHP, heredoc markers, strings, mustaches, etc.
   const cleaned = sanitizeForDiagnosticsXML(raw);
-  const xml = `<__root>\n${cleaned}\n</__root>`;
+
+  // 2. normalize void tags so <meta ...> → <meta .../> and the validator
+  //    will never complain “Missing closing tag </meta>”
+  const cleanedWithVoids = cleaned.replace(
+    /<\s*(meta)\b([^>]*?)(?<!\/)>/gi,
+    (_m, tag, attrs) => `<${tag}${attrs}/>`
+  );
+
+  // 3. wrap and validate
+  const xml = `<__root>\n${cleanedWithVoids}\n</__root>`;
   const res = XMLValidator.validate(xml);
 
   if (res === true) {
@@ -866,22 +873,36 @@ export const getFxpDiagnostics = (
     msg: string;
   };
 
-  // 1️⃣ prettify the error text
+  // prettify the error text
   const pretty = prettifyXmlError(msg);
 
-  // 2️⃣ default to FXP’s position (still works as a fallback)
-  let start = new vscode.Position(line - 1, Math.max(col - 1, 0));
-  let range = new vscode.Range(start, start.translate(0, 1));
+  // map FXP’s 1-based XML coords back to your document (0-based),
+  // accounting for the extra <__root> line at the top.
+  const docLine = Math.max(line - 2, 0);
+  const docCol = Math.max(col - 1, 0);
+  const start = new vscode.Position(docLine, docCol);
 
-  // 3️⃣ if it’s “Missing closing tag: </Foo>…”, jump back to the opening <Foo>
+  // default underline length
+  let end = start.translate(0, 1);
+
+  // if it’s a boolean-attribute error, underline the entire name:
+  const attrMatch = /^Attribute (\w+)/.exec(pretty);
+  if (attrMatch) {
+    end = start.translate(0, attrMatch[1].length);
+  }
+
+  let range = new vscode.Range(start, end);
+
+  // if it’s “Missing closing tag: </Foo>…”, jump to the next <Foo after 'start'
   const m = /^Missing closing tag: <\/([^>]+)>/.exec(pretty);
   if (m) {
     const tag = m[1];
-    const openRe = new RegExp(`<${tag}\\b`, "g");
-    const idx = raw.search(openRe);
-    if (idx !== -1) {
-      // +1 so we land on the tag name itself, not the '<'
-      const openingPos = doc.positionAt(idx + 1);
+    // compute offset of our diagnostic start
+    const startOffset = doc.offsetAt(start);
+    // find the *next* opening <tag after that offset
+    const openIdx = raw.indexOf(`<${tag}`, startOffset);
+    if (openIdx !== -1) {
+      const openingPos = doc.positionAt(openIdx + 1);
       range = new vscode.Range(openingPos, openingPos.translate(0, tag.length));
     }
   }
@@ -896,21 +917,12 @@ export const getFxpDiagnostics = (
 /* ------------------------------------------------------------- */
 
 /**
- * Return a string of identical length – every character in the matched
- * fragment becomes a space *except* for hard‐line-breaks.
+ * Return a string of identical length – every character except newlines
+ * becomes a space.
  */
 const spacer = (s: string) => s.replace(/[^\n]/g, " ");
 
-/**
- * 1️⃣  Blanks “// …” sequences that live **in the HTML part** (i.e. *after*
- *     we have already removed the <?php … ?> block) and are **not** part of
- *     a URL such as “http://”.
- *
- *     • Keeps the very first prefix character (>, space, `) so surrounding
- *       markup is untouched.
- *     • Stops at the first “<” or at the end-of-line – this preserves the
- *       following tag so Fast-XML-Parser can still see it.
- */
+/** Blanks “// …” sequences that live in the HTML part (outside PHP). */
 const stripInlineSlashes = (txt: string): string =>
   txt.replace(
     /(^|>|[)\]}"'` \t])\s*\/\/.*?(?=<|\r?\n|$)/g,
@@ -921,39 +933,51 @@ const stripInlineSlashes = (txt: string): string =>
 const blankMustaches = (txt: string) =>
   txt.replace(/{{([\s\S]*?)}}/g, (_m, inner) => "{{" + spacer(inner) + "}}");
 
-/**
- * 2️⃣  Main sanitiser used before sending the fragment to fast-xml-parser.
- *     It erases every bit of PHP / string-literal / heredoc / JS etc. but
- *     *preserves line-breaks and byte-lengths* so diagnostic offsets stay
- *     correct.
- */
 function sanitizeForDiagnosticsXML(raw: string): string {
   let text = raw;
 
-  /* ---------- PHP territory ---------- */
-  // 1. whole <?php … ?> blocks
-  text = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, spacer);
-  // 2. PHP /* … */ comments that might sit outside a block (rare)
-  text = text.replace(/\/\*[\s\S]*?\*\//g, spacer);
+  // 0️⃣ strip out every PHP-style /* … */ comment (including /** … */) so
+  //    any <tags> inside them never make it to the XML validator
+  text = raw.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
 
-  /* ---------- HTML territory ---------- */
-  // 3.   “// …” comments that appear *in* HTML (thanks, Tailwind docs!)
+  // 1️⃣ Remove entire <?php … ?> and <?= … ?> blocks in one go:
+  text = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (m) => " ".repeat(m.length));
+
+  // 2️⃣ Then blank any standalone "<?" or "<?=" that didn't have a closing "?>"
+  text = text.replace(/<\?(?:php|=)?/g, (m) => " ".repeat(m.length));
+
+  // 3️⃣ Strip HTML‐style “//…” comments…
   text = stripInlineSlashes(text);
 
-  // 4.  heredoc / nowdoc blocks
+  // 4️⃣ Preserve the INSIDE of heredoc/nowdoc, blank only the markers
   text = text.replace(
-    /<<<['"]?[A-Za-z_]\w*['"]?[\s\S]*?\n[ \t]*[A-Za-z_]\w*;?/g,
-    spacer
+    /<<<['"]?([A-Za-z_]\w*)['"]?\r?\n([\s\S]*?)\r?\n\s*\1\s*;?/g,
+    (fullMatch) => {
+      const lines = fullMatch.split(/\r?\n/);
+      return lines
+        .map(
+          (line, i) =>
+            i === 0 || i === lines.length - 1
+              ? " ".repeat(line.length) // blank the <<<… and closing lines
+              : line // keep your real HTML intact
+        )
+        .join("\n");
+    }
   );
 
-  // 5.  normal ‘…’ and “….” string literals
+  // 5️⃣ Blank out all normal '…' and "…" string literals
   text = text.replace(
     /(['"])(?:\\.|[^\\])*?\1/g,
     (m, q) => q + " ".repeat(m.length - 2) + q
   );
 
-  text = blankMustaches(text); // 6.  {{ … }} expressions
+  // 6️⃣ Blank {{ … }} JS‐in‐Mustache
+  text = blankMustaches(text);
 
+  // 7️⃣ blank any PHP interpolation `{$…}` so validator never sees it as a bare attribute
+  text = text.replace(/\{\$[^}]+\}/g, (m) => " ".repeat(m.length));
+
+  console.log("Sanitized text:", text);
   return text;
 }
 
@@ -1237,10 +1261,6 @@ const sanitizeForDiagnostics = (text: string): string => {
   // text = removeOperatorsAndBooleansOutsideQuotes(text);
   return text;
 };
-
-/* ────────────────────────────────────────────────────────────── *
- *                    XML & TAG PAIR DIAGNOSTICS                    *
- * ────────────────────────────────────────────────────────────── */
 
 /* ────────────────────────────────────────────────────────────── *
  *                    PHP IMPORT STATEMENT PARSING                   *
