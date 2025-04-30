@@ -2,7 +2,7 @@
   "name": "phpx-tag-support",
   "displayName": "PHPX Tag Support",
   "description": "Provides support for JSX-like tags in PHP, including hover info, Peek Definition for tags, and diagnostics for missing imports.",
-  "version": "1.0.15",
+  "version": "1.0.16",
   "publisher": "JeffersonAbrahamOmier",
   "engines": {
     "vscode": "^1.98.0"
@@ -27,6 +27,9 @@
       }
     ]
   },
+  "files": [
+    "resources/types"
+  ],
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
