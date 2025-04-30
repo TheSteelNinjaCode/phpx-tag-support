@@ -1001,7 +1001,7 @@ function sanitizeForDiagnosticsXML(raw: string): string {
   text = text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
 
   // ── 3️⃣ Strip out single-line // comments in PHP ────────────────
-  text = text.replace(/^\/\/.*$/gm, (m) => " ".repeat(m.length));
+  text = text.replace(/^[ \t]*\/\/.*$/gm, (m) => " ".repeat(m.length));
 
   // ── 4️⃣ Strip any <?php … ?> blocks but only the tags ─────────────
   //    (we blank the <?php / ?> markers, not the entire content)
