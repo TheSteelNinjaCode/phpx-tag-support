@@ -287,6 +287,33 @@ const addImportCommand = async (
   await vscode.workspace.applyEdit(edit);
 };
 
+function splitArgs(str: string): string[] {
+  const out: string[] = [];
+  let buf = "";
+  let level = 0;
+
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (ch === "{" || ch === "(" || ch === "[") {
+      level++;
+    } else if (ch === "}" || ch === ")" || ch === "]") {
+      level--;
+    }
+
+    if (ch === "," && level === 0) {
+      out.push(buf.trim());
+      buf = "";
+    } else {
+      buf += ch;
+    }
+  }
+
+  if (buf.trim() !== "") {
+    out.push(buf.trim());
+  }
+  return out;
+}
+
 function validatePphpCalls(
   document: vscode.TextDocument,
   diagCollection: vscode.DiagnosticCollection
@@ -324,7 +351,7 @@ function validatePphpCalls(
       .filter((p) => !!p);
 
     // count what the user actually passed
-    const passedCount = argsText.trim() === "" ? 0 : argsText.split(",").length;
+    const passedCount = argsText.trim() === "" ? 0 : splitArgs(argsText).length;
 
     // figure out how many *required* parameters there are
     const requiredCount = expectedParams.filter((p) => !p.includes("?")).length;
