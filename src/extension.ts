@@ -571,25 +571,6 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.languages.createDiagnosticCollection("pphp-signatures");
   context.subscriptions.push(pphpSigDiags);
 
-  // Combined update validations function.
-  const updateAllValidations = (document: vscode.TextDocument): void => {
-    updateJsVariableDecorations(document, braceDecorationType);
-    validateJsVariablesInCurlyBraces(document, jsVarDiagnostics);
-    updateNativeTokenDecorations(
-      document,
-      nativeFunctionDecorationType,
-      nativePropertyDecorationType
-    );
-    validateMissingImports(document, diagnosticCollection);
-  };
-
-  // Register event listeners.
-  vscode.workspace.onDidChangeTextDocument(
-    (e) => validatePphpCalls(e.document, pphpSigDiags),
-    null,
-    context.subscriptions
-  );
-
   // ③ *** register your mustache‐stub completion provider here ***
   const selector: vscode.DocumentSelector = [
     { language: "php" },
@@ -645,16 +626,57 @@ export function activate(context: vscode.ExtensionContext) {
     )
   );
 
-  vscode.window.onDidChangeActiveTextEditor(
-    (editor) => {
-      if (editor) {
-        validatePphpCalls(editor.document, pphpSigDiags);
-      }
-    },
-    null,
-    context.subscriptions
-  );
+  // 1️⃣ at the top of activate()
+  const STRING_COLOR = "#CE9178"; // or whatever your theme’s string color is
+  const stringDecorationType = vscode.window.createTextEditorDecorationType({
+    color: STRING_COLOR,
+  });
+  context.subscriptions.push(stringDecorationType);
 
+  // 2️⃣ helper to scan for strings in {{ … }} and decorate them
+  function updateStringDecorations(document: vscode.TextDocument) {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document !== document) {
+      return;
+    }
+    const text = document.getText();
+    const decos: vscode.DecorationOptions[] = [];
+    let mustacheMatch: RegExpExecArray | null;
+    // reuse your JS_EXPR_REGEX = /{{\s*(.*?)\s*}}/g
+    while ((mustacheMatch = JS_EXPR_REGEX.exec(text))) {
+      const inner = mustacheMatch[1];
+      const baseOffset = mustacheMatch.index + mustacheMatch[0].indexOf(inner);
+      // match single or double-quoted strings
+      const stringRegex = /(['"])(?:(?=(\\?))\2.)*?\1/g;
+      let strMatch: RegExpExecArray | null;
+      while ((strMatch = stringRegex.exec(inner))) {
+        const start = baseOffset + strMatch.index;
+        const end = start + strMatch[0].length;
+        decos.push({
+          range: new vscode.Range(
+            document.positionAt(start),
+            document.positionAt(end)
+          ),
+        });
+      }
+    }
+    editor.setDecorations(stringDecorationType, decos);
+  }
+
+  // Combined update validations function.
+  const updateAllValidations = (document: vscode.TextDocument) => {
+    updateJsVariableDecorations(document, braceDecorationType);
+    updateStringDecorations(document);
+    validateJsVariablesInCurlyBraces(document, jsVarDiagnostics);
+    updateNativeTokenDecorations(
+      document,
+      nativeFunctionDecorationType,
+      nativePropertyDecorationType
+    );
+    validateMissingImports(document, diagnosticCollection);
+  };
+
+  // Register event listeners.
   vscode.workspace.onDidChangeTextDocument(
     (e) => updateAllValidations(e.document),
     null,
@@ -665,11 +687,17 @@ export function activate(context: vscode.ExtensionContext) {
     null,
     context.subscriptions
   );
-  vscode.window.onDidChangeActiveTextEditor((editor) => {
-    if (editor) {
-      updateAllValidations(editor.document);
-    }
-  });
+
+  vscode.window.onDidChangeActiveTextEditor(
+    (editor) => {
+      if (editor) {
+        validatePphpCalls(editor.document, pphpSigDiags);
+        updateAllValidations(editor.document);
+      }
+    },
+    null,
+    context.subscriptions
+  );
 
   vscode.workspace.onDidSaveTextDocument((doc) => {
     if (doc.languageId === "php") {
