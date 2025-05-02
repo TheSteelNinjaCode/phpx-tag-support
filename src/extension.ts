@@ -631,6 +631,7 @@ export function activate(context: vscode.ExtensionContext) {
     color: STRING_COLOR,
   });
   context.subscriptions.push(stringDecorationType);
+  context.subscriptions.push(numberDecorationType);
 
   // 2️⃣ helper to scan for strings in {{ … }} and decorate them
   function updateStringDecorations(document: vscode.TextDocument) {
@@ -1433,6 +1434,12 @@ const objectPropertyDecorationType =
     fontStyle: "italic", // maybe italic so it really stands out
   });
 
+// integer or decimal, e.g. 42 or 3.1415
+const numberRegex = /\b\d+(\.\d+)?\b/g;
+const numberDecorationType = vscode.window.createTextEditorDecorationType({
+  color: "#B5CEA8",
+});
+
 // ── the updated function ────────────────────────────────────────────
 
 function updateNativeTokenDecorations(
@@ -1449,6 +1456,7 @@ function updateNativeTokenDecorations(
   const funcDecorations: vscode.DecorationOptions[] = [];
   const nativePropDecorations: vscode.DecorationOptions[] = [];
   const objectPropDecorations: vscode.DecorationOptions[] = [];
+  const numberDecorations: vscode.DecorationOptions[] = [];
 
   for (const exprMatch of text.matchAll(JS_EXPR_REGEX)) {
     const jsExpr = exprMatch[1];
@@ -1497,11 +1505,23 @@ function updateNativeTokenDecorations(
         ),
       });
     }
+
+    for (const numMatch of jsExpr.matchAll(numberRegex)) {
+      const start = baseIndex + numMatch.index!;
+      const end = start + numMatch[0].length;
+      numberDecorations.push({
+        range: new vscode.Range(
+          document.positionAt(start),
+          document.positionAt(end)
+        ),
+      });
+    }
   }
 
   editor.setDecorations(funcDecoType, funcDecorations);
   editor.setDecorations(propDecoType, nativePropDecorations);
   editor.setDecorations(objectPropertyDecorationType, objectPropDecorations);
+  editor.setDecorations(numberDecorationType, numberDecorations);
 }
 
 /* ────────────────────────────────────────────────────────────── *
