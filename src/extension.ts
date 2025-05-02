@@ -710,14 +710,11 @@ export function activate(context: vscode.ExtensionContext) {
  *                    EDITOR CONFIGURATION UPDATE                   *
  * ────────────────────────────────────────────────────────────── */
 
-async function rebuildMustacheStub(document: vscode.TextDocument) {
-  if (!vscode.workspace.workspaceFolders?.length) {
-    return;
-  }
+async function rebuildMustacheStub(document: TextDocument) {
   const text = document.getText();
-
-  // 1) extract every {{ foo.bar }} and collect root→property
-  const mustacheRe = /{{\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*}}/g;
+  // match {{ … }} and capture only the leading identifier or dotted path
+  const mustacheRe =
+    /{{\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)[\s\S]*?}}/g;
   const map = new Map<string, Set<string>>();
   let m: RegExpExecArray | null;
   while ((m = mustacheRe.exec(text))) {
@@ -732,7 +729,6 @@ async function rebuildMustacheStub(document: vscode.TextDocument) {
     }
   }
 
-  // 2) build a .d.ts that declares each root as either any or an object literal
   const lines: string[] = [];
   for (const [root, props] of map) {
     if (props.size === 0) {
@@ -748,9 +744,11 @@ async function rebuildMustacheStub(document: vscode.TextDocument) {
     }
   }
 
-  // 3) write it out
-  const ws = vscode.workspace.workspaceFolders[0].uri;
-  const stubUri = vscode.Uri.joinPath(ws, ".pphp", "phpx-mustache.d.ts");
+  const stubUri = vscode.Uri.joinPath(
+    vscode.workspace.workspaceFolders![0].uri,
+    ".pphp",
+    "phpx-mustache.d.ts"
+  );
   await vscode.workspace.fs.writeFile(
     stubUri,
     Buffer.from(lines.join("\n\n") + "\n", "utf8")
