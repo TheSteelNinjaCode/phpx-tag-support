@@ -418,7 +418,30 @@ function validatePphpCalls(
  *                       EXTENSION ACTIVATION                       *
  * ────────────────────────────────────────────────────────────── */
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
+  // ── 0️⃣  Make sure we’re in a workspace ─────────────────────────
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || folders.length === 0) {
+    return; // no folder → bail out silently
+  }
+
+  // ── 1️⃣  Check every root for prisma-php.json ───────────────────
+  const isPrismaPhpProject = await Promise.any(
+    folders.map(async (folder) => {
+      try {
+        const uri = vscode.Uri.joinPath(folder.uri, "prisma-php.json");
+        await vscode.workspace.fs.stat(uri); // throws if it doesn’t exist
+        return true; // found → good
+      } catch {
+        return false; // not here → keep looking
+      }
+    })
+  ).catch(() => false); // all threw → false
+
+  if (!isPrismaPhpProject) {
+    return; // not a Prisma PHP project
+  }
+
   console.log("PHPX tag support is now active!");
 
   // instead of context.asAbsolutePath:
@@ -1671,12 +1694,8 @@ const validateMissingImports = (
       }
     });
   });
-  vscode.workspace.findFiles("prisma-php.json", null, 1).then((files) => {
-    if (files.length > 0) {
-      diagnostics.push(...getFxpDiagnostics(document));
-    }
-    diagnosticCollection.set(document.uri, diagnostics);
-  });
+  diagnostics.push(...getFxpDiagnostics(document));
+  diagnosticCollection.set(document.uri, diagnostics);
 };
 
 /* ────────────────────────────────────────────────────────────── *
