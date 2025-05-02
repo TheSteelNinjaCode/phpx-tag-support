@@ -629,36 +629,6 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(numberDecorationType);
   context.subscriptions.push(templateLiteralDecorationType);
 
-  // 2️⃣ helper to scan for strings in {{ … }} and decorate them
-  function updateStringDecorations(document: vscode.TextDocument) {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.document !== document) {
-      return;
-    }
-    const text = document.getText();
-    const decos: vscode.DecorationOptions[] = [];
-    let mustacheMatch: RegExpExecArray | null;
-    // reuse your JS_EXPR_REGEX = /{{\s*(.*?)\s*}}/g
-    while ((mustacheMatch = JS_EXPR_REGEX.exec(text))) {
-      const inner = mustacheMatch[1];
-      const baseOffset = mustacheMatch.index + mustacheMatch[0].indexOf(inner);
-      // match single or double-quoted strings
-      const stringRegex = /(['"])(?:(?=(\\?))\2.)*?\1/g;
-      let strMatch: RegExpExecArray | null;
-      while ((strMatch = stringRegex.exec(inner))) {
-        const start = baseOffset + strMatch.index;
-        const end = start + strMatch[0].length;
-        decos.push({
-          range: new vscode.Range(
-            document.positionAt(start),
-            document.positionAt(end)
-          ),
-        });
-      }
-    }
-    editor.setDecorations(stringDecorationType, decos);
-  }
-
   // Combined update validations function.
   const updateAllValidations = (document: vscode.TextDocument) => {
     updateJsVariableDecorations(document, braceDecorationType);
@@ -707,6 +677,35 @@ export function activate(context: vscode.ExtensionContext) {
 /* ────────────────────────────────────────────────────────────── *
  *                    EDITOR CONFIGURATION UPDATE                   *
  * ────────────────────────────────────────────────────────────── */
+
+function updateStringDecorations(document: vscode.TextDocument) {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document !== document) {
+    return;
+  }
+  const text = document.getText();
+  const decos: vscode.DecorationOptions[] = [];
+  let mustacheMatch: RegExpExecArray | null;
+  // reuse your JS_EXPR_REGEX = /{{\s*(.*?)\s*}}/g
+  while ((mustacheMatch = JS_EXPR_REGEX.exec(text))) {
+    const inner = mustacheMatch[1];
+    const baseOffset = mustacheMatch.index + mustacheMatch[0].indexOf(inner);
+    // match single or double-quoted strings
+    const stringRegex = /(['"])(?:(?=(\\?))\2.)*?\1/g;
+    let strMatch: RegExpExecArray | null;
+    while ((strMatch = stringRegex.exec(inner))) {
+      const start = baseOffset + strMatch.index;
+      const end = start + strMatch[0].length;
+      decos.push({
+        range: new vscode.Range(
+          document.positionAt(start),
+          document.positionAt(end)
+        ),
+      });
+    }
+  }
+  editor.setDecorations(stringDecorationType, decos);
+}
 
 async function rebuildMustacheStub(document: TextDocument) {
   const text = document.getText();
