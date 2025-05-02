@@ -1039,19 +1039,19 @@ const registerPhpCompletionProvider = () => {
       
       class ${classNamePlaceholder} extends PHPX
       {
-          public function __construct(array \$props = [])
+          public function __construct(array \\$props = [])
           {
-              parent::__construct(\$props);
+              parent::__construct(\\$props);
           }
       
           public function render(): string
           {
-              \$attributes = \$this->getAttributes();
-              \$class      = \$this->getMergeClasses();
+              \\$attributes = \\$this->getAttributes();
+              \\$class      = \\$this->getMergeClasses();
       
               return <<<HTML
-              <div class="{\$class}" {\$attributes}>
-                  {\$this->children}
+              <div class="{\\$class}" {\\$attributes}>
+                  {\\$this->children}
               </div>
               HTML;
           }
