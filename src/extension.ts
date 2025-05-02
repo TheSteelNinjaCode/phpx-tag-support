@@ -1399,6 +1399,29 @@ const validateJsVariablesInCurlyBraces = (
   diagnosticCollection.set(document.uri, diagnostics);
 };
 
+// ① at module‐scope: build your Method/Prop lists dynamically
+const _STRING_PROTO_KEYS = Object.getOwnPropertyNames(String.prototype);
+
+// all the function‐valued keys on String.prototype
+const NATIVE_STRING_METHODS = _STRING_PROTO_KEYS.filter(
+  (key) => typeof ("" as any)[key] === "function"
+);
+
+// all the non-function keys on String.prototype (e.g. "length", "constructor")
+const NATIVE_STRING_PROPS = _STRING_PROTO_KEYS.filter(
+  (key) => typeof ("" as any)[key] !== "function"
+);
+
+// compile into global regexes once
+const nativeFuncRegex = new RegExp(
+  `\\b(${NATIVE_STRING_METHODS.join("|")})\\b`,
+  "g"
+);
+const nativePropRegex = new RegExp(
+  `\\b(${NATIVE_STRING_PROPS.join("|")})\\b`,
+  "g"
+);
+
 const updateNativeTokenDecorations = (
   document: vscode.TextDocument,
   funcDecoType: vscode.TextEditorDecorationType,
@@ -1408,32 +1431,43 @@ const updateNativeTokenDecorations = (
   if (!editor || document.languageId !== PHP_LANGUAGE) {
     return;
   }
+
   const text = document.getText();
   const funcDecorations: vscode.DecorationOptions[] = [];
   const propDecorations: vscode.DecorationOptions[] = [];
-  const nativeFuncRegex = /\b(toUpperCase|toLowerCase|trim|split)\b/g;
-  const nativePropRegex = /\b(length|name|prototype)\b/g;
-  let exprMatch: RegExpExecArray | null;
-  while ((exprMatch = JS_EXPR_REGEX.exec(text)) !== null) {
+
+  // ② for each {{ … }} block…
+  for (const exprMatch of text.matchAll(JS_EXPR_REGEX)) {
     const jsExpr = exprMatch[1];
-    const exprStartIndex = exprMatch.index + exprMatch[0].indexOf(jsExpr);
-    let funcMatch: RegExpExecArray | null;
-    while ((funcMatch = nativeFuncRegex.exec(jsExpr)) !== null) {
-      const tokenStart = exprStartIndex + funcMatch.index;
-      const tokenEnd = tokenStart + funcMatch[0].length;
-      const startPos = document.positionAt(tokenStart);
-      const endPos = document.positionAt(tokenEnd);
-      funcDecorations.push({ range: new vscode.Range(startPos, endPos) });
+    // figure out the absolute offset of that JS snippet
+    const baseIndex = exprMatch.index! + exprMatch[0].indexOf(jsExpr);
+
+    // ③ find every native string method
+    for (const m of jsExpr.matchAll(nativeFuncRegex)) {
+      const start = baseIndex + m.index!;
+      const end = start + m[0].length;
+      funcDecorations.push({
+        range: new vscode.Range(
+          document.positionAt(start),
+          document.positionAt(end)
+        ),
+      });
     }
-    let propMatch: RegExpExecArray | null;
-    while ((propMatch = nativePropRegex.exec(jsExpr)) !== null) {
-      const tokenStart = exprStartIndex + propMatch.index;
-      const tokenEnd = tokenStart + propMatch[0].length;
-      const startPos = document.positionAt(tokenStart);
-      const endPos = document.positionAt(tokenEnd);
-      propDecorations.push({ range: new vscode.Range(startPos, endPos) });
+
+    // ④ find every native string property
+    for (const m of jsExpr.matchAll(nativePropRegex)) {
+      const start = baseIndex + m.index!;
+      const end = start + m[0].length;
+      propDecorations.push({
+        range: new vscode.Range(
+          document.positionAt(start),
+          document.positionAt(end)
+        ),
+      });
     }
   }
+
+  // ⑤ apply them
   editor.setDecorations(funcDecoType, funcDecorations);
   editor.setDecorations(propDecoType, propDecorations);
 };
