@@ -1469,7 +1469,6 @@ function updateNativeTokenDecorations(
   const nativePropDecorations: vscode.DecorationOptions[] = [];
   const objectPropDecorations: vscode.DecorationOptions[] = [];
   const numberDecorations: vscode.DecorationOptions[] = [];
-  const templateLiteralDecorations: vscode.DecorationOptions[] = [];
   const stringSpans: vscode.DecorationOptions[] = [];
 
   for (const exprMatch of text.matchAll(JS_EXPR_REGEX)) {
