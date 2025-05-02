@@ -53,6 +53,7 @@ let classStubs: Record<
   PPHPLocalStore: [],
   SearchParamsManager: [],
 };
+let globalStubs: Record<string, string[]> = {};
 
 // Regex patterns
 const PHP_TAG_REGEX = /<\/?[A-Z][A-Za-z0-9]*/;
@@ -168,6 +169,39 @@ class ImportComponentCodeActionProvider implements CodeActionProvider {
 
     return fixes;
   }
+}
+
+function parseGlobalsWithTS(source: string) {
+  const sf = ts.createSourceFile(
+    "mustache.d.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true
+  );
+  globalStubs = {};
+
+  sf.forEachChild((node) => {
+    if (
+      !ts.isVariableStatement(node) ||
+      !node.modifiers?.some((m) => m.kind === ts.SyntaxKind.DeclareKeyword)
+    ) {
+      return;
+    }
+    for (const decl of node.declarationList.declarations) {
+      if (ts.isIdentifier(decl.name)) {
+        const name = decl.name.text;
+        const type = decl.type;
+        if (type && ts.isTypeLiteralNode(type)) {
+          // collect all the property names
+          globalStubs[name] = type.members
+            .filter(ts.isPropertySignature)
+            .map((ps) => (ps.name as ts.Identifier).text);
+        } else {
+          globalStubs[name] = [];
+        }
+      }
+    }
+  });
 }
 
 /**
@@ -318,7 +352,8 @@ function validatePphpCalls(
   document: vscode.TextDocument,
   diagCollection: vscode.DiagnosticCollection
 ) {
-  const text = document.getText();
+  const original = document.getText();
+  const text = sanitizeForDiagnostics(original);
   const diags: vscode.Diagnostic[] = [];
 
   // match pphp.foo(arg1, arg2, …)
@@ -385,6 +420,55 @@ function validatePphpCalls(
 
 export function activate(context: vscode.ExtensionContext) {
   console.log("PHPX tag support is now active!");
+
+  // instead of context.asAbsolutePath:
+  const wsFolder = vscode.workspace.workspaceFolders?.[0];
+  if (!wsFolder) {
+    console.warn("No workspace!");
+    return;
+  }
+
+  // build the *project*-relative path
+  const globalStubFsPath = path.join(
+    wsFolder.uri.fsPath,
+    ".pphp",
+    "phpx-mustache.d.ts"
+  );
+
+  let globalsText = "";
+  try {
+    globalsText = fs.readFileSync(globalStubFsPath, "utf8");
+  } catch (err) {
+    console.error(`couldn't load mustache stubs from ${globalStubFsPath}`, err);
+  }
+
+  parseGlobalsWithTS(globalsText);
+
+  // watch for changes to your mustache stub
+  const stubPattern = new vscode.RelativePattern(
+    wsFolder, // whatever you used for your workspace folder
+    ".pphp/phpx-mustache.d.ts"
+  );
+  const stubWatcher = vscode.workspace.createFileSystemWatcher(stubPattern);
+  stubWatcher.onDidChange(async (uri) => {
+    // 1) re-read & re-parse into `globalStubs`
+    const data = await vscode.workspace.fs.readFile(uri);
+    parseGlobalsWithTS(data.toString());
+
+    // 2) tell the TS server to reload all .d.ts files
+    await vscode.commands.executeCommand("typescript.restartTsServer");
+  });
+  stubWatcher.onDidCreate(async (uri) => {
+    // Reuse the logic from onDidChange
+    const data = await vscode.workspace.fs.readFile(uri);
+    parseGlobalsWithTS(data.toString());
+    await vscode.commands.executeCommand("typescript.restartTsServer");
+  });
+  stubWatcher.onDidDelete(() => {
+    globalStubs = {};
+    vscode.commands.executeCommand("typescript.restartTsServer");
+  });
+  context.subscriptions.push(stubWatcher);
 
   const stubPath = context.asAbsolutePath("resources/types/pphp.d.txt");
   const stubText = fs.readFileSync(stubPath, "utf8");
@@ -506,6 +590,61 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions
   );
 
+  // ③ *** register your mustache‐stub completion provider here ***
+  const selector: vscode.DocumentSelector = [
+    { language: "php" },
+    { language: "javascript" },
+    { language: "typescript" },
+  ];
+
+  context.subscriptions.push(
+    vscode.languages.registerCompletionItemProvider(
+      selector,
+      {
+        provideCompletionItems(document, position) {
+          const line = document
+            .lineAt(position.line)
+            .text.slice(0, position.character);
+
+          // 1️⃣ property‐level: foo.partial → props[foo]
+          const propMatch = /([A-Za-z_$]\w*)\.(\w*)$/.exec(line);
+          if (propMatch) {
+            const [, root, partial] = propMatch;
+            const props = globalStubs[root] || [];
+            return props
+              .filter((p) => p.startsWith(partial))
+              .map(
+                (p) =>
+                  new vscode.CompletionItem(
+                    p,
+                    vscode.CompletionItemKind.Property
+                  )
+              );
+          }
+
+          // 2️⃣ root‐level: partial → variable names
+          const rootMatch = /([A-Za-z_$]\w*)$/.exec(line);
+          if (rootMatch) {
+            const prefix = rootMatch[1];
+            return Object.keys(globalStubs)
+              .filter((v) => v.startsWith(prefix))
+              .map(
+                (v) =>
+                  new vscode.CompletionItem(
+                    v,
+                    vscode.CompletionItemKind.Variable
+                  )
+              );
+          }
+
+          return undefined;
+        },
+      },
+      // still trigger on dot… but you can remove these and let quick‐suggest run on every keystroke
+      "."
+    )
+  );
+
   vscode.window.onDidChangeActiveTextEditor(
     (editor) => {
       if (editor) {
@@ -531,11 +670,64 @@ export function activate(context: vscode.ExtensionContext) {
       updateAllValidations(editor.document);
     }
   });
+
+  vscode.workspace.onDidSaveTextDocument((doc) => {
+    if (doc.languageId === "php") {
+      rebuildMustacheStub(doc);
+    }
+  });
 }
 
 /* ────────────────────────────────────────────────────────────── *
  *                    EDITOR CONFIGURATION UPDATE                   *
  * ────────────────────────────────────────────────────────────── */
+
+async function rebuildMustacheStub(document: vscode.TextDocument) {
+  if (!vscode.workspace.workspaceFolders?.length) {
+    return;
+  }
+  const text = document.getText();
+
+  // 1) extract every {{ foo.bar }} and collect root→property
+  const mustacheRe = /{{\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*}}/g;
+  const map = new Map<string, Set<string>>();
+  let m: RegExpExecArray | null;
+  while ((m = mustacheRe.exec(text))) {
+    const parts = m[1].split(".");
+    const root = parts[0];
+    const prop = parts[1];
+    if (!map.has(root)) {
+      map.set(root, new Set());
+    }
+    if (prop) {
+      map.get(root)!.add(prop);
+    }
+  }
+
+  // 2) build a .d.ts that declares each root as either any or an object literal
+  const lines: string[] = [];
+  for (const [root, props] of map) {
+    if (props.size === 0) {
+      lines.push(`declare var ${root}: any;`);
+    } else {
+      const entries = Array.from(props)
+        .map((p) => `${p}: any`)
+        .join(";\n  ");
+      lines.push(`declare var ${root}: {
+  ${entries};
+  [key: string]: any;
+};`);
+    }
+  }
+
+  // 3) write it out
+  const ws = vscode.workspace.workspaceFolders[0].uri;
+  const stubUri = vscode.Uri.joinPath(ws, ".pphp", "phpx-mustache.d.ts");
+  await vscode.workspace.fs.writeFile(
+    stubUri,
+    Buffer.from(lines.join("\n\n") + "\n", "utf8")
+  );
+}
 
 const updateEditorConfiguration = (): void => {
   const editorConfig = vscode.workspace.getConfiguration("editor");
@@ -647,17 +839,16 @@ const registerPhpCompletionProvider = () => {
       async provideCompletionItems(
         document: vscode.TextDocument,
         position: vscode.Position
-      ) {
+      ): Promise<vscode.CompletionItem[] | undefined> {
         const line = document.lineAt(position.line).text;
 
         // 0️⃣ Top-level variable suggestions ("pphp", "store", "searchParams")
-        //    if the user has started typing any of those three
         const varNames = ["pphp", "store", "searchParams"] as const;
         const prefixLine = line.match(/([A-Za-z_]*)$/)![1];
         if (prefixLine.length > 0) {
           const matches = varNames.filter((v) => v.startsWith(prefixLine));
           if (matches.length) {
-            return matches.map<vscode.CompletionItem>((v) => {
+            return matches.map((v) => {
               const item = new vscode.CompletionItem(
                 v,
                 vscode.CompletionItemKind.Variable
@@ -668,19 +859,17 @@ const registerPhpCompletionProvider = () => {
           }
         }
 
-        // 1️⃣ Now your existing ".-member" logic…
-        const m = line.match(/(pphp|store|searchParams)\.\w*$/);
-        if (m) {
-          const varName = m[1] as VarName;
-
-          const classNameMap = {
+        // 1️⃣ pphp|store|searchParams member completions
+        const memberMatch = line.match(/(pphp|store|searchParams)\.\w*$/);
+        if (memberMatch) {
+          const varName = memberMatch[1] as VarName;
+          const clsName = {
             pphp: "PPHP",
             store: "PPHPLocalStore",
             searchParams: "SearchParamsManager",
-          } as const;
+          }[varName] as keyof typeof classStubs;
 
-          const members = classStubs[classNameMap[varName]];
-          return members.map((m) => {
+          return classStubs[clsName].map((m) => {
             const kind = m.signature.includes("(")
               ? vscode.CompletionItemKind.Method
               : vscode.CompletionItemKind.Property;
@@ -690,23 +879,42 @@ const registerPhpCompletionProvider = () => {
           });
         }
 
-        // 1️⃣ Don’t fire inside "<?…"
+        // 2️⃣ Don’t fire inside "<?…"
         const prefix = prefixLine.substring(0, position.character);
         if (/^[ \t]*<\?[=a-z]*$/.test(prefix)) {
           return [];
         }
 
-        // 2️⃣ Load your class-log and existing component completions…
+        // ────────── Bail out if inside a <script>…</script> block ──────────
+        const fullText = document.getText();
+        const offset = document.offsetAt(position);
+        const before = fullText.slice(0, offset);
+        const scriptOpens = (before.match(/<script\b/gi) || []).length;
+        const scriptCloses = (before.match(/<\/script>/gi) || []).length;
+        if (scriptOpens > scriptCloses) {
+          return [];
+        }
+
+        // ────────── Bail out if inside a mustache {{ … }} expression ──────────
+        // (we just check whether the last "{{" before the cursor
+        // is unmatched by a "}}" before it)
+        const lastOpen = before.lastIndexOf("{{");
+        const lastClose = before.lastIndexOf("}}");
+        if (lastOpen > lastClose) {
+          return [];
+        }
+
+        // 3️⃣ Load class-log and build component completions
         await loadComponentsFromClassLog();
         const completions: vscode.CompletionItem[] = [];
 
-        // Existing component completions from use statements.
+        // a) from explicit `use` statements
         const useMap = parsePhpUseStatements(document.getText());
-        const lessThanIndex = line.lastIndexOf("<", position.character);
+        const lessThan = line.lastIndexOf("<", position.character);
         let replaceRange: vscode.Range | undefined;
-        if (lessThanIndex !== -1) {
+        if (lessThan !== -1) {
           replaceRange = new vscode.Range(
-            new vscode.Position(position.line, lessThanIndex),
+            new vscode.Position(position.line, lessThan),
             position
           );
         }
@@ -719,12 +927,10 @@ const registerPhpCompletionProvider = () => {
           item.filterText = `<${shortName}`;
           item.insertText = new vscode.SnippetString(`<${shortName}`);
           item.range = replaceRange;
-
           completions.push(item);
         }
 
-        // Add completions from the class-log.json data.
-        // Inside registerPhpCompletionProvider:
+        // b) from class-log.json
         const componentsMap = getComponentsFromClassLog();
         componentsMap.forEach((fullComponent, shortName) => {
           const compItem = new vscode.CompletionItem(
@@ -742,20 +948,18 @@ const registerPhpCompletionProvider = () => {
           completions.push(compItem);
         });
 
-        // 3️⃣ Now handle the "phpxclass" snippet
+        // 4️⃣ phpxclass snippet
         if (/^\s*phpx?c?l?a?s?s?$/i.test(prefixLine)) {
-          // 1️⃣ Figure out the namespace
+          // determine namespace placeholder
           const wsFolder = vscode.workspace.getWorkspaceFolder(document.uri);
           const cfg = vscode.workspace.getConfiguration("phpx-tag-support");
           const sourceRoot = cfg.get<string>("sourceRoot", "src");
           let namespacePlaceholder: string;
-
           if (
             !document.isUntitled &&
             wsFolder &&
             document.uri.fsPath.endsWith(".php")
           ) {
-            // Compute path relative to <workspace>/sourceRoot
             const fullFs = document.uri.fsPath;
             const fileDir = path.dirname(fullFs);
             const base = path.join(wsFolder.uri.fsPath, sourceRoot);
@@ -764,7 +968,6 @@ const registerPhpCompletionProvider = () => {
               .split(path.sep)
               .filter(Boolean)
               .map((seg) => seg.replace(/[^A-Za-z0-9_]/g, ""));
-            // If it actually lived in a subfolder, use it; otherwise fallback
             namespacePlaceholder = parts.length
               ? parts.join("\\\\")
               : "${1:Lib\\\\PHPX\\\\Components}";
@@ -772,7 +975,7 @@ const registerPhpCompletionProvider = () => {
             namespacePlaceholder = "${1:Lib\\\\PHPX\\\\Components}";
           }
 
-          // 2️⃣ Figure out the class name
+          // determine class name placeholder
           let classNamePlaceholder: string;
           if (!document.isUntitled && document.uri.fsPath.endsWith(".php")) {
             classNamePlaceholder = path.basename(document.uri.fsPath, ".php");
@@ -780,37 +983,36 @@ const registerPhpCompletionProvider = () => {
             classNamePlaceholder = "${2:ClassName}";
           }
 
-          // 3️⃣ Build the snippet
+          // snippet body
           const snippet = new vscode.SnippetString(
             `<?php
-
-namespace ${namespacePlaceholder};
-
-use Lib\\\\PHPX\\\\PHPX;
-
-class ${classNamePlaceholder} extends PHPX
-{
-    public function __construct(array \\$props = [])
-    {
-        parent::__construct(\\$props);
-    }
-
-    public function render(): string
-    {
-        \\$attributes = \\$this->getAttributes();
-        \\$class      = \\$this->getMergeClasses();
-
-        return <<<HTML
-        <div class="{\\$class}" {\\$attributes}>
-            {\\$this->children}
-        </div>
-        HTML;
-    }
-}
-`
+      
+      namespace ${namespacePlaceholder};
+      
+      use Lib\\\\PHPX\\\\PHPX;
+      
+      class ${classNamePlaceholder} extends PHPX
+      {
+          public function __construct(array \$props = [])
+          {
+              parent::__construct(\$props);
+          }
+      
+          public function render(): string
+          {
+              \$attributes = \$this->getAttributes();
+              \$class      = \$this->getMergeClasses();
+      
+              return <<<HTML
+              <div class="{\$class}" {\$attributes}>
+                  {\$this->children}
+              </div>
+              HTML;
+          }
+      }
+      `
           );
 
-          // 4️⃣ and push it
           const start = position.translate(0, -prefixLine.trim().length);
           const item = new vscode.CompletionItem(
             "phpxclass",
@@ -1332,7 +1534,6 @@ const sanitizeForDiagnostics = (text: string): string => {
   text = removePhpRegexLiterals(text);
   text = removePhpInterpolations(text);
   text = removeNormalPhpStrings(text);
-  // text = removeOperatorsAndBooleansOutsideQuotes(text);
   return text;
 };
 
