@@ -560,7 +560,6 @@ export function activate(context: vscode.ExtensionContext) {
   const nativeFunctionDecorationType =
     vscode.window.createTextEditorDecorationType({
       color: NATIVE_FUNC_COLOR,
-      fontWeight: "bold",
     });
   const nativePropertyDecorationType =
     vscode.window.createTextEditorDecorationType({
@@ -675,6 +674,8 @@ export function activate(context: vscode.ExtensionContext) {
     );
     validateMissingImports(document, diagnosticCollection);
   };
+
+  context.subscriptions.push(objectPropertyDecorationType);
 
   // Register event listeners.
   vscode.workspace.onDidChangeTextDocument(
@@ -1399,20 +1400,20 @@ const validateJsVariablesInCurlyBraces = (
   diagnosticCollection.set(document.uri, diagnostics);
 };
 
-// ① at module‐scope: build your Method/Prop lists dynamically
+// ── at module‐scope ────────────────────────────────────────────────
+
+// grab every key on String.prototype…
 const _STRING_PROTO_KEYS = Object.getOwnPropertyNames(String.prototype);
 
-// all the function‐valued keys on String.prototype
+// methods vs. non-method props
 const NATIVE_STRING_METHODS = _STRING_PROTO_KEYS.filter(
   (key) => typeof ("" as any)[key] === "function"
 );
-
-// all the non-function keys on String.prototype (e.g. "length", "constructor")
 const NATIVE_STRING_PROPS = _STRING_PROTO_KEYS.filter(
   (key) => typeof ("" as any)[key] !== "function"
 );
 
-// compile into global regexes once
+// build your two regexes once…
 const nativeFuncRegex = new RegExp(
   `\\b(${NATIVE_STRING_METHODS.join("|")})\\b`,
   "g"
@@ -1422,11 +1423,23 @@ const nativePropRegex = new RegExp(
   "g"
 );
 
-const updateNativeTokenDecorations = (
+// a generic “object.property” regex to catch anything else
+const objectPropRegex = /(?<=\.)[A-Za-z_$][\w$]*/g;
+
+// ── in your activate (or wherever) ─────────────────────────────────
+const objectPropertyDecorationType =
+  vscode.window.createTextEditorDecorationType({
+    color: "#9CDCFE", // pick whatever color you like
+    fontStyle: "italic", // maybe italic so it really stands out
+  });
+
+// ── the updated function ────────────────────────────────────────────
+
+function updateNativeTokenDecorations(
   document: vscode.TextDocument,
   funcDecoType: vscode.TextEditorDecorationType,
   propDecoType: vscode.TextEditorDecorationType
-): void => {
+): void {
   const editor = vscode.window.activeTextEditor;
   if (!editor || document.languageId !== PHP_LANGUAGE) {
     return;
@@ -1434,15 +1447,14 @@ const updateNativeTokenDecorations = (
 
   const text = document.getText();
   const funcDecorations: vscode.DecorationOptions[] = [];
-  const propDecorations: vscode.DecorationOptions[] = [];
+  const nativePropDecorations: vscode.DecorationOptions[] = [];
+  const objectPropDecorations: vscode.DecorationOptions[] = [];
 
-  // ② for each {{ … }} block…
   for (const exprMatch of text.matchAll(JS_EXPR_REGEX)) {
     const jsExpr = exprMatch[1];
-    // figure out the absolute offset of that JS snippet
     const baseIndex = exprMatch.index! + exprMatch[0].indexOf(jsExpr);
 
-    // ③ find every native string method
+    // — highlight native string *methods* as before
     for (const m of jsExpr.matchAll(nativeFuncRegex)) {
       const start = baseIndex + m.index!;
       const end = start + m[0].length;
@@ -1454,11 +1466,31 @@ const updateNativeTokenDecorations = (
       });
     }
 
-    // ④ find every native string property
+    // — highlight native string *properties* as before
     for (const m of jsExpr.matchAll(nativePropRegex)) {
       const start = baseIndex + m.index!;
       const end = start + m[0].length;
-      propDecorations.push({
+      nativePropDecorations.push({
+        range: new vscode.Range(
+          document.positionAt(start),
+          document.positionAt(end)
+        ),
+      });
+    }
+
+    // — now highlight **only** your own object.property
+    for (const m of jsExpr.matchAll(objectPropRegex)) {
+      // m[0] is the property name after the dot
+      // skip if it’s one of the native‐string props or methods
+      if (
+        NATIVE_STRING_METHODS.includes(m[0]) ||
+        NATIVE_STRING_PROPS.includes(m[0])
+      ) {
+        continue;
+      }
+      const start = baseIndex + m.index!;
+      const end = start + m[0].length;
+      objectPropDecorations.push({
         range: new vscode.Range(
           document.positionAt(start),
           document.positionAt(end)
@@ -1467,10 +1499,10 @@ const updateNativeTokenDecorations = (
     }
   }
 
-  // ⑤ apply them
   editor.setDecorations(funcDecoType, funcDecorations);
-  editor.setDecorations(propDecoType, propDecorations);
-};
+  editor.setDecorations(propDecoType, nativePropDecorations);
+  editor.setDecorations(objectPropertyDecorationType, objectPropDecorations);
+}
 
 /* ────────────────────────────────────────────────────────────── *
  *                      PHP DIAGNOSTIC FUNCTIONS                    *
