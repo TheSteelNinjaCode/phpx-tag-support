@@ -625,13 +625,9 @@ export function activate(context: vscode.ExtensionContext) {
     )
   );
 
-  // 1️⃣ at the top of activate()
-  const STRING_COLOR = "#CE9178"; // or whatever your theme’s string color is
-  const stringDecorationType = vscode.window.createTextEditorDecorationType({
-    color: STRING_COLOR,
-  });
   context.subscriptions.push(stringDecorationType);
   context.subscriptions.push(numberDecorationType);
+  context.subscriptions.push(templateLiteralDecorationType);
 
   // 2️⃣ helper to scan for strings in {{ … }} and decorate them
   function updateStringDecorations(document: vscode.TextDocument) {
@@ -1434,11 +1430,27 @@ const objectPropertyDecorationType =
     fontStyle: "italic", // maybe italic so it really stands out
   });
 
+// 1️⃣ at the top of activate()
+const STRING_COLOR = "#CE9178"; // or whatever your theme’s string color is
+const stringDecorationType = vscode.window.createTextEditorDecorationType({
+  color: STRING_COLOR,
+});
+
 // integer or decimal, e.g. 42 or 3.1415
 const numberRegex = /\b\d+(\.\d+)?\b/g;
 const numberDecorationType = vscode.window.createTextEditorDecorationType({
   color: "#B5CEA8",
 });
+
+// catch anything between back-ticks, including escaped ones
+const templateLiteralRegex = /`(?:\\[\s\S]|[^\\`])*`/g;
+const placeholderRegex = /\$\{[^}]*\}/g;
+
+// decoration for template literals inside {{ … }}
+const templateLiteralDecorationType =
+  vscode.window.createTextEditorDecorationType({
+    color: STRING_COLOR,
+  });
 
 // ── the updated function ────────────────────────────────────────────
 
@@ -1457,6 +1469,8 @@ function updateNativeTokenDecorations(
   const nativePropDecorations: vscode.DecorationOptions[] = [];
   const objectPropDecorations: vscode.DecorationOptions[] = [];
   const numberDecorations: vscode.DecorationOptions[] = [];
+  const templateLiteralDecorations: vscode.DecorationOptions[] = [];
+  const stringSpans: vscode.DecorationOptions[] = [];
 
   for (const exprMatch of text.matchAll(JS_EXPR_REGEX)) {
     const jsExpr = exprMatch[1];
@@ -1516,12 +1530,49 @@ function updateNativeTokenDecorations(
         ),
       });
     }
+
+    for (const tl of jsExpr.matchAll(templateLiteralRegex)) {
+      // tl.index is relative to jsExpr, so shift by baseIndex
+      const raw = tl[0];
+      const inner = raw.slice(1, -1); // strip the backticks
+      let last = 0;
+
+      // walk through each ${…} placeholder
+      let ph: RegExpExecArray | null;
+      while ((ph = placeholderRegex.exec(inner))) {
+        // literal chunk before this placeholder
+        const litStart = baseIndex + 1 + last;
+        const litEnd = baseIndex + 1 + ph.index;
+        if (litEnd > litStart) {
+          stringSpans.push({
+            range: new vscode.Range(
+              document.positionAt(litStart),
+              document.positionAt(litEnd)
+            ),
+          });
+        }
+        last = ph.index + ph[0].length;
+      }
+
+      // any trailing literal after the last placeholder
+      if (last < inner.length) {
+        const litStart = baseIndex + 1 + last;
+        const litEnd = baseIndex + 1 + inner.length;
+        stringSpans.push({
+          range: new vscode.Range(
+            document.positionAt(litStart),
+            document.positionAt(litEnd)
+          ),
+        });
+      }
+    }
   }
 
   editor.setDecorations(funcDecoType, funcDecorations);
   editor.setDecorations(propDecoType, nativePropDecorations);
   editor.setDecorations(objectPropertyDecorationType, objectPropDecorations);
   editor.setDecorations(numberDecorationType, numberDecorations);
+  editor.setDecorations(stringDecorationType, stringSpans);
 }
 
 /* ────────────────────────────────────────────────────────────── *
