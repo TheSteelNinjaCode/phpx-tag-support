@@ -1032,31 +1032,30 @@ const registerPhpCompletionProvider = () => {
           // snippet body
           const snippet = new vscode.SnippetString(
             `<?php
-      
-      namespace ${namespacePlaceholder};
-      
-      use Lib\\\\PHPX\\\\PHPX;
-      
-      class ${classNamePlaceholder} extends PHPX
-      {
-          public function __construct(array \\$props = [])
-          {
-              parent::__construct(\\$props);
-          }
-      
-          public function render(): string
-          {
-              \\$attributes = \\$this->getAttributes();
-              \\$class      = \\$this->getMergeClasses();
-      
-              return <<<HTML
-              <div class="{\\$class}" {\\$attributes}>
-                  {\\$this->children}
-              </div>
-              HTML;
-          }
-      }
-      `
+
+namespace ${namespacePlaceholder};
+
+use Lib\\\\PHPX\\\\PHPX;
+
+class ${classNamePlaceholder} extends PHPX
+{
+    public function __construct(array \\$props = [])
+    {
+        parent::__construct(\\$props);
+    }
+
+    public function render(): string
+    {
+        \\$attributes = \\$this->getAttributes();
+        \\$class      = \\$this->getMergeClasses();
+
+        return <<<HTML
+        <div class="{\\$class}" {\\$attributes}>
+            {\\$this->children}
+        </div>
+        HTML;
+    }
+}`
           );
 
           const start = position.translate(0, -prefixLine.trim().length);
