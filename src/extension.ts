@@ -1325,12 +1325,13 @@ function getComponentsFromClassLog(): Map<string, string> {
 /* ────────────────────────────────────────────────────────────── *
  *                     DECORATION AND VALIDATION                     *
  * ────────────────────────────────────────────────────────────── */
+const PLACEHOLDER_REGEX = /\$\{([\s\S]*?)\}/g;
 
 // Update curly brace decorations within JS expressions.
-const updateJsVariableDecorations = (
+function updateJsVariableDecorations(
   document: vscode.TextDocument,
   decorationType: vscode.TextEditorDecorationType
-): void => {
+): void {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     return;
@@ -1338,19 +1339,57 @@ const updateJsVariableDecorations = (
 
   const text = document.getText();
   const decorations: vscode.DecorationOptions[] = [];
-  let match: RegExpExecArray | null;
-  while ((match = JS_EXPR_REGEX.exec(text)) !== null) {
-    const startIndex = match.index;
-    const matchLength = match[0].length;
-    const leftStart = document.positionAt(startIndex);
-    const leftEnd = document.positionAt(startIndex + 2);
-    decorations.push({ range: new vscode.Range(leftStart, leftEnd) });
-    const rightStart = document.positionAt(startIndex + matchLength - 2);
-    const rightEnd = document.positionAt(startIndex + matchLength);
-    decorations.push({ range: new vscode.Range(rightStart, rightEnd) });
+  let m: RegExpExecArray | null;
+
+  // 1️⃣ for each {{ … }} block
+  while ((m = JS_EXPR_REGEX.exec(text)) !== null) {
+    const wholeMatch = m[0];
+    const blockStart = m.index;
+    const blockLength = wholeMatch.length;
+
+    // highlight the "{{"
+    decorations.push({
+      range: new vscode.Range(
+        document.positionAt(blockStart),
+        document.positionAt(blockStart + 2)
+      ),
+    });
+
+    // highlight the "}}"
+    decorations.push({
+      range: new vscode.Range(
+        document.positionAt(blockStart + blockLength - 2),
+        document.positionAt(blockStart + blockLength)
+      ),
+    });
+
+    // 2️⃣ *inside* that same mustache text, look for `${…}`
+    let ph: RegExpExecArray | null;
+    while ((ph = PLACEHOLDER_REGEX.exec(wholeMatch)) !== null) {
+      const phRelStart = ph.index;
+      const phLen = ph[0].length;
+      const phAbsStart = blockStart + phRelStart;
+
+      // highlight "${"
+      decorations.push({
+        range: new vscode.Range(
+          document.positionAt(phAbsStart),
+          document.positionAt(phAbsStart + 2)
+        ),
+      });
+
+      // highlight the closing "}"
+      decorations.push({
+        range: new vscode.Range(
+          document.positionAt(phAbsStart + phLen - 1),
+          document.positionAt(phAbsStart + phLen)
+        ),
+      });
+    }
   }
+
   editor.setDecorations(decorationType, decorations);
-};
+}
 
 const isValidJsExpression = (expr: string): boolean => {
   try {
