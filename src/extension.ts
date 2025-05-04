@@ -60,6 +60,15 @@ const PHP_TAG_REGEX = /<\/?[A-Z][A-Za-z0-9]*/;
 const JS_EXPR_REGEX = /{{\s*(.*?)\s*}}/g;
 const HEREDOC_PATTERN =
   /<<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
+// grab every key on String.prototype…
+const _STRING_PROTO_KEYS = Object.getOwnPropertyNames(String.prototype);
+// methods vs. non-method props
+const NATIVE_STRING_METHODS = _STRING_PROTO_KEYS.filter(
+  (key) => typeof ("" as any)[key] === "function"
+);
+const NATIVE_STRING_PROPS = _STRING_PROTO_KEYS.filter(
+  (key) => typeof ("" as any)[key] !== "function"
+);
 
 class PphpHoverProvider implements vscode.HoverProvider {
   provideHover(
@@ -444,6 +453,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
   console.log("PHPX tag support is now active!");
 
+  activateNativeJsHelp(context);
+
   // instead of context.asAbsolutePath:
   const wsFolder = vscode.workspace.workspaceFolders?.[0];
   if (!wsFolder) {
@@ -604,7 +615,76 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.languages.registerCompletionItemProvider(
       selector,
       {
+        provideCompletionItems(doc, pos) {
+          if (!insideMustache(doc, pos)) {
+            return;
+          }
+
+          /* 1️⃣  The text from the last “{{” to the cursor                         */
+          const line = doc.lineAt(pos.line).text;
+          const uptoCursor = line.slice(0, pos.character);
+          const lastOpen = uptoCursor.lastIndexOf("{{");
+          const exprPrefix = uptoCursor.slice(lastOpen + 2); // «user.na»
+
+          /* 2️⃣  Grab “root.partial” just before the cursor                        */
+          const m = /([A-Za-z_$][\w$]*)\.(\w*)$/.exec(exprPrefix);
+          if (!m) {
+            return;
+          }
+          const [, root, partial] = m; // root = "user"
+
+          /* 3️⃣  Look up stubbed props for that root                               */
+          const stubProps = globalStubs[root] ?? [];
+
+          /* 4️⃣  Build completions — props first, then natives                     */
+          const out: vscode.CompletionItem[] = [];
+
+          // a) project‑specific properties
+          for (const p of stubProps.filter((p) => p.startsWith(partial))) {
+            const it = new vscode.CompletionItem(
+              p,
+              vscode.CompletionItemKind.Property
+            );
+            it.sortText = "0_" + p; // ensure they appear *before* natives
+            out.push(it);
+          }
+
+          // b) native JS members – *only* if we had nothing project‑specific
+          if (out.length === 0) {
+            for (const k of JS_NATIVE_MEMBERS.filter((k) =>
+              k.startsWith(partial)
+            )) {
+              const kind =
+                typeof ("" as any)[k] === "function"
+                  ? vscode.CompletionItemKind.Method
+                  : vscode.CompletionItemKind.Property;
+
+              const it = new vscode.CompletionItem(k, kind);
+              if (kind === vscode.CompletionItemKind.Method) {
+                it.insertText = new vscode.SnippetString(`${k}()$0`);
+              }
+              it.sortText = "1_" + k; // after props
+              out.push(it);
+            }
+          }
+
+          return out;
+        },
+      },
+      ".", // trigger on dot
+      ...Array.from("abcdefghijklmnopqrstuvwxyz_") // and as you type
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.languages.registerCompletionItemProvider(
+      { language: "php" }, // ← same files
+      {
         provideCompletionItems(document, position) {
+          if (!insideMustache(document, position)) {
+            return;
+          }
+
           const line = document
             .lineAt(position.line)
             .text.slice(0, position.character);
@@ -648,12 +728,35 @@ export async function activate(context: vscode.ExtensionContext) {
     )
   );
 
+  /* ---------------- live pphp.foo(...) validation ---------------- */
+
+  const pendingTimers = new Map<string, NodeJS.Timeout>();
+
+  function schedulePphpValidation(doc: vscode.TextDocument) {
+    if (doc.languageId !== PHP_LANGUAGE) {
+      return;
+    }
+
+    // one timer per document
+    const key = doc.uri.toString();
+    clearTimeout(pendingTimers.get(key));
+
+    pendingTimers.set(
+      key,
+      setTimeout(() => {
+        validatePphpCalls(doc, pphpSigDiags);
+        pendingTimers.delete(key);
+      }, 150) // 150 ms feels snappy without being heavy
+    );
+  }
+
   context.subscriptions.push(stringDecorationType);
   context.subscriptions.push(numberDecorationType);
   context.subscriptions.push(templateLiteralDecorationType);
 
   // Combined update validations function.
   const updateAllValidations = (document: vscode.TextDocument) => {
+    schedulePphpValidation(document);
     updateJsVariableDecorations(document, braceDecorationType);
     updateStringDecorations(document);
     validateJsVariablesInCurlyBraces(document, jsVarDiagnostics);
@@ -698,8 +801,165 @@ export async function activate(context: vscode.ExtensionContext) {
 }
 
 /* ────────────────────────────────────────────────────────────── *
+ *                 Native‑JS hover & signature‑help               *
+ * ────────────────────────────────────────────────────────────── */
+
+type NativeInfo = { sig: string; jsDoc?: string };
+
+const NATIVE_CACHE = new Map<string, NativeInfo>();
+const PARAM_TABLE: Record<string, string[]> = {
+  substring: ["start", "end"],
+  substr: ["start", "length"],
+  slice: ["start", "end"],
+  indexOf: ["searchString", "position"],
+  lastIndexOf: ["searchString", "position"],
+  padStart: ["targetLength", "padString"],
+  padEnd: ["targetLength", "padString"],
+  replace: ["searchValue", "replaceValue"],
+  replaceAll: ["searchValue", "replaceValue"],
+  split: ["separator", "limit"],
+  concat: ["stringN"],
+  repeat: ["count"],
+  includes: ["searchString", "position"],
+};
+
+/** Build (or return) the info for a given member name */
+function nativeInfo(name: string): NativeInfo | undefined {
+  if (NATIVE_CACHE.has(name)) {
+    return NATIVE_CACHE.get(name);
+  }
+
+  const hosts: any[] = [
+    String.prototype,
+    Array.prototype,
+    Number.prototype,
+    Boolean.prototype,
+    Object,
+    Math,
+  ];
+
+  for (const host of hosts) {
+    const value = host[name];
+    if (typeof value === "function") {
+      const paramNames =
+        PARAM_TABLE[name] ??
+        Array.from({ length: value.length }, (_, i) => `arg${i + 1}`);
+      const sig = `${name}(${paramNames.join(", ")})`;
+      const info: NativeInfo = { sig };
+      NATIVE_CACHE.set(name, info);
+      return info;
+    }
+    if (value !== undefined) {
+      const info: NativeInfo = { sig: `${name}: ${typeof value}` };
+      NATIVE_CACHE.set(name, info);
+      return info;
+    }
+  }
+}
+
+export function activateNativeJsHelp(ctx: vscode.ExtensionContext) {
+  // ── Hover inside {{ … }} ─────────────────────────────────────
+  ctx.subscriptions.push(
+    vscode.languages.registerHoverProvider("php", {
+      provideHover(doc, pos) {
+        if (!insideMustache(doc, pos)) {
+          return;
+        }
+
+        const wr = doc.getWordRangeAtPosition(pos, /\w+/);
+        if (!wr) {
+          return;
+        }
+        const word = doc.getText(wr);
+        const info = nativeInfo(word);
+        if (!info) {
+          return;
+        }
+
+        const md = new vscode.MarkdownString();
+        md.appendCodeblock(info.sig, "javascript");
+        if (info.jsDoc) {
+          md.appendMarkdown("\n" + info.jsDoc);
+        }
+        return new vscode.Hover(md, wr);
+      },
+    })
+  );
+
+  // ── Signature‑help: foo.substring(|) ─────────────────────────
+  ctx.subscriptions.push(
+    vscode.languages.registerSignatureHelpProvider(
+      "php",
+      {
+        provideSignatureHelp(doc, pos) {
+          if (!insideMustache(doc, pos)) {
+            return null;
+          }
+
+          const line = doc.lineAt(pos.line).text.slice(0, pos.character);
+          const m = /(?:\.)([A-Za-z_$][\w$]*)\(/.exec(line);
+          if (!m) {
+            return null;
+          }
+
+          const name = m[1];
+          const info = nativeInfo(name);
+          if (!info) {
+            return null;
+          }
+
+          const paramLabels = info.sig
+            .replace(/^[^(]+\(([^)]*)\).*/, "$1")
+            .split(",")
+            .map((p) => p.trim())
+            .filter(Boolean);
+
+          const sig = new SignatureInformation(info.sig);
+          sig.parameters = paramLabels.map((p) => new ParameterInformation(p));
+
+          /* which arg? – count commas since the last '(' */
+          const callSoFar = line.slice(line.lastIndexOf("(") + 1);
+          const active = Math.min(
+            callSoFar.split(",").length - 1,
+            paramLabels.length - 1
+          );
+
+          const sh = new SignatureHelp();
+          sh.signatures = [sig];
+          sh.activeSignature = 0;
+          sh.activeParameter = active;
+          return sh;
+        },
+      },
+      "(", // trigger when user types “(”
+      "," // update on “,”
+    )
+  );
+}
+
+/* ────────────────────────────────────────────────────────────── *
  *                    EDITOR CONFIGURATION UPDATE                   *
  * ────────────────────────────────────────────────────────────── */
+
+/* ── 0️⃣  A flat list of native members you want to offer ───────────── */
+const JS_NATIVE_MEMBERS = [
+  ...NATIVE_STRING_METHODS,
+  ...NATIVE_STRING_PROPS,
+  ...Object.getOwnPropertyNames(Array.prototype),
+  ...Object.getOwnPropertyNames(Number.prototype),
+  ...Object.getOwnPropertyNames(Boolean.prototype),
+].filter((k) => /^[a-z]/i.test(k)); // ignore the weird symbols
+
+/* ── 1️⃣  Utility: is the position inside an *open* {{ … }} pair? ───── */
+function insideMustache(
+  doc: vscode.TextDocument,
+  pos: vscode.Position
+): boolean {
+  const before = doc.getText(new vscode.Range(new vscode.Position(0, 0), pos));
+  const open = before.lastIndexOf("{{");
+  const close = before.lastIndexOf("}}");
+  return open !== -1 && open > close;
+}
 
 function updateStringDecorations(document: vscode.TextDocument) {
   const editor = vscode.window.activeTextEditor;
@@ -1459,17 +1719,6 @@ const validateJsVariablesInCurlyBraces = (
 
 // ── at module‐scope ────────────────────────────────────────────────
 
-// grab every key on String.prototype…
-const _STRING_PROTO_KEYS = Object.getOwnPropertyNames(String.prototype);
-
-// methods vs. non-method props
-const NATIVE_STRING_METHODS = _STRING_PROTO_KEYS.filter(
-  (key) => typeof ("" as any)[key] === "function"
-);
-const NATIVE_STRING_PROPS = _STRING_PROTO_KEYS.filter(
-  (key) => typeof ("" as any)[key] !== "function"
-);
-
 // build your two regexes once…
 const nativeFuncRegex = new RegExp(
   `\\b(${NATIVE_STRING_METHODS.join("|")})\\b`,
@@ -1487,12 +1736,14 @@ const objectPropRegex = /(?<=\.)[A-Za-z_$][\w$]*/g;
 const objectPropertyDecorationType =
   vscode.window.createTextEditorDecorationType({
     color: "#9CDCFE", // pick whatever color you like
-    fontStyle: "italic", // maybe italic so it really stands out
   });
 
 // 1️⃣ at the top of activate()
 const STRING_COLOR = "#CE9178"; // or whatever your theme’s string color is
 const stringDecorationType = vscode.window.createTextEditorDecorationType({
+  color: STRING_COLOR,
+});
+const tplLiteralDecorationType = vscode.window.createTextEditorDecorationType({
   color: STRING_COLOR,
 });
 
@@ -1591,17 +1842,30 @@ function updateNativeTokenDecorations(
     }
 
     for (const tl of jsExpr.matchAll(templateLiteralRegex)) {
-      // tl.index is relative to jsExpr, so shift by baseIndex
+      const tplBase = baseIndex + tl.index!; //  ← NEW
       const raw = tl[0];
-      const inner = raw.slice(1, -1); // strip the backticks
+      const inner = raw.slice(1, -1); // strip the back‑ticks
       let last = 0;
 
-      // walk through each ${…} placeholder
+      // at the top of the loop, just after tplBase is defined
+      stringSpans.push({
+        range: new vscode.Range(
+          document.positionAt(tplBase),
+          document.positionAt(tplBase + 1)
+        ),
+      });
+      stringSpans.push({
+        range: new vscode.Range(
+          document.positionAt(tplBase + raw.length - 1),
+          document.positionAt(tplBase + raw.length)
+        ),
+      });
+
       let ph: RegExpExecArray | null;
       while ((ph = placeholderRegex.exec(inner))) {
-        // literal chunk before this placeholder
-        const litStart = baseIndex + 1 + last;
-        const litEnd = baseIndex + 1 + ph.index;
+        // literal chunk **before** this placeholder
+        const litStart = tplBase + 1 + last; // tplBase, not baseIndex
+        const litEnd = tplBase + 1 + ph.index;
         if (litEnd > litStart) {
           stringSpans.push({
             range: new vscode.Range(
@@ -1613,10 +1877,10 @@ function updateNativeTokenDecorations(
         last = ph.index + ph[0].length;
       }
 
-      // any trailing literal after the last placeholder
+      // trailing literal **after** the last placeholder
       if (last < inner.length) {
-        const litStart = baseIndex + 1 + last;
-        const litEnd = baseIndex + 1 + inner.length;
+        const litStart = tplBase + 1 + last;
+        const litEnd = tplBase + 1 + inner.length;
         stringSpans.push({
           range: new vscode.Range(
             document.positionAt(litStart),
@@ -1631,7 +1895,7 @@ function updateNativeTokenDecorations(
   editor.setDecorations(propDecoType, nativePropDecorations);
   editor.setDecorations(objectPropertyDecorationType, objectPropDecorations);
   editor.setDecorations(numberDecorationType, numberDecorations);
-  editor.setDecorations(stringDecorationType, stringSpans);
+  editor.setDecorations(tplLiteralDecorationType, stringSpans);
 }
 
 /* ────────────────────────────────────────────────────────────── *
