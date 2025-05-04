@@ -939,38 +939,50 @@ export async function getModelMap(): Promise<ModelMap> {
   return cache;
 }
 
-async function validateCreateCall(
+// at top‐of‐file, or wherever you keep your constants:
+const phpDataTypes: Record<string, string[]> = {
+  String: ["string"],
+  Int: ["int"],
+  Boolean: ["bool"],
+  Float: ["float"],
+  BigInt: ["BigInteger", "int"],
+  Decimal: ["BigDecimal", "float"],
+  DateTime: ["DateTime", "string"],
+  Json: ["array", "string"],
+  Bytes: ["string"],
+  Enum: ["enum", "string"],
+};
+
+export async function validateCreateCall(
   doc: vscode.TextDocument,
   collection: vscode.DiagnosticCollection
-) {
+): Promise<void> {
   const text = doc.getText();
   const diags: vscode.Diagnostic[] = [];
-  const re =
+  const createRe =
     /\$prisma->(\w+)->create\(\s*\[\s*'data'\s*=>\s*\[([\s\S]*?)\]\s*\]\s*\)/g;
   let m: RegExpExecArray | null;
 
   const modelMap = await getModelMap();
 
-  while ((m = re.exec(text))) {
+  while ((m = createRe.exec(text))) {
     const [, modelName, dataLiteral] = m;
     const fields = modelMap.get(modelName.toLowerCase());
-    if (!fields) {
-      continue;
-    }
+    if (!fields) { continue; }
 
-    const dataOffset = m[0].indexOf(dataLiteral); // ➊
-
-    const fieldRx = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
+    const dataOffset = m[0].indexOf(dataLiteral);
+    const fieldRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
     let f: RegExpExecArray | null;
 
-    while ((f = fieldRx.exec(dataLiteral))) {
-      const [, key, valueExpr] = f;
+    while ((f = fieldRe.exec(dataLiteral))) {
+      const [, key, rawValue] = f;
       const fieldInfo = fields.get(key);
 
-      const start = doc.positionAt(m.index + dataOffset + f.index); // ➋
+      // range for diagnostics
+      const start = doc.positionAt(m.index + dataOffset + f.index);
       const range = new vscode.Range(start, start.translate(0, key.length));
 
-      /* a) Non-existent column */
+      // a) Non-existent column
       if (!fieldInfo) {
         diags.push(
           new vscode.Diagnostic(
@@ -982,31 +994,60 @@ async function validateCreateCall(
         continue;
       }
 
-      /* b) Incorrect type (heuristic based on literal) */
-      const isString = /^['"]/.test(valueExpr);
-      const isNumber = /^[0-9]+$/.test(valueExpr);
-      const isBool = /^(true|false)$/.test(valueExpr);
+      // b) Type check using phpDataTypes
+      const allowed = phpDataTypes[fieldInfo.type] ?? [];
+      const expr = rawValue.trim();
 
-      const expectedTsType = fieldInfo.isList
-        ? `${fieldInfo.type}[]`
-        : fieldInfo.type;
+      // heuristics
+      const isString = /^['"]/.test(expr);
+      const isNumber = /^-?\d+(\.\d+)?$/.test(expr);
+      const isBool = /^(true|false)$/i.test(expr);
+      const isArray = /^\[.*\]$/.test(expr);
+      const isVar = /^\$[A-Za-z_]\w*/.test(expr);
+      const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(expr);
 
-      const typeOK =
-        (fieldInfo.type === "String" && isString) ||
-        (fieldInfo.type.match(/Int|BigInt|Float|Decimal/) && isNumber) ||
-        (fieldInfo.type === "Boolean" && isBool);
+      const typeOK = allowed.some((t) => {
+        switch (t) {
+          case "string":
+            // now also allow variables
+            return isString || isVar;
+          case "int":
+            return isNumber && !expr.includes(".");
+          case "float":
+            return isNumber;
+          case "bool":
+            return isBool;
+          case "array":
+            return isArray;
+          case "DateTime":
+            return (
+              /^new\s+DateTime/.test(expr) || isFnCall || isString || isVar
+            );
+          case "BigInteger":
+          case "BigDecimal":
+            return isFnCall;
+          case "enum":
+            return isString;
+          default:
+            return isFnCall;
+        }
+      });
 
       if (!typeOK) {
+        const expected = fieldInfo.isList
+          ? `${fieldInfo.type}[]`
+          : fieldInfo.type;
         diags.push(
           new vscode.Diagnostic(
             range,
-            `"${key}" expects ${expectedTsType}, but received "${valueExpr.trim()}".`,
+            `"${key}" expects ${expected}, but received "${expr}".`,
             vscode.DiagnosticSeverity.Error
           )
         );
       }
     }
   }
+
   collection.set(doc.uri, diags);
 }
 
