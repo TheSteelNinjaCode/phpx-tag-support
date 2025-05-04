@@ -821,10 +821,271 @@ export async function activate(context: vscode.ExtensionContext) {
     '"' // "
   );
 
+  const prismaReadProvider = vscode.languages.registerCompletionItemProvider(
+    "php",
+    {
+      async provideCompletionItems(
+        doc: vscode.TextDocument,
+        pos: vscode.Position
+      ) {
+        // 1️⃣ everything up to the cursor
+        const before = doc.getText(
+          new vscode.Range(new vscode.Position(0, 0), pos)
+        );
+
+        // 2️⃣ only if we’re just inside an opening quote…
+        const quoteMatch = /['"]([\w]*)$/.exec(before);
+        if (!quoteMatch) {
+          return;
+        }
+        const alreadyTyped = quoteMatch[1];
+        const quoteStart = quoteMatch.index!;
+
+        // ─ bail if this quote is actually starting a value, not a key ─
+        //   (the same trick your create provider uses)
+        const lookBack = before.slice(Math.max(0, quoteStart - 5), quoteStart);
+        if (/\=>\s*$/.test(lookBack)) {
+          return;
+        }
+
+        // 3️⃣ confirm we’re inside a find*(… 'where' => [ …  …
+        const ctx =
+          /\$prisma->(\w+)->(findMany|findFirst|findUnique)\([^]*?'where'\s*=>\s*\[[^]*$/m.exec(
+            before
+          );
+        if (!ctx) {
+          return;
+        }
+        const modelName = ctx[1];
+
+        // 4️⃣ grab model fields
+        const fields = (await getModelMap()).get(modelName.toLowerCase());
+        if (!fields) {
+          return;
+        }
+
+        // 5️⃣ figure out your quote style & if there’s already a closing-quote
+        const quote = /["']$/.exec(before)?.[0] ?? "'";
+        const nextChar = doc.getText(
+          new vscode.Range(pos, pos.translate(0, 1))
+        );
+        const hasCloseQuote = nextChar === quote;
+
+        // 6️⃣ helper to format “: Type” detail
+        const fmt = (f: FieldInfo) =>
+          `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
+
+        // 7️⃣ build completion items
+        return [...fields.entries()].map(([name, info]) => {
+          const optional = !info.required;
+          const label: vscode.CompletionItemLabel = {
+            label: optional ? `${name}?` : name,
+            detail: `: ${fmt(info)}`,
+          };
+
+          const item = new vscode.CompletionItem(
+            label.label,
+            vscode.CompletionItemKind.Field
+          );
+          item.label = label;
+          item.documentation = new vscode.MarkdownString(
+            `\`${label.label}${label.detail}\`\n\n` +
+              (optional ? "*optional filter*" : "*required filter*")
+          );
+
+          // 8️⃣ replace just the key’s quotes (keep the closing-quote if present)
+          const start = pos.translate(0, -alreadyTyped.length - 1);
+          const end = hasCloseQuote ? pos.translate(0, 1) : pos;
+          item.range = new vscode.Range(start, end);
+
+          // 9️⃣ VS Code filtering & sort
+          item.filterText = `${quote}${name}`;
+          item.sortText = `0_${name}`;
+
+          // 🔟 insertion snippet: `'key' => $0`
+          item.insertText = new vscode.SnippetString(
+            `${quote}${name}${quote} => $0`
+          );
+
+          return item;
+        });
+      },
+    },
+    `"`,
+    `'` // trigger on typing quote
+  );
+
+  // 2a) “data” side just like create:
+  const prismaUpdateDataProvider =
+    vscode.languages.registerCompletionItemProvider(
+      "php",
+      {
+        async provideCompletionItems(doc, pos) {
+          const before = doc.getText(
+            new vscode.Range(new vscode.Position(0, 0), pos)
+          );
+          const quoteMatch = /['"]([\w]*)$/.exec(before);
+          if (!quoteMatch) {
+            return;
+          }
+          const alreadyTyped = quoteMatch[1];
+          const quoteStart = quoteMatch.index!;
+          // bail if we’re on the *value* side
+          if (
+            /\=>\s*$/.test(
+              before.slice(Math.max(0, quoteStart - 5), quoteStart)
+            )
+          ) {
+            return;
+          }
+
+          // only inside update(... 'data' => [ …
+          const ctx =
+            /\$prisma->(\w+)->update\([^]*?'data'\s*=>\s*\[[^]*$/m.exec(before);
+          if (!ctx) {
+            return;
+          }
+          const modelName = ctx[1];
+
+          const fields = (await getModelMap()).get(modelName.toLowerCase());
+          if (!fields) {
+            return;
+          }
+
+          // same snippet logic as your create‐provider…
+          const quote = /["']$/.exec(before)?.[0] ?? "'";
+          const nextChar = doc.getText(
+            new vscode.Range(pos, pos.translate(0, 1))
+          );
+          const hasClose = nextChar === quote;
+          const fmt = (f: FieldInfo) =>
+            `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
+
+          return [...fields.entries()].map(([name, info]) => {
+            const optional = !info.required;
+            const label: vscode.CompletionItemLabel = {
+              label: optional ? `${name}?` : name,
+              detail: `: ${fmt(info)}`,
+            };
+            const item = new vscode.CompletionItem(
+              label.label,
+              vscode.CompletionItemKind.Field
+            );
+            item.label = label;
+            item.documentation = new vscode.MarkdownString(
+              `\`${label.label}${label.detail}\`\n\n` +
+                (optional ? "*optional field*" : "*required field*")
+            );
+
+            const start = pos.translate(0, -alreadyTyped.length - 1);
+            const end = hasClose ? pos.translate(0, 1) : pos;
+            item.range = new vscode.Range(start, end);
+
+            item.filterText = `${quote}${name}`;
+            item.sortText = `0_${name}`;
+            item.insertText = new vscode.SnippetString(
+              `${quote}${name}${quote} => $0`
+            );
+
+            return item;
+          });
+        },
+      },
+      `"`,
+      `'`
+    );
+
+  // 2b) “where” side just like read:
+  const prismaUpdateWhereProvider =
+    vscode.languages.registerCompletionItemProvider(
+      "php",
+      {
+        async provideCompletionItems(doc, pos) {
+          const before = doc.getText(
+            new vscode.Range(new vscode.Position(0, 0), pos)
+          );
+          const quoteMatch = /['"]([\w]*)$/.exec(before);
+          if (!quoteMatch) {
+            return;
+          }
+          const alreadyTyped = quoteMatch[1];
+          const quoteStart = quoteMatch.index!;
+          // bail if we're on the value side
+          if (
+            /\=>\s*$/.test(
+              before.slice(Math.max(0, quoteStart - 5), quoteStart)
+            )
+          ) {
+            return;
+          }
+
+          // only inside update(... 'where' => [ …
+          const ctx =
+            /\$prisma->(\w+)->update\([^]*?'where'\s*=>\s*\[[^]*$/m.exec(
+              before
+            );
+          if (!ctx) {
+            return;
+          }
+          const modelName = ctx[1];
+
+          const fields = (await getModelMap()).get(modelName.toLowerCase());
+          if (!fields) {
+            return;
+          }
+
+          // same snippet logic as your read‐provider…
+          const quote = /["']$/.exec(before)?.[0] ?? "'";
+          const nextChar = doc.getText(
+            new vscode.Range(pos, pos.translate(0, 1))
+          );
+          const hasClose = nextChar === quote;
+          const fmt = (f: FieldInfo) =>
+            `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
+
+          return [...fields.entries()].map(([name, info]) => {
+            const optional = !info.required;
+            const label: vscode.CompletionItemLabel = {
+              label: optional ? `${name}?` : name,
+              detail: `: ${fmt(info)}`,
+            };
+            const item = new vscode.CompletionItem(
+              label.label,
+              vscode.CompletionItemKind.Field
+            );
+            item.label = label;
+            item.documentation = new vscode.MarkdownString(
+              `\`${label.label}${label.detail}\`\n\n` +
+                (optional ? "*optional filter*" : "*required filter*")
+            );
+
+            const start = pos.translate(0, -alreadyTyped.length - 1);
+            const end = hasClose ? pos.translate(0, 1) : pos;
+            item.range = new vscode.Range(start, end);
+
+            item.filterText = `${quote}${name}`;
+            item.sortText = `0_${name}`;
+            item.insertText = new vscode.SnippetString(
+              `${quote}${name}${quote} => $0`
+            );
+
+            return item;
+          });
+        },
+      },
+      `"`,
+      `'`
+    );
+
   context.subscriptions.push(stringDecorationType);
   context.subscriptions.push(numberDecorationType);
   context.subscriptions.push(templateLiteralDecorationType);
   context.subscriptions.push(prismaCreateProvider);
+  context.subscriptions.push(prismaReadProvider);
+  context.subscriptions.push(
+    prismaUpdateDataProvider,
+    prismaUpdateWhereProvider
+  );
 
   const prismaDiags =
     vscode.languages.createDiagnosticCollection("prisma-create");
@@ -833,6 +1094,8 @@ export async function activate(context: vscode.ExtensionContext) {
   const updateAllValidations = async (document: vscode.TextDocument) => {
     schedulePphpValidation(document);
     await validateCreateCall(document, prismaDiags);
+    await validateReadCall(document, prismaDiags);
+    await validateUpdateCall(document, prismaDiags);
     updateJsVariableDecorations(document, braceDecorationType);
     updateStringDecorations(document);
     validateJsVariablesInCurlyBraces(document, jsVarDiagnostics);
@@ -959,30 +1222,177 @@ export async function validateCreateCall(
 ): Promise<void> {
   const text = doc.getText();
   const diags: vscode.Diagnostic[] = [];
-  const createRe =
-    /\$prisma->(\w+)->create\(\s*\[\s*'data'\s*=>\s*\[([\s\S]*?)\]\s*\]\s*\)/g;
-  let m: RegExpExecArray | null;
 
+  // 1️⃣ Match every $prisma->Model->create([ … ])
+  //    Capture:  [1] modelName      [2] entire args body inside the [ ... ]
+  const callRe = /\$prisma->(\w+)->create\(\s*\[([\s\S]*?)\]\s*\)/g;
+  let m: RegExpExecArray | null;
   const modelMap = await getModelMap();
 
-  while ((m = createRe.exec(text))) {
-    const [, modelName, dataLiteral] = m;
+  while ((m = callRe.exec(text))) {
+    const [fullMatch, modelName, argsBody] = m;
     const fields = modelMap.get(modelName.toLowerCase());
-    if (!fields) { continue; }
+    if (!fields) {
+      continue; // unknown model name → skip
+    }
 
-    const dataOffset = m[0].indexOf(dataLiteral);
+    // compute the full-call range (for a missing-data error)
+    const callStart = doc.positionAt(m.index);
+    const callEnd = doc.positionAt(m.index + fullMatch.length);
+    const callRange = new vscode.Range(callStart, callEnd);
+
+    // 2️⃣ If there's no `data => [` at all, emit one error and skip the details
+    if (!/\bdata\b\s*=>\s*\[/.test(argsBody)) {
+      diags.push(
+        new vscode.Diagnostic(
+          callRange,
+          `create() requires a \`data\` block.`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      continue;
+    }
+
+    // 3️⃣ Otherwise pull out the inner of data => [ … ]
+    const dataMatch = /\bdata\b\s*=>\s*\[([\s\S]*?)\]/m.exec(argsBody)!;
+    const dataLiteral = dataMatch[1];
+
+    // compute the document offset of dataLiteral’s first character
+    const fullMatchIndex = m.index;
+    const dataBlockIndexInMatch = fullMatch.indexOf(dataMatch[0]);
+    const dataInnerIndexInBlock = dataMatch[0].indexOf(dataLiteral);
+    const dataOffset =
+      fullMatchIndex + dataBlockIndexInMatch + dataInnerIndexInBlock;
+
+    // 4️⃣ For each `'key' => value` inside that literal, do your checks
     const fieldRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
     let f: RegExpExecArray | null;
 
     while ((f = fieldRe.exec(dataLiteral))) {
       const [, key, rawValue] = f;
-      const fieldInfo = fields.get(key);
+      const info = fields.get(key);
 
-      // range for diagnostics
-      const start = doc.positionAt(m.index + dataOffset + f.index);
+      // compute the location of the key in the real document
+      const start = doc.positionAt(dataOffset + f.index);
       const range = new vscode.Range(start, start.translate(0, key.length));
 
-      // a) Non-existent column
+      // a) Unknown column?
+      if (!info) {
+        diags.push(
+          new vscode.Diagnostic(
+            range,
+            `The column "${key}" does not exist in ${modelName}.`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+        continue;
+      }
+
+      // b) Type‐check against your phpDataTypes map
+      const expr = rawValue.trim();
+      const allowed = phpDataTypes[info.type] ?? [];
+
+      // simple heuristics:
+      const isString = /^['"]/.test(expr);
+      const isNumber = /^-?\d+(\.\d+)?$/.test(expr);
+      const isBool = /^(true|false)$/i.test(expr);
+      const isArray = /^\[.*\]$/.test(expr);
+      const isVar = /^\$[A-Za-z_]\w*/.test(expr);
+      const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(expr);
+
+      const typeOK = allowed.some((t) => {
+        switch (t) {
+          case "string":
+            return isString || isVar;
+          case "int":
+            return isNumber && !expr.includes(".");
+          case "float":
+            return isNumber;
+          case "bool":
+            return isBool;
+          case "array":
+            return isArray;
+          case "DateTime":
+            return (
+              /^new\s+DateTime/.test(expr) || isFnCall || isString || isVar
+            );
+          case "BigInteger":
+          case "BigDecimal":
+            return isFnCall;
+          case "enum":
+            return isString;
+          default:
+            return isFnCall;
+        }
+      });
+
+      if (!typeOK) {
+        const expected = info.isList ? `${info.type}[]` : info.type;
+        diags.push(
+          new vscode.Diagnostic(
+            range,
+            `"${key}" expects ${expected}, but received "${expr}".`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      }
+    }
+  }
+
+  // 5️⃣ Finally, publish all diagnostics
+  collection.set(doc.uri, diags);
+}
+
+/**
+ * Validate $prisma->X->find*(…) calls by checking
+ * each `where: [ key => value ]` against your Prisma schema.
+ */
+export async function validateReadCall(
+  doc: vscode.TextDocument,
+  collection: vscode.DiagnosticCollection
+): Promise<void> {
+  const text = doc.getText();
+  const diags: vscode.Diagnostic[] = [];
+
+  // match e.g. $prisma->user->findMany([ … ])
+  const readRe =
+    /\$prisma->(\w+)->(findMany|findFirst|findUnique)\(\s*\[([\s\S]*?)\]\s*\)/g;
+  let m: RegExpExecArray | null;
+
+  const modelMap = await getModelMap();
+
+  while ((m = readRe.exec(text))) {
+    const [, modelName, , argsLiteral] = m;
+    const fields = modelMap.get(modelName.toLowerCase());
+    if (!fields) {
+      continue;
+    }
+
+    // pull out the inner of where => [ … ]
+    const whereMatch = /['"]where['"]\s*=>\s*\[([\s\S]*?)\](?=,|\s*$)/m.exec(
+      argsLiteral
+    );
+    if (!whereMatch) {
+      continue;
+    }
+
+    const whereLiteral = whereMatch[1];
+    // offset of that `…` within the document text
+    const baseOffset = m.index + m[0].indexOf(whereLiteral);
+
+    // same field regex you used before
+    const fieldRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
+    let f: RegExpExecArray | null;
+
+    while ((f = fieldRe.exec(whereLiteral))) {
+      const [, key, rawValue] = f;
+      const fieldInfo = fields.get(key);
+
+      // compute diagnostic range
+      const start = doc.positionAt(baseOffset + f.index);
+      const range = new vscode.Range(start, start.translate(0, key.length));
+
+      // a) unknown field
       if (!fieldInfo) {
         diags.push(
           new vscode.Diagnostic(
@@ -994,11 +1404,11 @@ export async function validateCreateCall(
         continue;
       }
 
-      // b) Type check using phpDataTypes
-      const allowed = phpDataTypes[fieldInfo.type] ?? [];
+      // b) type‐check valueExpr using phpDataTypes
       const expr = rawValue.trim();
+      const allowed = phpDataTypes[fieldInfo.type] ?? [];
 
-      // heuristics
+      // quick heuristics
       const isString = /^['"]/.test(expr);
       const isNumber = /^-?\d+(\.\d+)?$/.test(expr);
       const isBool = /^(true|false)$/i.test(expr);
@@ -1009,7 +1419,6 @@ export async function validateCreateCall(
       const typeOK = allowed.some((t) => {
         switch (t) {
           case "string":
-            // now also allow variables
             return isString || isVar;
           case "int":
             return isNumber && !expr.includes(".");
@@ -1044,6 +1453,218 @@ export async function validateCreateCall(
             vscode.DiagnosticSeverity.Error
           )
         );
+      }
+    }
+  }
+
+  collection.set(doc.uri, diags);
+}
+
+/**
+ * Validate $prisma->X->update([...]) calls:
+ *  – the `data` block exactly like create
+ *  – the `where` block exactly like find*
+ */
+export async function validateUpdateCall(
+  doc: vscode.TextDocument,
+  collection: vscode.DiagnosticCollection
+): Promise<void> {
+  const text = doc.getText();
+  const diags: vscode.Diagnostic[] = [];
+  const updateRe = /\$prisma->(\w+)->update\(\s*\[([\s\S]*?)\]\s*\)/g;
+  let m: RegExpExecArray | null;
+  const modelMap = await getModelMap();
+
+  while ((m = updateRe.exec(text))) {
+    const [fullMatch, modelName, argsLiteral] = m;
+    const fields = modelMap.get(modelName.toLowerCase());
+    if (!fields) {
+      continue;
+    }
+
+    // compute the Range of the entire update(...) call
+    const callStart = doc.positionAt(m.index);
+    const callEnd = doc.positionAt(m.index + fullMatch.length);
+    const callRange = new vscode.Range(callStart, callEnd);
+
+    // find 'data' and 'where' clauses
+    const dataMatch = /['"]data['"]\s*=>\s*\[([\s\S]*?)\]/m.exec(argsLiteral);
+    const whereMatch = /['"]where['"]\s*=>\s*\[([\s\S]*?)\]/m.exec(argsLiteral);
+
+    // ❗ require both
+    if (!dataMatch || !whereMatch) {
+      const missing = [
+        !dataMatch ? "'data'" : null,
+        !whereMatch ? "'where'" : null,
+      ]
+        .filter(Boolean)
+        .join(" and ");
+      diags.push(
+        new vscode.Diagnostic(
+          callRange,
+          `update() requires both ${missing} blocks.`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      continue; // skip per-field checks if one is missing
+    }
+
+    // base offset for inner slices
+    const baseOffset = m.index + fullMatch.indexOf(argsLiteral);
+
+    // ── 1) validate `data` just like create ──────────────────────
+    {
+      const dataLiteral = dataMatch[1];
+      const dataOffset =
+        baseOffset +
+        argsLiteral.indexOf(dataMatch[0]) +
+        dataMatch[0].indexOf(dataLiteral);
+
+      const fieldRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
+      let f: RegExpExecArray | null;
+      while ((f = fieldRe.exec(dataLiteral))) {
+        const [, key, rawValue] = f;
+        const info = fields.get(key);
+        const start = doc.positionAt(dataOffset + f.index);
+        const range = new vscode.Range(start, start.translate(0, key.length));
+
+        if (!info) {
+          diags.push(
+            new vscode.Diagnostic(
+              range,
+              `The column "${key}" does not exist in ${modelName}.`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+          continue;
+        }
+
+        // your phpDataTypes-based type check here…
+        const expr = rawValue.trim();
+        const allowed = phpDataTypes[info.type] ?? [];
+        const isString = /^['"]/.test(expr);
+        const isNumber = /^-?\d+(\.\d+)?$/.test(expr);
+        const isBool = /^(true|false)$/i.test(expr);
+        const isArray = /^\[.*\]$/.test(expr);
+        const isVar = /^\$[A-Za-z_]\w*/.test(expr);
+        const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(
+          expr
+        );
+
+        const typeOK = allowed.some((t) => {
+          switch (t) {
+            case "string":
+              return isString || isVar;
+            case "int":
+              return isNumber && !expr.includes(".");
+            case "float":
+              return isNumber;
+            case "bool":
+              return isBool;
+            case "array":
+              return isArray;
+            case "DateTime":
+              return (
+                /^new\s+DateTime/.test(expr) || isFnCall || isString || isVar
+              );
+            case "BigInteger":
+            case "BigDecimal":
+              return isFnCall;
+            case "enum":
+              return isString;
+            default:
+              return isFnCall;
+          }
+        });
+
+        if (!typeOK) {
+          const expected = info.isList ? `${info.type}[]` : info.type;
+          diags.push(
+            new vscode.Diagnostic(
+              range,
+              `"${key}" expects ${expected}, but received "${expr}".`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+        }
+      }
+    }
+
+    // ── 2) validate `where` just like read ──────────────────────
+    {
+      const whereLiteral = whereMatch[1];
+      const whereOffset =
+        baseOffset +
+        argsLiteral.indexOf(whereMatch[0]) +
+        whereMatch[0].indexOf(whereLiteral);
+
+      const fieldRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
+      let f: RegExpExecArray | null;
+      while ((f = fieldRe.exec(whereLiteral))) {
+        const [, key, rawValue] = f;
+        const info = fields.get(key);
+        const start = doc.positionAt(whereOffset + f.index);
+        const range = new vscode.Range(start, start.translate(0, key.length));
+
+        if (!info) {
+          diags.push(
+            new vscode.Diagnostic(
+              range,
+              `The column "${key}" does not exist in ${modelName}.`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+          continue;
+        }
+
+        // same type-check as above
+        const expr = rawValue.trim();
+        const allowed = phpDataTypes[info.type] ?? [];
+        const isString = /^['"]/.test(expr);
+        const isNumber = /^-?\d+(\.\d+)?$/.test(expr);
+        const isBool = /^(true|false)$/i.test(expr);
+        const isArray = /^\[.*\]$/.test(expr);
+        const isVar = /^\$[A-Za-z_]\w*/.test(expr);
+        const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(
+          expr
+        );
+
+        const typeOK = allowed.some((t) => {
+          switch (t) {
+            case "string":
+              return isString || isVar;
+            case "int":
+              return isNumber && !expr.includes(".");
+            case "float":
+              return isNumber;
+            case "bool":
+              return isBool;
+            case "array":
+              return isArray;
+            case "DateTime":
+              return (
+                /^new\s+DateTime/.test(expr) || isFnCall || isString || isVar
+              );
+            case "BigInteger":
+            case "BigDecimal":
+              return isFnCall;
+            case "enum":
+              return isString;
+            default:
+              return isFnCall;
+          }
+        });
+
+        if (!typeOK) {
+          const expected = info.isList ? `${info.type}[]` : info.type;
+          diags.push(
+            new vscode.Diagnostic(
+              range,
+              `"${key}" expects ${expected}, but received "${expr}".`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+        }
       }
     }
   }
