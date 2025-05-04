@@ -733,55 +733,37 @@ export async function activate(context: vscode.ExtensionContext) {
     );
   }
 
+  // Register a completion provider for `$prisma->Model->create([ 'data' => [ …`
   const prismaCreateProvider = vscode.languages.registerCompletionItemProvider(
     "php",
     {
-      async provideCompletionItems(doc, pos) {
-        /* 1️⃣ text before the cursor ------------------------------------ */
-        const before = doc.getText(
-          new vscode.Range(new vscode.Position(0, 0), pos)
+      async provideCompletionItems(document, position) {
+        const before = document.getText(
+          new vscode.Range(new vscode.Position(0, 0), position)
         );
 
-        /* 2️⃣ are we inside an opening quote? --------------------------- */
-        const quoteMatch = /['"]([\w]*)$/.exec(before);
-        if (!quoteMatch) {
+        // ① grab *all* create calls, then the last one
+        const all = [...before.matchAll(/\$prisma->([A-Za-z_]\w*)->create\(/g)];
+        if (all.length === 0) {
           return;
         }
-        const alreadyTyped = quoteMatch[1];
-
-        /* bail out if we’re on the *value* side ------------------------- */
-        const quoteStart = quoteMatch.index!;
-        const lookBack = before.slice(Math.max(0, quoteStart - 5), quoteStart);
-        if (/\=>\s*$/.test(lookBack)) {
-          return;
-        }
-
-        /* 3️⃣ confirm we’re in  …->create([ 'data' => [ …  -------------- */
-        const ctx = /\$prisma->(\w+)->create\([^]*?'data'\s*=>\s*\[[^]*$/m.exec(
-          before
-        );
-        if (!ctx) {
-          return;
-        }
-        const [, modelName] = ctx;
+        const modelName = all[all.length - 1][1];
 
         const fields = (await getModelMap()).get(modelName.toLowerCase());
         if (!fields) {
           return;
         }
 
-        /* 4️⃣ quote info & closing‑quote check -------------------------- */
+        // detect quote style…
         const quote = /["']$/.exec(before)?.[0] ?? "'";
-        const nextChar = doc.getText(
-          new vscode.Range(pos, pos.translate(0, 1))
+        const nextChar = document.getText(
+          new vscode.Range(position, position.translate(0, 1))
         );
         const hasClosingQuote = nextChar === quote;
 
-        /* — helper to format the nice type string — */
         const fmt = (f: FieldInfo) =>
           `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
 
-        /* 5️⃣ build completion items ------------------------------------ */
         return [...fields.entries()].map(([name, info]) => {
           const optional = !info.required;
           const label: vscode.CompletionItemLabel = {
@@ -799,16 +781,13 @@ export async function activate(context: vscode.ExtensionContext) {
               (optional ? "*optional field*" : "*required field*")
           );
 
-          /* replacement range – include the closing quote iff it exists */
-          const start = pos.translate(0, -(alreadyTyped.length || 0) - 1);
-          const end = hasClosingQuote ? pos.translate(0, 1) : pos;
+          const alreadyTyped = before.match(/['"]([\w]*)$/)![1] || "";
+          const start = position.translate(0, -alreadyTyped.length - 1);
+          const end = hasClosingQuote ? position.translate(0, 1) : position;
           item.range = new vscode.Range(start, end);
 
-          /* VS Code filtering */
           item.filterText = `${quote}${name}`;
           item.sortText = `0_${name}`;
-
-          /* insertion snippet: always ‹quote›name‹quote› */
           item.insertText = new vscode.SnippetString(
             `${quote}${name}${quote} => $0`
           );
@@ -817,72 +796,63 @@ export async function activate(context: vscode.ExtensionContext) {
         });
       },
     },
-    "'", // triggers
-    '"' // "
+    "'", // trigger on either quote
+    `"`
   );
 
   const prismaReadProvider = vscode.languages.registerCompletionItemProvider(
     "php",
     {
-      async provideCompletionItems(
-        doc: vscode.TextDocument,
-        pos: vscode.Position
-      ) {
-        // 1️⃣ everything up to the cursor
+      async provideCompletionItems(doc, pos) {
         const before = doc.getText(
           new vscode.Range(new vscode.Position(0, 0), pos)
         );
 
-        // 2️⃣ only if we’re just inside an opening quote…
+        // only in a `'where' => [`
         const quoteMatch = /['"]([\w]*)$/.exec(before);
         if (!quoteMatch) {
           return;
         }
         const alreadyTyped = quoteMatch[1];
-        const quoteStart = quoteMatch.index!;
-
-        // ─ bail if this quote is actually starting a value, not a key ─
-        //   (the same trick your create provider uses)
-        const lookBack = before.slice(Math.max(0, quoteStart - 5), quoteStart);
+        const lookBack = before.slice(
+          Math.max(0, quoteMatch.index! - 5),
+          quoteMatch.index!
+        );
         if (/\=>\s*$/.test(lookBack)) {
           return;
         }
 
-        // 3️⃣ confirm we’re inside a find*(… 'where' => [ …  …
-        const ctx =
-          /\$prisma->(\w+)->(findMany|findFirst|findUnique)\([^]*?'where'\s*=>\s*\[[^]*$/m.exec(
-            before
-          );
-        if (!ctx) {
+        // ① grab *all* find* calls, then the last one
+        const all = [
+          ...before.matchAll(
+            /\$prisma->([A-Za-z_]\w*)->(?:findMany|findFirst|findUnique)\([^]*?'where'\s*=>\s*\[/g
+          ),
+        ];
+        if (all.length === 0) {
           return;
         }
-        const modelName = ctx[1];
+        const modelName = all[all.length - 1][1];
 
-        // 4️⃣ grab model fields
         const fields = (await getModelMap()).get(modelName.toLowerCase());
         if (!fields) {
           return;
         }
 
-        // 5️⃣ figure out your quote style & if there’s already a closing-quote
         const quote = /["']$/.exec(before)?.[0] ?? "'";
         const nextChar = doc.getText(
           new vscode.Range(pos, pos.translate(0, 1))
         );
         const hasCloseQuote = nextChar === quote;
 
-        // 6️⃣ helper to format “: Type” detail
         const fmt = (f: FieldInfo) =>
           `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
 
-        // 7️⃣ build completion items
         return [...fields.entries()].map(([name, info]) => {
           const optional = !info.required;
           const label: vscode.CompletionItemLabel = {
             label: optional ? `${name}?` : name,
             detail: `: ${fmt(info)}`,
           };
-
           const item = new vscode.CompletionItem(
             label.label,
             vscode.CompletionItemKind.Field
@@ -893,16 +863,12 @@ export async function activate(context: vscode.ExtensionContext) {
               (optional ? "*optional filter*" : "*required filter*")
           );
 
-          // 8️⃣ replace just the key’s quotes (keep the closing-quote if present)
           const start = pos.translate(0, -alreadyTyped.length - 1);
           const end = hasCloseQuote ? pos.translate(0, 1) : pos;
           item.range = new vscode.Range(start, end);
 
-          // 9️⃣ VS Code filtering & sort
           item.filterText = `${quote}${name}`;
           item.sortText = `0_${name}`;
-
-          // 🔟 insertion snippet: `'key' => $0`
           item.insertText = new vscode.SnippetString(
             `${quote}${name}${quote} => $0`
           );
@@ -912,7 +878,7 @@ export async function activate(context: vscode.ExtensionContext) {
       },
     },
     `"`,
-    `'` // trigger on typing quote
+    `'`
   );
 
   // 2a) “data” side just like create:
@@ -929,30 +895,30 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
           }
           const alreadyTyped = quoteMatch[1];
-          const quoteStart = quoteMatch.index!;
-          // bail if we’re on the *value* side
-          if (
-            /\=>\s*$/.test(
-              before.slice(Math.max(0, quoteStart - 5), quoteStart)
-            )
-          ) {
+          const lookBack = before.slice(
+            Math.max(0, quoteMatch.index! - 5),
+            quoteMatch.index!
+          );
+          if (/\=>\s*$/.test(lookBack)) {
             return;
           }
 
-          // only inside update(... 'data' => [ …
-          const ctx =
-            /\$prisma->(\w+)->update\([^]*?'data'\s*=>\s*\[[^]*$/m.exec(before);
-          if (!ctx) {
+          // ① grab *all* update(... 'data' calls, then the last one
+          const all = [
+            ...before.matchAll(
+              /\$prisma->([A-Za-z_]\w*)->update\([^]*?'data'\s*=>\s*\[/g
+            ),
+          ];
+          if (all.length === 0) {
             return;
           }
-          const modelName = ctx[1];
+          const modelName = all[all.length - 1][1];
 
           const fields = (await getModelMap()).get(modelName.toLowerCase());
           if (!fields) {
             return;
           }
 
-          // same snippet logic as your create‐provider…
           const quote = /["']$/.exec(before)?.[0] ?? "'";
           const nextChar = doc.getText(
             new vscode.Range(pos, pos.translate(0, 1))
@@ -1000,7 +966,10 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.languages.registerCompletionItemProvider(
       "php",
       {
-        async provideCompletionItems(doc, pos) {
+        async provideCompletionItems(
+          doc: vscode.TextDocument,
+          pos: vscode.Position
+        ) {
           const before = doc.getText(
             new vscode.Range(new vscode.Position(0, 0), pos)
           );
@@ -1009,32 +978,30 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
           }
           const alreadyTyped = quoteMatch[1];
-          const quoteStart = quoteMatch.index!;
-          // bail if we're on the value side
-          if (
-            /\=>\s*$/.test(
-              before.slice(Math.max(0, quoteStart - 5), quoteStart)
-            )
-          ) {
+          const lookBack = before.slice(
+            Math.max(0, quoteMatch.index! - 5),
+            quoteMatch.index!
+          );
+          if (/\=>\s*$/.test(lookBack)) {
             return;
           }
 
-          // only inside update(... 'where' => [ …
-          const ctx =
-            /\$prisma->(\w+)->update\([^]*?'where'\s*=>\s*\[[^]*$/m.exec(
-              before
-            );
-          if (!ctx) {
+          // pick *all* update(... 'where' calls, then the last one
+          const all = [
+            ...before.matchAll(
+              /\$prisma->([A-Za-z_]\w*)->update\([^]*?'where'\s*=>\s*\[/g
+            ),
+          ];
+          if (!all.length) {
             return;
           }
-          const modelName = ctx[1];
+          const modelName = all[all.length - 1][1];
 
           const fields = (await getModelMap()).get(modelName.toLowerCase());
           if (!fields) {
             return;
           }
 
-          // same snippet logic as your read‐provider…
           const quote = /["']$/.exec(before)?.[0] ?? "'";
           const nextChar = doc.getText(
             new vscode.Range(pos, pos.translate(0, 1))
@@ -1081,10 +1048,7 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.languages.registerCompletionItemProvider(
       "php",
       {
-        async provideCompletionItems(
-          doc: vscode.TextDocument,
-          pos: vscode.Position
-        ) {
+        async provideCompletionItems(doc, pos) {
           const before = doc.getText(
             new vscode.Range(new vscode.Position(0, 0), pos)
           );
@@ -1094,22 +1058,24 @@ export async function activate(context: vscode.ExtensionContext) {
           }
           const alreadyTyped = quoteMatch[1];
           const lookBack = before.slice(
-            quoteMatch.index! - 5,
-            quoteMatch.index
+            Math.max(0, quoteMatch.index! - 5),
+            quoteMatch.index!
           );
           if (/\=>\s*$/.test(lookBack)) {
             return;
           }
 
-          // only inside delete(... 'where' => [ …
-          const ctx =
-            /\$prisma->(\w+)->delete\([^]*?'where'\s*=>\s*\[[^]*$/m.exec(
-              before
-            );
-          if (!ctx) {
+          // ① grab *all* delete(... 'where' calls, then the last one
+          const all = [
+            ...before.matchAll(
+              /\$prisma->([A-Za-z_]\w*)->delete\([^]*?'where'\s*=>\s*\[/g
+            ),
+          ];
+          if (all.length === 0) {
             return;
           }
-          const modelName = ctx[1];
+          const modelName = all[all.length - 1][1];
+
           const fields = (await getModelMap()).get(modelName.toLowerCase());
           if (!fields) {
             return;
@@ -1230,24 +1196,6 @@ export async function activate(context: vscode.ExtensionContext) {
 /* ────────────────────────────────────────────────────────────── *
  *                 Native‑JS hover & signature‑help               *
  * ────────────────────────────────────────────────────────────── */
-
-function inCreateDataKey(
-  doc: vscode.TextDocument,
-  pos: vscode.Position
-): boolean {
-  /* texto desde el inicio del archivo hasta el cursor */
-  const before = doc.getText(new vscode.Range(new vscode.Position(0, 0), pos));
-
-  /* ① hay un $prisma->Modelo->create( … 'data' => [   y NO se ha cerrado ] ) */
-  const open = before.lastIndexOf("'data' => [");
-  if (open === -1) {
-    return false;
-  }
-
-  const afterOpen = before.slice(open + "'data' => [".length);
-  /* ② estamos dentro de una comilla que aún no se ha cerrado */
-  return /["']\w*$/.test(afterOpen);
-}
 
 export interface FieldInfo {
   type: string; // "String" | "Int" | ...
@@ -2226,15 +2174,21 @@ const registerPhpCompletionProvider = () => {
         document: vscode.TextDocument,
         position: vscode.Position
       ): Promise<vscode.CompletionItem[] | undefined> {
-        if (inCreateDataKey(document, position)) {
-          return;
+        const line = document.lineAt(position.line).text;
+        const uptoCursor = line.slice(0, position.character);
+        // grab *all* the text up to the cursor
+        const fullBefore = document.getText(
+          new vscode.Range(new vscode.Position(0, 0), position)
+        );
+
+        // ─── EARLY EXIT if *anywhere* above you did a `->prisma->…` chain
+        if (/\$prisma->/.test(fullBefore)) {
+          return [];
         }
 
-        const line = document.lineAt(position.line).text;
         /* ⬅️  EARLY EXIT while user is still typing "<?php" or "<?="  */
-        const uptoCursor = line.slice(0, position.character);
         if (/^\s*<\?(?:php|=)?$/i.test(uptoCursor)) {
-          return []; // nothing offered – bail out
+          return [];
         }
 
         // 0️⃣ Top-level variable suggestions ("pphp", "store", "searchParams")
