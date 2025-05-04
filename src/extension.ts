@@ -616,44 +616,43 @@ export async function activate(context: vscode.ExtensionContext) {
       selector,
       {
         provideCompletionItems(doc, pos) {
-          if (!insideMustache(doc, pos)) {
-            return;
-          }
-
-          /* 1️⃣  The text from the last “{{” to the cursor                         */
+          /* ① grab `root` + current `partial` --------------------------- */
           const line = doc.lineAt(pos.line).text;
           const uptoCursor = line.slice(0, pos.character);
           const lastOpen = uptoCursor.lastIndexOf("{{");
           const exprPrefix = uptoCursor.slice(lastOpen + 2); // «user.na»
 
-          /* 2️⃣  Grab “root.partial” just before the cursor                        */
-          const m = /([A-Za-z_$][\w$]*)\.(\w*)$/.exec(exprPrefix);
+          const m = /([A-Za-z_$][\w$]*)\.\s*(\w*)$/.exec(exprPrefix);
           if (!m) {
             return;
           }
-          const [, root, partial] = m; // root = "user"
 
-          /* 3️⃣  Look up stubbed props for that root                               */
+          const [, root, partial] = m; // root = "user"
           const stubProps = globalStubs[root] ?? [];
 
-          /* 4️⃣  Build completions — props first, then natives                     */
+          /* ② build the list – project props first ---------------------- */
           const out: vscode.CompletionItem[] = [];
+          const seen = new Set<string>();
 
-          // a) project‑specific properties
           for (const p of stubProps.filter((p) => p.startsWith(partial))) {
             const it = new vscode.CompletionItem(
               p,
               vscode.CompletionItemKind.Property
             );
-            it.sortText = "0_" + p; // ensure they appear *before* natives
+            it.sortText = "0_" + p; // before natives
             out.push(it);
+            seen.add(p);
           }
 
-          // b) native JS members – *only* if we had nothing project‑specific
-          if (out.length === 0) {
-            for (const k of JS_NATIVE_MEMBERS.filter((k) =>
-              k.startsWith(partial)
-            )) {
+          /* ③ add JS native members *only* for “scalar” stubs ----------- */
+          const treatAsScalar = stubProps.length <= 1; // length │ 0 props
+
+          if (treatAsScalar) {
+            for (const k of JS_NATIVE_MEMBERS) {
+              if (!k.startsWith(partial) || seen.has(k)) {
+                continue;
+              }
+
               const kind =
                 typeof ("" as any)[k] === "function"
                   ? vscode.CompletionItemKind.Method
@@ -663,7 +662,7 @@ export async function activate(context: vscode.ExtensionContext) {
               if (kind === vscode.CompletionItemKind.Method) {
                 it.insertText = new vscode.SnippetString(`${k}()$0`);
               }
-              it.sortText = "1_" + k; // after props
+              it.sortText = "1_" + k; // after project members
               out.push(it);
             }
           }
@@ -671,61 +670,45 @@ export async function activate(context: vscode.ExtensionContext) {
           return out;
         },
       },
-      ".", // trigger on dot
-      ...Array.from("abcdefghijklmnopqrstuvwxyz_") // and as you type
+      "." // trigger character
     )
   );
 
   context.subscriptions.push(
-    vscode.languages.registerCompletionItemProvider(
-      { language: "php" }, // ← same files
-      {
-        provideCompletionItems(document, position) {
-          if (!insideMustache(document, position)) {
-            return;
-          }
+    vscode.languages.registerCompletionItemProvider(selector, {
+      provideCompletionItems(document, position) {
+        const line = document
+          .lineAt(position.line)
+          .text.slice(0, position.character);
 
-          const line = document
-            .lineAt(position.line)
-            .text.slice(0, position.character);
+        // 1️⃣ property‐level: foo.partial → props[foo]
+        const propMatch = /([A-Za-z_$]\w*)\.(\w*)$/.exec(line);
+        if (propMatch) {
+          const [, root, partial] = propMatch;
+          const props = globalStubs[root] || [];
+          return props
+            .filter((p) => p.startsWith(partial))
+            .map(
+              (p) =>
+                new vscode.CompletionItem(p, vscode.CompletionItemKind.Property)
+            );
+        }
 
-          // 1️⃣ property‐level: foo.partial → props[foo]
-          const propMatch = /([A-Za-z_$]\w*)\.(\w*)$/.exec(line);
-          if (propMatch) {
-            const [, root, partial] = propMatch;
-            const props = globalStubs[root] || [];
-            return props
-              .filter((p) => p.startsWith(partial))
-              .map(
-                (p) =>
-                  new vscode.CompletionItem(
-                    p,
-                    vscode.CompletionItemKind.Property
-                  )
-              );
-          }
+        // 2️⃣ root‐level: partial → variable names
+        const rootMatch = /([A-Za-z_$]\w*)$/.exec(line);
+        if (rootMatch) {
+          const prefix = rootMatch[1];
+          return Object.keys(globalStubs)
+            .filter((v) => v.startsWith(prefix))
+            .map(
+              (v) =>
+                new vscode.CompletionItem(v, vscode.CompletionItemKind.Variable)
+            );
+        }
 
-          // 2️⃣ root‐level: partial → variable names
-          const rootMatch = /([A-Za-z_$]\w*)$/.exec(line);
-          if (rootMatch) {
-            const prefix = rootMatch[1];
-            return Object.keys(globalStubs)
-              .filter((v) => v.startsWith(prefix))
-              .map(
-                (v) =>
-                  new vscode.CompletionItem(
-                    v,
-                    vscode.CompletionItemKind.Variable
-                  )
-              );
-          }
-
-          return undefined;
-        },
+        return undefined;
       },
-      // still trigger on dot… but you can remove these and let quick‐suggest run on every keystroke
-      "."
-    )
+    })
   );
 
   /* ---------------- live pphp.foo(...) validation ---------------- */
