@@ -843,8 +843,31 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // ── unified Prisma field‐completion ───────────────────────────
   function registerPrismaFieldProvider() {
-    const invocationRe =
-      /\$prisma->([A-Za-z_]\w*)->(create|findMany|findFirst|findUnique|update|delete)\(\s*\[\s*(?:(?:['"](?:data|where)['"])\s*=>\s*\[)\s*['"]([\w]*)$/;
+    // 1️⃣ list your Prisma ops in one place
+    const prismaOps = [
+      "create",
+      "findMany",
+      "findFirst",
+      "findUnique",
+      "update",
+      "delete",
+      // …you can add more here later
+    ];
+
+    // 2️⃣ build a `foo|bar|baz` alternation for your regex
+    const opsPattern = prismaOps.join("|");
+
+    // 3️⃣ construct the RegExp once, from the dynamic ops list
+    //    — note we double-escape backslashes in a string literal
+    const invocationRe = new RegExp(
+      "\\$prisma->([A-Za-z_]\\w*)" + // capture the model name
+        "->(" +
+        opsPattern +
+        ")\\(" + // capture the op (from your array)
+        "[\\s\\S]*?['\"]" + // anything up to a quoted data|where
+        "(data|where)['\"]\\s*=>\\s*\\[\\s*['\"]" + // capture which block
+        "([\\w]*)$" // capture what they’ve already typed
+    );
 
     return vscode.languages.registerCompletionItemProvider(
       "php",
@@ -853,15 +876,25 @@ export async function activate(context: vscode.ExtensionContext) {
           const before = doc.getText(
             new vscode.Range(0, 0, pos.line, pos.character)
           );
-          const m = invocationRe.exec(before);
-          if (!m) return;
 
-          const [, modelName, op, alreadyTyped] = m;
+          // only look at the very last "$prisma->…" so you don't accidentally match earlier calls
+          const tail = before.slice(before.lastIndexOf("$prisma->"));
+          const m = invocationRe.exec(tail);
+          if (!m) {
+            return;
+          }
+
+          // [ fullMatch, modelName, op, blockKey, alreadyTyped ]
+          const [, modelName, op, blockKey, alreadyTyped] = m;
+
+          // …the rest of your logic is unchanged
           const map = await getModelMap();
           const fields = map.get(modelName.toLowerCase());
-          if (!fields) return;
+          if (!fields) {
+            return;
+          }
 
-          const isWhere = /\['"]where['"]\s*=>\s*\[/.test(before);
+          const isWhere = blockKey === "where";
           const optionalLabel = isWhere
             ? "*optional filter*"
             : "*optional field*";
@@ -869,7 +902,7 @@ export async function activate(context: vscode.ExtensionContext) {
             ? "*required filter*"
             : "*required field*";
 
-          const quote = /["']$/.exec(before)?.[0] ?? "'";
+          const quote = /["']$/.exec(tail)?.[0] ?? "'";
           const nextChar = doc.getText(
             new vscode.Range(pos, pos.translate(0, 1))
           );
@@ -884,6 +917,7 @@ export async function activate(context: vscode.ExtensionContext) {
               label: optional ? `${name}?` : name,
               detail: `: ${fmt(info)}`,
             };
+
             const item = new vscode.CompletionItem(
               label,
               vscode.CompletionItemKind.Field
@@ -893,9 +927,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 (optional ? optionalLabel : requiredLabel)
             );
 
-            const start = pos.translate(0, -alreadyTyped.length - 1);
-            const end = hasClose ? pos.translate(0, 1) : pos;
-            item.range = new vscode.Range(start, end);
+            const replaceStart = pos.translate(0, -alreadyTyped.length - 1);
+            const replaceEnd = hasClose ? pos.translate(0, 1) : pos;
+            item.range = new vscode.Range(replaceStart, replaceEnd);
 
             item.insertText = new vscode.SnippetString(
               `${quote}${name}${quote} => $0`
@@ -908,7 +942,7 @@ export async function activate(context: vscode.ExtensionContext) {
         },
       },
       "'",
-      `"` // only fire on ' and "
+      `"` // trigger only inside quotes
     );
   }
 
