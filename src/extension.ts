@@ -1131,6 +1131,10 @@ function isValidPhpType(expr: string, info: FieldInfo): boolean {
   const isVar = /^\$[A-Za-z_]\w*/.test(expr);
   const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(expr);
 
+  if (isVar) {
+    return true;
+  }
+
   return allowed.some((t) => {
     switch (t) {
       case "string":
@@ -1896,21 +1900,30 @@ const registerPhpCompletionProvider = () => {
   return vscode.languages.registerCompletionItemProvider(
     PHP_LANGUAGE,
     {
-      async provideCompletionItems(
-        document: vscode.TextDocument,
-        position: vscode.Position
-      ): Promise<vscode.CompletionItem[] | undefined> {
-        const line = document.lineAt(position.line).text;
-        const uptoCursor = line.slice(0, position.character);
-        // grab *all* the text up to the cursor
+      async provideCompletionItems(document, position) {
         const fullBefore = document.getText(
           new vscode.Range(new vscode.Position(0, 0), position)
         );
 
-        // ─── EARLY EXIT if *anywhere* above you did a `->prisma->…` chain
-        if (/\$prisma->/.test(fullBefore)) {
-          return [];
+        // ── EARLY EXIT if cursor is inside a $prisma->…( … ) block ───────
+        const prismaIndex = fullBefore.lastIndexOf("$prisma->");
+        if (prismaIndex !== -1) {
+          // find the first "(" after that
+          const parenIndex = fullBefore.indexOf("(", prismaIndex);
+          if (parenIndex !== -1) {
+            // slice from that "(" to the cursor and count parens
+            const between = fullBefore.slice(parenIndex);
+            const opens = (between.match(/\(/g) || []).length;
+            const closes = (between.match(/\)/g) || []).length;
+            if (opens > closes) {
+              // still inside the call
+              return [];
+            }
+          }
         }
+
+        const line = document.lineAt(position.line).text;
+        const uptoCursor = line.slice(0, position.character);
 
         /* ⬅️  EARLY EXIT while user is still typing "<?php" or "<?="  */
         if (/^\s*<\?(?:php|=)?$/i.test(uptoCursor)) {
