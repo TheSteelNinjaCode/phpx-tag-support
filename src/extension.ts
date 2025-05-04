@@ -1119,6 +1119,15 @@ function validateFieldAssignments(
   }
 }
 
+const PRISMA_LOGICAL_OPS = new Set([
+  "AND",
+  "OR",
+  "NOT",
+  "A",
+  "B",
+  // …any other top‐level array operators you want
+]);
+
 /**
  * Encapsulate your big switch(...) in one place.
  */
@@ -1167,7 +1176,7 @@ export async function validateCreateCall(
   const text = doc.getText();
   const diags: vscode.Diagnostic[] = [];
 
-  // 1️⃣ Match every $prisma->Model->create([ … ])
+  // 1️⃣  Match every $prisma->Model->create([ … ])
   const callRe = /\$prisma->(\w+)->create\(\s*\[([\s\S]*?)\]\s*\)/g;
   let m: RegExpExecArray | null;
   const modelMap = await getModelMap();
@@ -1179,12 +1188,12 @@ export async function validateCreateCall(
       continue;
     }
 
-    // Range of the entire create(...) call
+    // range for the entire create() call
     const callStart = doc.positionAt(m.index);
     const callEnd = doc.positionAt(m.index + fullMatch.length);
     const callRange = new vscode.Range(callStart, callEnd);
 
-    // 2️⃣ If there's no 'data' => [...] at all, emit a single error
+    // 2️⃣  Require a 'data' block
     if (!/['"]data['"]\s*=>\s*\[/.test(argsLiteral)) {
       diags.push(
         new vscode.Diagnostic(
@@ -1193,10 +1202,10 @@ export async function validateCreateCall(
           vscode.DiagnosticSeverity.Error
         )
       );
-      continue; // skip the per-field pass
+      continue;
     }
 
-    // 3️⃣ Otherwise extract the data literal and run your existing checks
+    // 3️⃣  Extract the inside of data: [ … ]
     const dataMatch = /['"]data['"]\s*=>\s*\[([\s\S]*?)\]/m.exec(argsLiteral)!;
     const dataLiteral = dataMatch[1];
     const dataOffset =
@@ -1204,18 +1213,43 @@ export async function validateCreateCall(
       fullMatch.indexOf(dataMatch[0]) +
       dataMatch[0].indexOf(dataLiteral);
 
+    // 4️⃣  Walk each `'key' => rawValue`
     const fieldRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
     let f: RegExpExecArray | null;
 
     while ((f = fieldRe.exec(dataLiteral))) {
       const [, key, rawValue] = f;
-      const info = fields.get(key);
+      const expr = rawValue.trim();
 
+      // ── a) skip any top-level logical operators
+      if (PRISMA_LOGICAL_OPS.has(key)) {
+        continue;
+      }
+
+      // ── b) if this is a nested filter-array, run your existing validator on its contents
+      if (expr.startsWith("[")) {
+        // strip the surrounding [ ]
+        const inner = expr.replace(/^\[\s*|\s*\]$/g, "");
+        // calculate the offset of `inner` in the document
+        const innerOffset = dataOffset + f.index + rawValue.indexOf(inner);
+        validateFieldAssignments(
+          doc,
+          inner,
+          innerOffset,
+          fields,
+          modelName,
+          diags
+        );
+        continue;
+      }
+
+      // ── c) it must be a real column name
       const start = doc.positionAt(dataOffset + f.index);
       const range = new vscode.Range(start, start.translate(0, key.length));
 
-      // a) unknown column
+      const info = fields.get(key);
       if (!info) {
+        // unknown column
         diags.push(
           new vscode.Diagnostic(
             range,
@@ -1226,15 +1260,17 @@ export async function validateCreateCall(
         continue;
       }
 
-      // b) type‐check against phpDataTypes
-      validateFieldAssignments(
-        doc,
-        dataLiteral,
-        dataOffset,
-        fields,
-        modelName,
-        diags
-      );
+      // ── d) scalar type-check (literals or vars)
+      if (!isValidPhpType(expr, info)) {
+        const expected = info.isList ? `${info.type}[]` : info.type;
+        diags.push(
+          new vscode.Diagnostic(
+            range,
+            `"${key}" expects ${expected}, but received "${expr}".`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      }
     }
   }
 
@@ -1270,12 +1306,8 @@ export async function validateReadCall(
     const callEnd = doc.positionAt(m.index + fullMatch.length);
     const callRange = new vscode.Range(callStart, callEnd);
 
-    // look for a 'where' => [ … ] block
-    const whereMatch = /['"]where['"]\s*=>\s*\[([\s\S]*?)\](?=,|\s*$)/m.exec(
-      argsLiteral
-    );
-
-    // ◼︎ if it's a findUnique and there's no where => […], that's an error
+    // require a 'where' block for findUnique
+    const whereMatch = /['"]where['"]\s*=>\s*\[([\s\S]*?)\]/m.exec(argsLiteral);
     if (op === "findUnique" && !whereMatch) {
       diags.push(
         new vscode.Diagnostic(
@@ -1286,43 +1318,49 @@ export async function validateReadCall(
       );
       continue;
     }
-
-    // otherwise, if there's no where at all (for findMany/findFirst), skip checks
+    // no where at all → skip the rest
     if (!whereMatch) {
       continue;
     }
 
-    // pull out the actual contents of the where array
+    // pull out the literal inside where: [ … ]
     const dataLiteral = whereMatch[1];
-    // compute its offset in the full document
     const dataOffset =
       m.index +
       fullMatch.indexOf(whereMatch[0]) +
       whereMatch[0].indexOf(dataLiteral);
 
-    if (whereMatch) {
-      validateFieldAssignments(
-        doc,
-        dataLiteral,
-        dataOffset,
-        fields,
-        modelName,
-        diags
-      );
-    }
-
-    // iterate each `'key' => value` inside that block
+    // walk each 'key' => rawValue
     const fieldRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
     let f: RegExpExecArray | null;
     while ((f = fieldRe.exec(dataLiteral))) {
       const [, key, rawValue] = f;
-      const info = fields.get(key);
+      const expr = rawValue.trim();
 
-      // build a diagnostic range pointing at the key
+      // a) skip Prisma logical operators
+      if (PRISMA_LOGICAL_OPS.has(key)) {
+        continue;
+      }
+
+      // b) nested filter-array?  e.g. ['contains' => $search]
+      if (expr.startsWith("[")) {
+        const inner = expr.replace(/^\[\s*|\s*\]$/g, "");
+        const innerOffset = dataOffset + f.index + rawValue.indexOf(inner);
+        validateFieldAssignments(
+          doc,
+          inner,
+          innerOffset,
+          fields,
+          modelName,
+          diags
+        );
+        continue;
+      }
+
+      // c) it must be a real column
       const start = doc.positionAt(dataOffset + f.index);
       const range = new vscode.Range(start, start.translate(0, key.length));
-
-      // 1) unknown field?
+      const info = fields.get(key);
       if (!info) {
         diags.push(
           new vscode.Diagnostic(
@@ -1334,15 +1372,17 @@ export async function validateReadCall(
         continue;
       }
 
-      // 2) type‐check against your phpDataTypes map
-      validateFieldAssignments(
-        doc,
-        dataLiteral,
-        dataOffset,
-        fields,
-        modelName,
-        diags
-      );
+      // d) scalar type-check (literal or var)
+      if (!isValidPhpType(expr, info)) {
+        const expected = info.isList ? `${info.type}[]` : info.type;
+        diags.push(
+          new vscode.Diagnostic(
+            range,
+            `"${key}" expects ${expected}, but received "${expr}".`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      }
     }
   }
 
