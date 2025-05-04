@@ -733,52 +733,98 @@ export async function activate(context: vscode.ExtensionContext) {
     );
   }
 
-  vscode.languages.registerCompletionItemProvider(
+  const prismaCreateProvider = vscode.languages.registerCompletionItemProvider(
     "php",
     {
       async provideCompletionItems(doc, pos) {
-        const line = doc.lineAt(pos).text.slice(0, pos.character);
+        /* 1️⃣ text before the cursor ------------------------------------ */
+        const before = doc.getText(
+          new vscode.Range(new vscode.Position(0, 0), pos)
+        );
 
-        /* ① mismo regexp pero acepta comillas simples o dobles
-              y permite que la parte ya‑tecleada sea vacía        */
-        const m =
-          /\$prisma->(\w+)->create\([^]*?'data'\s*=>\s*\[\s*["']?([\w]*)$/m.exec(
-            line
-          );
-        if (!m) {
+        /* 2️⃣ are we inside an opening quote? --------------------------- */
+        const quoteMatch = /['"]([\w]*)$/.exec(before);
+        if (!quoteMatch) {
+          return;
+        }
+        const alreadyTyped = quoteMatch[1];
+
+        /* bail out if we’re on the *value* side ------------------------- */
+        const quoteStart = quoteMatch.index!;
+        const lookBack = before.slice(Math.max(0, quoteStart - 5), quoteStart);
+        if (/\=>\s*$/.test(lookBack)) {
           return;
         }
 
-        const [, modelName, alreadyTyped] = m;
+        /* 3️⃣ confirm we’re in  …->create([ 'data' => [ …  -------------- */
+        const ctx = /\$prisma->(\w+)->create\([^]*?'data'\s*=>\s*\[[^]*$/m.exec(
+          before
+        );
+        if (!ctx) {
+          return;
+        }
+        const [, modelName] = ctx;
+
         const fields = (await getModelMap()).get(modelName.toLowerCase());
         if (!fields) {
           return;
         }
 
-        return [...fields.keys()].map((k) => {
-          const it = new vscode.CompletionItem(
-            k,
+        /* 4️⃣ quote info & closing‑quote check -------------------------- */
+        const quote = /["']$/.exec(before)?.[0] ?? "'";
+        const nextChar = doc.getText(
+          new vscode.Range(pos, pos.translate(0, 1))
+        );
+        const hasClosingQuote = nextChar === quote;
+
+        /* — helper to format the nice type string — */
+        const fmt = (f: FieldInfo) =>
+          `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
+
+        /* 5️⃣ build completion items ------------------------------------ */
+        return [...fields.entries()].map(([name, info]) => {
+          const optional = !info.required;
+          const label: vscode.CompletionItemLabel = {
+            label: optional ? `${name}?` : name,
+            detail: `: ${fmt(info)}`,
+          };
+
+          const item = new vscode.CompletionItem(
+            label.label,
             vscode.CompletionItemKind.Field
           );
+          item.label = label;
+          item.documentation = new vscode.MarkdownString(
+            `\`${label.label}${label.detail}\`\n\n` +
+              (optional ? "*optional field*" : "*required field*")
+          );
 
-          /* ② Si el usuario acaba de abrir la comilla (alreadyTyped === "")
-                queremos reemplazar **cero** caracteres.                   */
-          const replaceFrom = pos.translate(0, -alreadyTyped.length);
-          it.range = new vscode.Range(replaceFrom, pos);
+          /* replacement range – include the closing quote iff it exists */
+          const start = pos.translate(0, -(alreadyTyped.length || 0) - 1);
+          const end = hasClosingQuote ? pos.translate(0, 1) : pos;
+          item.range = new vscode.Range(start, end);
 
-          /* ③ snippet con =>  y un espacio después */
-          it.insertText = new vscode.SnippetString(`${k}' => $0`);
-          return it;
+          /* VS Code filtering */
+          item.filterText = `${quote}${name}`;
+          item.sortText = `0_${name}`;
+
+          /* insertion snippet: always ‹quote›name‹quote› */
+          item.insertText = new vscode.SnippetString(
+            `${quote}${name}${quote} => $0`
+          );
+
+          return item;
         });
       },
     },
-    "'", // ← triggers
-    '"' // ← NUEVO trigger
+    "'", // triggers
+    '"' // "
   );
 
   context.subscriptions.push(stringDecorationType);
   context.subscriptions.push(numberDecorationType);
   context.subscriptions.push(templateLiteralDecorationType);
+  context.subscriptions.push(prismaCreateProvider);
 
   const prismaDiags =
     vscode.languages.createDiagnosticCollection("prisma-create");
@@ -833,6 +879,24 @@ export async function activate(context: vscode.ExtensionContext) {
 /* ────────────────────────────────────────────────────────────── *
  *                 Native‑JS hover & signature‑help               *
  * ────────────────────────────────────────────────────────────── */
+
+function inCreateDataKey(
+  doc: vscode.TextDocument,
+  pos: vscode.Position
+): boolean {
+  /* texto desde el inicio del archivo hasta el cursor */
+  const before = doc.getText(new vscode.Range(new vscode.Position(0, 0), pos));
+
+  /* ① hay un $prisma->Modelo->create( … 'data' => [   y NO se ha cerrado ] ) */
+  const open = before.lastIndexOf("'data' => [");
+  if (open === -1) {
+    return false;
+  }
+
+  const afterOpen = before.slice(open + "'data' => [".length);
+  /* ② estamos dentro de una comilla que aún no se ha cerrado */
+  return /["']\w*$/.test(afterOpen);
+}
 
 export interface FieldInfo {
   type: string; // "String" | "Int" | ...
@@ -1288,6 +1352,10 @@ const registerPhpCompletionProvider = () => {
         document: vscode.TextDocument,
         position: vscode.Position
       ): Promise<vscode.CompletionItem[] | undefined> {
+        if (inCreateDataKey(document, position)) {
+          return;
+        }
+
         const line = document.lineAt(position.line).text;
         /* ⬅️  EARLY EXIT while user is still typing "<?php" or "<?="  */
         const uptoCursor = line.slice(0, position.character);
