@@ -25,8 +25,27 @@ interface HeredocBlock {
   content: string;
   startIndex: number;
 }
+interface PrismaFieldProviderConfig {
+  /**
+   * A regex to pick up all calls of this op and capture the model name in group 1.
+   * Should match up to ( but not include the final quote/[… trigger.
+   */
+  callRegex: RegExp;
+  /**
+   * The human-friendly label used in the Markdown docs:
+   * e.g. "*optional field*" vs "*required filter*"
+   */
+  optionalLabel: string;
+  requiredLabel: string;
+  /**
+   * Characters that should trigger this provider (e.g. "'" and '"')
+   */
+  triggerChars: string[];
+}
 
 type VarName = "pphp" | "store" | "searchParams";
+type PrismaOp = "create" | "find" | "updateData" | "updateWhere" | "delete";
+
 const classNameMap: Record<
   VarName,
   "PPHP" | "PPHPLocalStore" | "SearchParamsManager"
@@ -423,6 +442,95 @@ function validatePphpCalls(
   diagCollection.set(document.uri, diags);
 }
 
+function createPrismaFieldProvider({
+  callRegex,
+  optionalLabel,
+  requiredLabel,
+  triggerChars,
+}: PrismaFieldProviderConfig) {
+  return vscode.languages.registerCompletionItemProvider(
+    "php",
+    {
+      async provideCompletionItems(doc, pos) {
+        const before = doc.getText(
+          new vscode.Range(new vscode.Position(0, 0), pos)
+        );
+
+        // 1️⃣ grab what they’ve already typed in the quoted key
+        const quoteMatch = /['"]([\w]*)$/.exec(before);
+        if (!quoteMatch) {
+          return;
+        }
+        const alreadyTyped = quoteMatch[1];
+
+        // bail if they just typed the => already
+        if (
+          /\=>\s*$/.test(
+            before.slice(Math.max(0, quoteMatch.index - 5), quoteMatch.index)
+          )
+        ) {
+          return;
+        }
+
+        // 2️⃣ only look *before* that key for your callRegex
+        const sliceUpToKeyStart = before.slice(0, quoteMatch.index);
+        const all = [...sliceUpToKeyStart.matchAll(callRegex)];
+        if (!all.length) {
+          return;
+        }
+        const modelName = all[all.length - 1][1];
+        const fields = (await getModelMap()).get(modelName.toLowerCase());
+        if (!fields) {
+          return;
+        }
+
+        // 3️⃣ detect quote style & whether there's already a closing quote
+        const quote = /["']$/.exec(before)?.[0] ?? "'";
+        const nextChar = doc.getText(
+          new vscode.Range(pos, pos.translate(0, 1))
+        );
+        const hasClose = nextChar === quote;
+
+        // helper to format the type
+        const fmt = (f: FieldInfo) =>
+          `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
+
+        // 4️⃣ finally build your CompletionItems
+        return [...fields.entries()].map(([name, info]) => {
+          const isOptional = !info.required;
+          const label: vscode.CompletionItemLabel = {
+            label: isOptional ? `${name}?` : name,
+            detail: `: ${fmt(info)}`,
+          };
+
+          const item = new vscode.CompletionItem(
+            label,
+            vscode.CompletionItemKind.Field
+          );
+          item.documentation = new vscode.MarkdownString(
+            `\`${label.label}${label.detail}\`\n\n` +
+              (isOptional ? optionalLabel : requiredLabel)
+          );
+
+          // use what they’d already typed to compute the replace range
+          const start = pos.translate(0, -alreadyTyped.length - 1);
+          const end = hasClose ? pos.translate(0, 1) : pos;
+          item.range = new vscode.Range(start, end);
+
+          item.insertText = new vscode.SnippetString(
+            `${quote}${name}${quote} => $0`
+          );
+          item.sortText = `0_${name}`;
+          item.filterText = `${quote}${name}`;
+
+          return item;
+        });
+      },
+    },
+    ...triggerChars
+  );
+}
+
 /* ────────────────────────────────────────────────────────────── *
  *                       EXTENSION ACTIVATION                       *
  * ────────────────────────────────────────────────────────────── */
@@ -733,197 +841,40 @@ export async function activate(context: vscode.ExtensionContext) {
     );
   }
 
-  // Register a completion provider for `$prisma->Model->create([ 'data' => [ …`
-  const prismaCreateProvider = vscode.languages.registerCompletionItemProvider(
-    "php",
-    {
-      async provideCompletionItems(document, position) {
-        const before = document.getText(
-          new vscode.Range(new vscode.Position(0, 0), position)
-        );
+  // ── unified Prisma field‐completion ───────────────────────────
+  function registerPrismaFieldProvider() {
+    const invocationRe =
+      /\$prisma->([A-Za-z_]\w*)->(create|findMany|findFirst|findUnique|update|delete)\(\s*\[\s*(?:(?:['"](?:data|where)['"])\s*=>\s*\[)\s*['"]([\w]*)$/;
 
-        // ① grab *all* create calls, then the last one
-        const all = [...before.matchAll(/\$prisma->([A-Za-z_]\w*)->create\(/g)];
-        if (all.length === 0) {
-          return;
-        }
-        const modelName = all[all.length - 1][1];
-
-        const fields = (await getModelMap()).get(modelName.toLowerCase());
-        if (!fields) {
-          return;
-        }
-
-        // detect quote style…
-        const quote = /["']$/.exec(before)?.[0] ?? "'";
-        const nextChar = document.getText(
-          new vscode.Range(position, position.translate(0, 1))
-        );
-        const hasClosingQuote = nextChar === quote;
-
-        const fmt = (f: FieldInfo) =>
-          `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
-
-        return [...fields.entries()].map(([name, info]) => {
-          const optional = !info.required;
-          const label: vscode.CompletionItemLabel = {
-            label: optional ? `${name}?` : name,
-            detail: `: ${fmt(info)}`,
-          };
-
-          const item = new vscode.CompletionItem(
-            label.label,
-            vscode.CompletionItemKind.Field
-          );
-          item.label = label;
-          item.documentation = new vscode.MarkdownString(
-            `\`${label.label}${label.detail}\`\n\n` +
-              (optional ? "*optional field*" : "*required field*")
-          );
-
-          const alreadyTyped = before.match(/['"]([\w]*)$/)![1] || "";
-          const start = position.translate(0, -alreadyTyped.length - 1);
-          const end = hasClosingQuote ? position.translate(0, 1) : position;
-          item.range = new vscode.Range(start, end);
-
-          item.filterText = `${quote}${name}`;
-          item.sortText = `0_${name}`;
-          item.insertText = new vscode.SnippetString(
-            `${quote}${name}${quote} => $0`
-          );
-
-          return item;
-        });
-      },
-    },
-    "'", // trigger on either quote
-    `"`
-  );
-
-  const prismaReadProvider = vscode.languages.registerCompletionItemProvider(
-    "php",
-    {
-      async provideCompletionItems(doc, pos) {
-        const before = doc.getText(
-          new vscode.Range(new vscode.Position(0, 0), pos)
-        );
-
-        // only in a `'where' => [`
-        const quoteMatch = /['"]([\w]*)$/.exec(before);
-        if (!quoteMatch) {
-          return;
-        }
-        const alreadyTyped = quoteMatch[1];
-        const lookBack = before.slice(
-          Math.max(0, quoteMatch.index! - 5),
-          quoteMatch.index!
-        );
-        if (/\=>\s*$/.test(lookBack)) {
-          return;
-        }
-
-        // ① grab *all* find* calls, then the last one
-        const all = [
-          ...before.matchAll(
-            /\$prisma->([A-Za-z_]\w*)->(?:findMany|findFirst|findUnique)\([^]*?'where'\s*=>\s*\[/g
-          ),
-        ];
-        if (all.length === 0) {
-          return;
-        }
-        const modelName = all[all.length - 1][1];
-
-        const fields = (await getModelMap()).get(modelName.toLowerCase());
-        if (!fields) {
-          return;
-        }
-
-        const quote = /["']$/.exec(before)?.[0] ?? "'";
-        const nextChar = doc.getText(
-          new vscode.Range(pos, pos.translate(0, 1))
-        );
-        const hasCloseQuote = nextChar === quote;
-
-        const fmt = (f: FieldInfo) =>
-          `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
-
-        return [...fields.entries()].map(([name, info]) => {
-          const optional = !info.required;
-          const label: vscode.CompletionItemLabel = {
-            label: optional ? `${name}?` : name,
-            detail: `: ${fmt(info)}`,
-          };
-          const item = new vscode.CompletionItem(
-            label.label,
-            vscode.CompletionItemKind.Field
-          );
-          item.label = label;
-          item.documentation = new vscode.MarkdownString(
-            `\`${label.label}${label.detail}\`\n\n` +
-              (optional ? "*optional filter*" : "*required filter*")
-          );
-
-          const start = pos.translate(0, -alreadyTyped.length - 1);
-          const end = hasCloseQuote ? pos.translate(0, 1) : pos;
-          item.range = new vscode.Range(start, end);
-
-          item.filterText = `${quote}${name}`;
-          item.sortText = `0_${name}`;
-          item.insertText = new vscode.SnippetString(
-            `${quote}${name}${quote} => $0`
-          );
-
-          return item;
-        });
-      },
-    },
-    `"`,
-    `'`
-  );
-
-  // 2a) “data” side just like create:
-  const prismaUpdateDataProvider =
-    vscode.languages.registerCompletionItemProvider(
+    return vscode.languages.registerCompletionItemProvider(
       "php",
       {
         async provideCompletionItems(doc, pos) {
           const before = doc.getText(
-            new vscode.Range(new vscode.Position(0, 0), pos)
+            new vscode.Range(0, 0, pos.line, pos.character)
           );
-          const quoteMatch = /['"]([\w]*)$/.exec(before);
-          if (!quoteMatch) {
-            return;
-          }
-          const alreadyTyped = quoteMatch[1];
-          const lookBack = before.slice(
-            Math.max(0, quoteMatch.index! - 5),
-            quoteMatch.index!
-          );
-          if (/\=>\s*$/.test(lookBack)) {
-            return;
-          }
+          const m = invocationRe.exec(before);
+          if (!m) return;
 
-          // ① grab *all* update(... 'data' calls, then the last one
-          const all = [
-            ...before.matchAll(
-              /\$prisma->([A-Za-z_]\w*)->update\([^]*?'data'\s*=>\s*\[/g
-            ),
-          ];
-          if (all.length === 0) {
-            return;
-          }
-          const modelName = all[all.length - 1][1];
+          const [, modelName, op, alreadyTyped] = m;
+          const map = await getModelMap();
+          const fields = map.get(modelName.toLowerCase());
+          if (!fields) return;
 
-          const fields = (await getModelMap()).get(modelName.toLowerCase());
-          if (!fields) {
-            return;
-          }
+          const isWhere = /\['"]where['"]\s*=>\s*\[/.test(before);
+          const optionalLabel = isWhere
+            ? "*optional filter*"
+            : "*optional field*";
+          const requiredLabel = isWhere
+            ? "*required filter*"
+            : "*required field*";
 
           const quote = /["']$/.exec(before)?.[0] ?? "'";
           const nextChar = doc.getText(
             new vscode.Range(pos, pos.translate(0, 1))
           );
           const hasClose = nextChar === quote;
+
           const fmt = (f: FieldInfo) =>
             `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
 
@@ -934,205 +885,38 @@ export async function activate(context: vscode.ExtensionContext) {
               detail: `: ${fmt(info)}`,
             };
             const item = new vscode.CompletionItem(
-              label.label,
+              label,
               vscode.CompletionItemKind.Field
             );
-            item.label = label;
             item.documentation = new vscode.MarkdownString(
               `\`${label.label}${label.detail}\`\n\n` +
-                (optional ? "*optional field*" : "*required field*")
+                (optional ? optionalLabel : requiredLabel)
             );
 
             const start = pos.translate(0, -alreadyTyped.length - 1);
             const end = hasClose ? pos.translate(0, 1) : pos;
             item.range = new vscode.Range(start, end);
 
-            item.filterText = `${quote}${name}`;
-            item.sortText = `0_${name}`;
             item.insertText = new vscode.SnippetString(
               `${quote}${name}${quote} => $0`
             );
+            item.sortText = `0_${name}`;
+            item.filterText = `${quote}${name}`;
 
             return item;
           });
         },
       },
-      `"`,
-      `'`
+      "'",
+      `"` // only fire on ' and "
     );
-
-  // 2b) “where” side just like read:
-  const prismaUpdateWhereProvider =
-    vscode.languages.registerCompletionItemProvider(
-      "php",
-      {
-        async provideCompletionItems(
-          doc: vscode.TextDocument,
-          pos: vscode.Position
-        ) {
-          const before = doc.getText(
-            new vscode.Range(new vscode.Position(0, 0), pos)
-          );
-          const quoteMatch = /['"]([\w]*)$/.exec(before);
-          if (!quoteMatch) {
-            return;
-          }
-          const alreadyTyped = quoteMatch[1];
-          const lookBack = before.slice(
-            Math.max(0, quoteMatch.index! - 5),
-            quoteMatch.index!
-          );
-          if (/\=>\s*$/.test(lookBack)) {
-            return;
-          }
-
-          // pick *all* update(... 'where' calls, then the last one
-          const all = [
-            ...before.matchAll(
-              /\$prisma->([A-Za-z_]\w*)->update\([^]*?'where'\s*=>\s*\[/g
-            ),
-          ];
-          if (!all.length) {
-            return;
-          }
-          const modelName = all[all.length - 1][1];
-
-          const fields = (await getModelMap()).get(modelName.toLowerCase());
-          if (!fields) {
-            return;
-          }
-
-          const quote = /["']$/.exec(before)?.[0] ?? "'";
-          const nextChar = doc.getText(
-            new vscode.Range(pos, pos.translate(0, 1))
-          );
-          const hasClose = nextChar === quote;
-          const fmt = (f: FieldInfo) =>
-            `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
-
-          return [...fields.entries()].map(([name, info]) => {
-            const optional = !info.required;
-            const label: vscode.CompletionItemLabel = {
-              label: optional ? `${name}?` : name,
-              detail: `: ${fmt(info)}`,
-            };
-            const item = new vscode.CompletionItem(
-              label.label,
-              vscode.CompletionItemKind.Field
-            );
-            item.label = label;
-            item.documentation = new vscode.MarkdownString(
-              `\`${label.label}${label.detail}\`\n\n` +
-                (optional ? "*optional filter*" : "*required filter*")
-            );
-
-            const start = pos.translate(0, -alreadyTyped.length - 1);
-            const end = hasClose ? pos.translate(0, 1) : pos;
-            item.range = new vscode.Range(start, end);
-
-            item.filterText = `${quote}${name}`;
-            item.sortText = `0_${name}`;
-            item.insertText = new vscode.SnippetString(
-              `${quote}${name}${quote} => $0`
-            );
-
-            return item;
-          });
-        },
-      },
-      `"`,
-      `'`
-    );
-
-  const prismaDeleteWhereProvider =
-    vscode.languages.registerCompletionItemProvider(
-      "php",
-      {
-        async provideCompletionItems(doc, pos) {
-          const before = doc.getText(
-            new vscode.Range(new vscode.Position(0, 0), pos)
-          );
-          const quoteMatch = /['"]([\w]*)$/.exec(before);
-          if (!quoteMatch) {
-            return;
-          }
-          const alreadyTyped = quoteMatch[1];
-          const lookBack = before.slice(
-            Math.max(0, quoteMatch.index! - 5),
-            quoteMatch.index!
-          );
-          if (/\=>\s*$/.test(lookBack)) {
-            return;
-          }
-
-          // ① grab *all* delete(... 'where' calls, then the last one
-          const all = [
-            ...before.matchAll(
-              /\$prisma->([A-Za-z_]\w*)->delete\([^]*?'where'\s*=>\s*\[/g
-            ),
-          ];
-          if (all.length === 0) {
-            return;
-          }
-          const modelName = all[all.length - 1][1];
-
-          const fields = (await getModelMap()).get(modelName.toLowerCase());
-          if (!fields) {
-            return;
-          }
-
-          const quote = /["']$/.exec(before)?.[0] ?? "'";
-          const nextChar = doc.getText(
-            new vscode.Range(pos, pos.translate(0, 1))
-          );
-          const hasClose = nextChar === quote;
-          const fmt = (f: FieldInfo) =>
-            `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
-
-          return [...fields.entries()].map(([name, info]) => {
-            const optional = !info.required;
-            const label: vscode.CompletionItemLabel = {
-              label: optional ? `${name}?` : name,
-              detail: `: ${fmt(info)}`,
-            };
-            const item = new vscode.CompletionItem(
-              label.label,
-              vscode.CompletionItemKind.Field
-            );
-            item.label = label;
-            item.documentation = new vscode.MarkdownString(
-              `\`${label.label}${label.detail}\`\n\n` +
-                (optional ? "*optional filter*" : "*required filter*")
-            );
-
-            const start = pos.translate(0, -alreadyTyped.length - 1);
-            const end = hasClose ? pos.translate(0, 1) : pos;
-            item.range = new vscode.Range(start, end);
-
-            item.filterText = `${quote}${name}`;
-            item.sortText = `0_${name}`;
-            item.insertText = new vscode.SnippetString(
-              `${quote}${name}${quote} => $0`
-            );
-
-            return item;
-          });
-        },
-      },
-      `"`,
-      `'`
-    );
+  }
 
   context.subscriptions.push(
     stringDecorationType,
     numberDecorationType,
     templateLiteralDecorationType,
-    prismaCreateProvider,
-    prismaReadProvider,
-    prismaUpdateDataProvider,
-    prismaUpdateWhereProvider,
-    prismaDeleteWhereProvider,
-    prismaDeleteWhereProvider
+    registerPrismaFieldProvider()
   );
 
   const createDiags =
