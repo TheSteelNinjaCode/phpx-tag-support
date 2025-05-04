@@ -1070,6 +1070,92 @@ const phpDataTypes: Record<string, string[]> = {
   Enum: ["enum", "string"],
 };
 
+/**
+ * Walk a “key => rawValue” block and push diagnostics for
+ *  • unknown columns
+ *  • type mismatches
+ */
+function validateFieldAssignments(
+  doc: vscode.TextDocument,
+  literal: string,
+  offset: number,
+  fields: Map<string, FieldInfo>,
+  modelName: string,
+  diags: vscode.Diagnostic[]
+) {
+  const fieldRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
+  let m: RegExpExecArray | null;
+
+  while ((m = fieldRe.exec(literal))) {
+    const [, key, rawValue] = m;
+    const info = fields.get(key);
+    const startPos = doc.positionAt(offset + m.index);
+    const range = new vscode.Range(startPos, startPos.translate(0, key.length));
+
+    // unknown column
+    if (!info) {
+      diags.push(
+        new vscode.Diagnostic(
+          range,
+          `The column "${key}" does not exist in ${modelName}.`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      continue;
+    }
+
+    // type-check
+    const expr = rawValue.trim();
+    if (!isValidPhpType(expr, info)) {
+      const expected = info.isList ? `${info.type}[]` : info.type;
+      diags.push(
+        new vscode.Diagnostic(
+          range,
+          `"${key}" expects ${expected}, but received "${expr}".`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    }
+  }
+}
+
+/**
+ * Encapsulate your big switch(...) in one place.
+ */
+function isValidPhpType(expr: string, info: FieldInfo): boolean {
+  const allowed = phpDataTypes[info.type] ?? [];
+  const isString = /^['"]/.test(expr);
+  const isNumber = /^-?\d+(\.\d+)?$/.test(expr);
+  const isBool = /^(true|false)$/i.test(expr);
+  const isArray = /^\[.*\]$/.test(expr);
+  const isVar = /^\$[A-Za-z_]\w*/.test(expr);
+  const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(expr);
+
+  return allowed.some((t) => {
+    switch (t) {
+      case "string":
+        return isString || isVar;
+      case "int":
+        return isNumber && !expr.includes(".");
+      case "float":
+        return isNumber;
+      case "bool":
+        return isBool;
+      case "array":
+        return isArray;
+      case "DateTime":
+        return /^new\s+DateTime/.test(expr) || isFnCall || isString || isVar;
+      case "BigInteger":
+      case "BigDecimal":
+        return isFnCall;
+      case "enum":
+        return isString;
+      default:
+        return isFnCall;
+    }
+  });
+}
+
 export async function validateCreateCall(
   doc: vscode.TextDocument,
   collection: vscode.DiagnosticCollection
@@ -1137,51 +1223,14 @@ export async function validateCreateCall(
       }
 
       // b) type‐check against phpDataTypes
-      const expr = rawValue.trim();
-      const allowed = phpDataTypes[info.type] ?? [];
-      const isString = /^['"]/.test(expr);
-      const isNumber = /^-?\d+(\.\d+)?$/.test(expr);
-      const isBool = /^(true|false)$/i.test(expr);
-      const isArray = /^\[.*\]$/.test(expr);
-      const isVar = /^\$[A-Za-z_]\w*/.test(expr);
-      const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(expr);
-
-      const typeOK = allowed.some((t) => {
-        switch (t) {
-          case "string":
-            return isString || isVar;
-          case "int":
-            return isNumber && !expr.includes(".");
-          case "float":
-            return isNumber;
-          case "bool":
-            return isBool;
-          case "array":
-            return isArray;
-          case "DateTime":
-            return (
-              /^new\s+DateTime/.test(expr) || isFnCall || isString || isVar
-            );
-          case "BigInteger":
-          case "BigDecimal":
-            return isFnCall;
-          case "enum":
-            return isString;
-          default:
-            return isFnCall;
-        }
-      });
-
-      if (!typeOK) {
-        const expected = info.isList ? `${info.type}[]` : info.type;
-        diags.push(
-          new vscode.Diagnostic(
-            range,
-            `"${key}" expects ${expected}, but received "${expr}".`,
-            vscode.DiagnosticSeverity.Error
-          )
-        );
-      }
+      validateFieldAssignments(
+        doc,
+        dataLiteral,
+        dataOffset,
+        fields,
+        modelName,
+        diags
+      );
     }
   }
 
@@ -1240,22 +1289,33 @@ export async function validateReadCall(
     }
 
     // pull out the actual contents of the where array
-    const whereLiteral = whereMatch[1];
+    const dataLiteral = whereMatch[1];
     // compute its offset in the full document
-    const baseOffset =
+    const dataOffset =
       m.index +
       fullMatch.indexOf(whereMatch[0]) +
-      whereMatch[0].indexOf(whereLiteral);
+      whereMatch[0].indexOf(dataLiteral);
+
+    if (whereMatch) {
+      validateFieldAssignments(
+        doc,
+        dataLiteral,
+        dataOffset,
+        fields,
+        modelName,
+        diags
+      );
+    }
 
     // iterate each `'key' => value` inside that block
     const fieldRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
     let f: RegExpExecArray | null;
-    while ((f = fieldRe.exec(whereLiteral))) {
+    while ((f = fieldRe.exec(dataLiteral))) {
       const [, key, rawValue] = f;
       const info = fields.get(key);
 
       // build a diagnostic range pointing at the key
-      const start = doc.positionAt(baseOffset + f.index);
+      const start = doc.positionAt(dataOffset + f.index);
       const range = new vscode.Range(start, start.translate(0, key.length));
 
       // 1) unknown field?
@@ -1271,51 +1331,14 @@ export async function validateReadCall(
       }
 
       // 2) type‐check against your phpDataTypes map
-      const expr = rawValue.trim();
-      const allowed = phpDataTypes[info.type] ?? [];
-      const isString = /^['"]/.test(expr);
-      const isNumber = /^-?\d+(\.\d+)?$/.test(expr);
-      const isBool = /^(true|false)$/i.test(expr);
-      const isArray = /^\[.*\]$/.test(expr);
-      const isVar = /^\$[A-Za-z_]\w*/.test(expr);
-      const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(expr);
-
-      const typeOK = allowed.some((t) => {
-        switch (t) {
-          case "string":
-            return isString || isVar;
-          case "int":
-            return isNumber && !expr.includes(".");
-          case "float":
-            return isNumber;
-          case "bool":
-            return isBool;
-          case "array":
-            return isArray;
-          case "DateTime":
-            return (
-              /^new\s+DateTime/.test(expr) || isFnCall || isString || isVar
-            );
-          case "BigInteger":
-          case "BigDecimal":
-            return isFnCall;
-          case "enum":
-            return isString;
-          default:
-            return isFnCall;
-        }
-      });
-
-      if (!typeOK) {
-        const expected = info.isList ? `${info.type}[]` : info.type;
-        diags.push(
-          new vscode.Diagnostic(
-            range,
-            `"${key}" expects ${expected}, but received "${expr}".`,
-            vscode.DiagnosticSeverity.Error
-          )
-        );
-      }
+      validateFieldAssignments(
+        doc,
+        dataLiteral,
+        dataOffset,
+        fields,
+        modelName,
+        diags
+      );
     }
   }
 
@@ -1402,53 +1425,14 @@ export async function validateUpdateCall(
         }
 
         // your phpDataTypes-based type check here…
-        const expr = rawValue.trim();
-        const allowed = phpDataTypes[info.type] ?? [];
-        const isString = /^['"]/.test(expr);
-        const isNumber = /^-?\d+(\.\d+)?$/.test(expr);
-        const isBool = /^(true|false)$/i.test(expr);
-        const isArray = /^\[.*\]$/.test(expr);
-        const isVar = /^\$[A-Za-z_]\w*/.test(expr);
-        const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(
-          expr
+        validateFieldAssignments(
+          doc,
+          dataLiteral,
+          dataOffset,
+          fields,
+          modelName,
+          diags
         );
-
-        const typeOK = allowed.some((t) => {
-          switch (t) {
-            case "string":
-              return isString || isVar;
-            case "int":
-              return isNumber && !expr.includes(".");
-            case "float":
-              return isNumber;
-            case "bool":
-              return isBool;
-            case "array":
-              return isArray;
-            case "DateTime":
-              return (
-                /^new\s+DateTime/.test(expr) || isFnCall || isString || isVar
-              );
-            case "BigInteger":
-            case "BigDecimal":
-              return isFnCall;
-            case "enum":
-              return isString;
-            default:
-              return isFnCall;
-          }
-        });
-
-        if (!typeOK) {
-          const expected = info.isList ? `${info.type}[]` : info.type;
-          diags.push(
-            new vscode.Diagnostic(
-              range,
-              `"${key}" expects ${expected}, but received "${expr}".`,
-              vscode.DiagnosticSeverity.Error
-            )
-          );
-        }
       }
     }
 
@@ -1480,53 +1464,14 @@ export async function validateUpdateCall(
         }
 
         // same type-check as above
-        const expr = rawValue.trim();
-        const allowed = phpDataTypes[info.type] ?? [];
-        const isString = /^['"]/.test(expr);
-        const isNumber = /^-?\d+(\.\d+)?$/.test(expr);
-        const isBool = /^(true|false)$/i.test(expr);
-        const isArray = /^\[.*\]$/.test(expr);
-        const isVar = /^\$[A-Za-z_]\w*/.test(expr);
-        const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(
-          expr
+        validateFieldAssignments(
+          doc,
+          whereLiteral,
+          whereOffset,
+          fields,
+          modelName,
+          diags
         );
-
-        const typeOK = allowed.some((t) => {
-          switch (t) {
-            case "string":
-              return isString || isVar;
-            case "int":
-              return isNumber && !expr.includes(".");
-            case "float":
-              return isNumber;
-            case "bool":
-              return isBool;
-            case "array":
-              return isArray;
-            case "DateTime":
-              return (
-                /^new\s+DateTime/.test(expr) || isFnCall || isString || isVar
-              );
-            case "BigInteger":
-            case "BigDecimal":
-              return isFnCall;
-            case "enum":
-              return isString;
-            default:
-              return isFnCall;
-          }
-        });
-
-        if (!typeOK) {
-          const expected = info.isList ? `${info.type}[]` : info.type;
-          diags.push(
-            new vscode.Diagnostic(
-              range,
-              `"${key}" expects ${expected}, but received "${expr}".`,
-              vscode.DiagnosticSeverity.Error
-            )
-          );
-        }
       }
     }
   }
@@ -1599,51 +1544,14 @@ export async function validateDeleteCall(
       }
 
       // type‐check against phpDataTypes (just copy your existing logic here)
-      const expr = rawValue.trim();
-      const allowed = phpDataTypes[info.type] ?? [];
-      const isString = /^['"]/.test(expr);
-      const isNumber = /^-?\d+(\.\d+)?$/.test(expr);
-      const isBool = /^(true|false)$/i.test(expr);
-      const isArray = /^\[.*\]$/.test(expr);
-      const isVar = /^\$[A-Za-z_]\w*/.test(expr);
-      const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(expr);
-
-      const typeOK = allowed.some((t) => {
-        switch (t) {
-          case "string":
-            return isString || isVar;
-          case "int":
-            return isNumber && !expr.includes(".");
-          case "float":
-            return isNumber;
-          case "bool":
-            return isBool;
-          case "array":
-            return isArray;
-          case "DateTime":
-            return (
-              /^new\s+DateTime/.test(expr) || isFnCall || isString || isVar
-            );
-          case "BigInteger":
-          case "BigDecimal":
-            return isFnCall;
-          case "enum":
-            return isString;
-          default:
-            return isFnCall;
-        }
-      });
-
-      if (!typeOK) {
-        const expected = info.isList ? `${info.type}[]` : info.type;
-        diags.push(
-          new vscode.Diagnostic(
-            range,
-            `"${key}" expects ${expected}, but received "${expr}".`,
-            vscode.DiagnosticSeverity.Error
-          )
-        );
-      }
+      validateFieldAssignments(
+        doc,
+        whereLiteral,
+        whereOffset,
+        fields,
+        modelName,
+        diags
+      );
     }
   }
 
