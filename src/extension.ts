@@ -1119,13 +1119,26 @@ function validateFieldAssignments(
   }
 }
 
-const PRISMA_LOGICAL_OPS = new Set([
+const PRISMA_OPERATORS = new Set([
+  // logical combinators
   "AND",
   "OR",
   "NOT",
-  "A",
-  "B",
-  // …any other top‐level array operators you want
+  // string matching
+  "contains",
+  "startsWith",
+  "endsWith",
+  // list membership
+  "in",
+  "notIn",
+  // numeric
+  "lt",
+  "lte",
+  "gt",
+  "gte",
+  // equality
+  "equals",
+  "not",
 ]);
 
 /**
@@ -1222,7 +1235,7 @@ export async function validateCreateCall(
       const expr = rawValue.trim();
 
       // ── a) skip any top-level logical operators
-      if (PRISMA_LOGICAL_OPS.has(key)) {
+      if (PRISMA_OPERATORS.has(key)) {
         continue;
       }
 
@@ -1338,7 +1351,7 @@ export async function validateReadCall(
       const expr = rawValue.trim();
 
       // a) skip Prisma logical operators
-      if (PRISMA_LOGICAL_OPS.has(key)) {
+      if (PRISMA_OPERATORS.has(key)) {
         continue;
       }
 
