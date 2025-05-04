@@ -733,13 +733,60 @@ export async function activate(context: vscode.ExtensionContext) {
     );
   }
 
+  vscode.languages.registerCompletionItemProvider(
+    "php",
+    {
+      async provideCompletionItems(doc, pos) {
+        const line = doc.lineAt(pos).text.slice(0, pos.character);
+
+        /* ① mismo regexp pero acepta comillas simples o dobles
+              y permite que la parte ya‑tecleada sea vacía        */
+        const m =
+          /\$prisma->(\w+)->create\([^]*?'data'\s*=>\s*\[\s*["']?([\w]*)$/m.exec(
+            line
+          );
+        if (!m) {
+          return;
+        }
+
+        const [, modelName, alreadyTyped] = m;
+        const fields = (await getModelMap()).get(modelName.toLowerCase());
+        if (!fields) {
+          return;
+        }
+
+        return [...fields.keys()].map((k) => {
+          const it = new vscode.CompletionItem(
+            k,
+            vscode.CompletionItemKind.Field
+          );
+
+          /* ② Si el usuario acaba de abrir la comilla (alreadyTyped === "")
+                queremos reemplazar **cero** caracteres.                   */
+          const replaceFrom = pos.translate(0, -alreadyTyped.length);
+          it.range = new vscode.Range(replaceFrom, pos);
+
+          /* ③ snippet con =>  y un espacio después */
+          it.insertText = new vscode.SnippetString(`${k}' => $0`);
+          return it;
+        });
+      },
+    },
+    "'", // ← triggers
+    '"' // ← NUEVO trigger
+  );
+
   context.subscriptions.push(stringDecorationType);
   context.subscriptions.push(numberDecorationType);
   context.subscriptions.push(templateLiteralDecorationType);
 
+  const prismaDiags =
+    vscode.languages.createDiagnosticCollection("prisma-create");
+
   // Combined update validations function.
-  const updateAllValidations = (document: vscode.TextDocument) => {
+  const updateAllValidations = async (document: vscode.TextDocument) => {
     schedulePphpValidation(document);
+    await validateCreateCall(document, prismaDiags);
     updateJsVariableDecorations(document, braceDecorationType);
     updateStringDecorations(document);
     validateJsVariablesInCurlyBraces(document, jsVarDiagnostics);
@@ -786,6 +833,118 @@ export async function activate(context: vscode.ExtensionContext) {
 /* ────────────────────────────────────────────────────────────── *
  *                 Native‑JS hover & signature‑help               *
  * ────────────────────────────────────────────────────────────── */
+
+export interface FieldInfo {
+  type: string; // "String" | "Int" | ...
+  required: boolean;
+  isList: boolean;
+  nullable: boolean;
+}
+
+export type ModelMap = Map<string, Map<string, FieldInfo>>; // model → field → info
+let cache: ModelMap | null = null;
+
+export async function getModelMap(): Promise<ModelMap> {
+  if (cache) {
+    return cache;
+  }
+
+  const ws = vscode.workspace.workspaceFolders?.[0];
+  if (!ws) {
+    return new Map();
+  }
+
+  const uri = vscode.Uri.joinPath(ws.uri, "settings", "prisma-schema.json");
+  const raw = await vscode.workspace.fs.readFile(uri);
+  const dmmf = JSON.parse(Buffer.from(raw).toString("utf8"));
+
+  cache = new Map();
+
+  for (const model of dmmf.datamodel.models) {
+    const fields = new Map<string, FieldInfo>();
+    for (const f of model.fields) {
+      fields.set(f.name, {
+        type: f.type,
+        required: !f.isNullable && !f.hasDefaultValue && !f.relationName,
+        isList: f.isList,
+        nullable: f.isNullable,
+      });
+    }
+    cache.set(model.name.toLowerCase(), fields); // user → …
+  }
+  return cache;
+}
+
+async function validateCreateCall(
+  doc: vscode.TextDocument,
+  collection: vscode.DiagnosticCollection
+) {
+  const text = doc.getText();
+  const diags: vscode.Diagnostic[] = [];
+  const re =
+    /\$prisma->(\w+)->create\(\s*\[\s*'data'\s*=>\s*\[([\s\S]*?)\]\s*\]\s*\)/g;
+  let m: RegExpExecArray | null;
+
+  const modelMap = await getModelMap();
+
+  while ((m = re.exec(text))) {
+    const [, modelName, dataLiteral] = m;
+    const fields = modelMap.get(modelName.toLowerCase());
+    if (!fields) {
+      continue;
+    }
+
+    const dataOffset = m[0].indexOf(dataLiteral); // ➊
+
+    const fieldRx = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
+    let f: RegExpExecArray | null;
+
+    while ((f = fieldRx.exec(dataLiteral))) {
+      const [, key, valueExpr] = f;
+      const fieldInfo = fields.get(key);
+
+      const start = doc.positionAt(m.index + dataOffset + f.index); // ➋
+      const range = new vscode.Range(start, start.translate(0, key.length));
+
+      /* a) Non-existent column */
+      if (!fieldInfo) {
+        diags.push(
+          new vscode.Diagnostic(
+            range,
+            `The column "${key}" does not exist in ${modelName}.`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+        continue;
+      }
+
+      /* b) Incorrect type (heuristic based on literal) */
+      const isString = /^['"]/.test(valueExpr);
+      const isNumber = /^[0-9]+$/.test(valueExpr);
+      const isBool = /^(true|false)$/.test(valueExpr);
+
+      const expectedTsType = fieldInfo.isList
+        ? `${fieldInfo.type}[]`
+        : fieldInfo.type;
+
+      const typeOK =
+        (fieldInfo.type === "String" && isString) ||
+        (fieldInfo.type.match(/Int|BigInt|Float|Decimal/) && isNumber) ||
+        (fieldInfo.type === "Boolean" && isBool);
+
+      if (!typeOK) {
+        diags.push(
+          new vscode.Diagnostic(
+            range,
+            `"${key}" expects ${expectedTsType}, but received "${valueExpr.trim()}".`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      }
+    }
+  }
+  collection.set(doc.uri, diags);
+}
 
 type NativeInfo = { sig: string; jsDoc?: string };
 
@@ -1130,6 +1289,11 @@ const registerPhpCompletionProvider = () => {
         position: vscode.Position
       ): Promise<vscode.CompletionItem[] | undefined> {
         const line = document.lineAt(position.line).text;
+        /* ⬅️  EARLY EXIT while user is still typing "<?php" or "<?="  */
+        const uptoCursor = line.slice(0, position.character);
+        if (/^\s*<\?(?:php|=)?$/i.test(uptoCursor)) {
+          return []; // nothing offered – bail out
+        }
 
         // 0️⃣ Top-level variable suggestions ("pphp", "store", "searchParams")
         const varNames = ["pphp", "store", "searchParams"] as const;
