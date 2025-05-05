@@ -807,7 +807,6 @@ export async function activate(context: vscode.ExtensionContext) {
     "equals",
     "not",
   ] as const;
-  type FilterOp = (typeof FILTER_OPERATORS)[number];
   // ① add this helper somewhere accessible
   function isEntry(node: any): node is Entry {
     return node.kind === "entry";
@@ -824,7 +823,6 @@ export async function activate(context: vscode.ExtensionContext) {
             new vscode.Range(new vscode.Position(0, 0), pos)
           );
           const lastPrisma = before.lastIndexOf("$prisma->");
-          console.log("🚀 ~ provideCompletionItems ~ lastPrisma:", lastPrisma);
           if (lastPrisma === -1) {
             return;
           }
@@ -996,7 +994,6 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
           }
           const fields = [...fieldMap.entries()];
-          console.log("🚀 ~ provideCompletionItems ~ fields:", fields);
 
           // only some rootKeys make sense to suggest columns:
           if (
