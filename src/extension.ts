@@ -900,39 +900,6 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
           }
 
-          const isWhere = target.block === "where";
-
-          if (isWhere) {
-            const nested = /['"]([a-z]\w*)['"]\s*=>\s*\[\s*['"]?([\w]*)$/.exec(
-              before
-            );
-            if (nested) {
-              const alreadyOp = nested[2];
-
-              return FILTER_OPERATORS.filter((op) =>
-                op.startsWith(alreadyOp)
-              ).map((op) => {
-                const item = new vscode.CompletionItem(
-                  op,
-                  vscode.CompletionItemKind.Keyword
-                );
-
-                // always wrap with quotes, the replace range will eat whatever was there
-                item.insertText = new vscode.SnippetString(`${op}' => $0`);
-
-                // overwrite exactly the opening‐quote + any partial you typed
-                const replaceStart = target
-                  ? pos.translate(0, -target.already.length)
-                  : pos;
-                const replaceEnd = pos.translate(0, 1); // Define replaceEnd
-                item.range = new vscode.Range(replaceStart, replaceEnd);
-
-                item.detail = "filter operator";
-                return item;
-              });
-            }
-          }
-
           // don’t trigger inside a value string (after `=>`)
           const lineToCursor = doc.getText(
             new vscode.Range(new vscode.Position(pos.line, 0), pos)
@@ -953,6 +920,7 @@ export async function activate(context: vscode.ExtensionContext) {
             new vscode.Range(pos, pos.translate(0, 1))
           );
           const hasClose = nextChar === quote;
+          const isWhere = target.block === "where";
           const isSelect = target.block === "select";
           const isInclude = target.block === "include";
 
