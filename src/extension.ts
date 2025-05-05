@@ -774,7 +774,7 @@ export async function activate(context: vscode.ExtensionContext) {
       "delete",
     ]);
 
-    type BlockKind = "data" | "where" | "select";
+    type BlockKind = "data" | "where" | "select" | "include";
 
     return vscode.languages.registerCompletionItemProvider(
       "php",
@@ -855,9 +855,10 @@ export async function activate(context: vscode.ExtensionContext) {
                 continue;
               }
               const key = (entry.key as any).value as string as BlockKind;
-              if (key !== "data" && key !== "where" && key !== "select") {
+              if (!["data", "where", "select", "include"].includes(key)) {
                 continue;
               }
+
               if (!isArray(entry.value) || !entry.value.loc) {
                 continue;
               }
@@ -906,10 +907,11 @@ export async function activate(context: vscode.ExtensionContext) {
           const hasClose = nextChar === quote;
           const isWhere = target.block === "where";
           const isSelect = target.block === "select";
+          const isInclude = target.block === "include";
 
           const optLabel = isWhere
             ? "*optional filter*"
-            : isSelect
+            : isSelect || isInclude
             ? "*field to return*"
             : "*optional field*";
           const reqLabel = isWhere ? "*required filter*" : "*required field*";
@@ -918,7 +920,11 @@ export async function activate(context: vscode.ExtensionContext) {
             `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
 
           return [...fields.entries()].map(([name, info]) => {
-            const optional = isSelect ? true : !info.required;
+            const optional = isSelect
+              ? true
+              : isInclude
+              ? true
+              : !info.required;
 
             const label: vscode.CompletionItemLabel = {
               label: optional ? `${name}?` : name,
@@ -969,6 +975,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
             /* snippet de inserción */
             if (isSelect) {
+              item.insertText = new vscode.SnippetString(
+                `${quote}${name}${quote} => true`
+              );
+            } else if (isInclude) {
               item.insertText = new vscode.SnippetString(
                 `${quote}${name}${quote} => true`
               );
@@ -1499,20 +1509,18 @@ function validateWhereArray(
       continue;
     }
     const key = (item.key as any).value as string;
+    const keyRange = locToRange(doc, item.key.loc!);
 
-    // ── 1) skip Prisma operators entirely ───────────────────
-    //    (but still recurse into their inner arrays)
-    if (PRISMA_OPERATORS.has(key)) {
+    // 1) skip top-level Prisma combinators (AND, OR, NOT), but recurse into them
+    if (PRISMA_OPERATORS.has(key) && ["AND", "OR", "NOT"].includes(key)) {
       if (item.value && isArray(item.value)) {
         validateWhereArray(doc, item.value, fields, model, out);
       }
       continue;
     }
 
-    // ── 2) now you can safely treat everything else as a real column
+    // 2) ensure this column actually exists
     const info = fields.get(key);
-    const keyRange = locToRange(doc, item.key.loc!);
-
     if (!info) {
       out.push(
         new vscode.Diagnostic(
@@ -1524,7 +1532,58 @@ function validateWhereArray(
       continue;
     }
 
-    // ── 3) extract the *actual* PHP text of the value and type‐check
+    // 3) handle nested filter object: [ 'contains' => $search, … ]
+    if (isArray(item.value)) {
+      for (const opEntry of (item.value as PhpArray).items as Entry[]) {
+        if (!opEntry.key || opEntry.key.kind !== "string") {
+          continue;
+        }
+        const op = (opEntry.key as any).value as string;
+        const opRange = locToRange(doc, opEntry.key.loc!);
+
+        if (!PRISMA_OPERATORS.has(op)) {
+          out.push(
+            new vscode.Diagnostic(
+              opRange,
+              `Invalid filter operator "${op}" for "${key}".`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+          continue;
+        }
+
+        // get the raw text of the operator’s value
+        const valRange = locToRange(doc, opEntry.value.loc!);
+        const raw = doc.getText(valRange).trim();
+
+        // special-case array-valued filters
+        if ((op === "in" || op === "notIn") && !/^\[.*\]$/.test(raw)) {
+          out.push(
+            new vscode.Diagnostic(
+              opRange,
+              `Filter "${op}" for "${key}" expects an array, but got "${raw}".`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+          continue;
+        }
+
+        // everything else: use your existing isValidPhpType to check type
+        // (e.g. "contains" on a String field must be a string or a var)
+        if (!isValidPhpType(raw, info)) {
+          out.push(
+            new vscode.Diagnostic(
+              opRange,
+              `Filter "${op}" for "${key}" expects type ${info.type}, but received "${raw}".`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+        }
+      }
+      continue;
+    }
+
+    // 4) all other cases: e.g. simple equals => 123
     const valueRange = locToRange(doc, item.value.loc!);
     const rawExpr = doc.getText(valueRange).trim();
     if (!isValidPhpType(rawExpr, info)) {
