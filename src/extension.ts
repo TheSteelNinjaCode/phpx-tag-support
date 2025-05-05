@@ -16,6 +16,17 @@ import {
   SignatureInformation,
   TextDocument,
 } from "vscode";
+import { findPrismaCalls } from "./analysis/phpAst";
+import {
+  Entry,
+  Identifier,
+  Node,
+  PropertyLookup,
+  Variable,
+  Array as PhpArray,
+  Engine,
+  Call,
+} from "php-parser";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                    *
@@ -442,95 +453,6 @@ function validatePphpCalls(
   diagCollection.set(document.uri, diags);
 }
 
-function createPrismaFieldProvider({
-  callRegex,
-  optionalLabel,
-  requiredLabel,
-  triggerChars,
-}: PrismaFieldProviderConfig) {
-  return vscode.languages.registerCompletionItemProvider(
-    "php",
-    {
-      async provideCompletionItems(doc, pos) {
-        const before = doc.getText(
-          new vscode.Range(new vscode.Position(0, 0), pos)
-        );
-
-        // 1️⃣ grab what they’ve already typed in the quoted key
-        const quoteMatch = /['"]([\w]*)$/.exec(before);
-        if (!quoteMatch) {
-          return;
-        }
-        const alreadyTyped = quoteMatch[1];
-
-        // bail if they just typed the => already
-        if (
-          /\=>\s*$/.test(
-            before.slice(Math.max(0, quoteMatch.index - 5), quoteMatch.index)
-          )
-        ) {
-          return;
-        }
-
-        // 2️⃣ only look *before* that key for your callRegex
-        const sliceUpToKeyStart = before.slice(0, quoteMatch.index);
-        const all = [...sliceUpToKeyStart.matchAll(callRegex)];
-        if (!all.length) {
-          return;
-        }
-        const modelName = all[all.length - 1][1];
-        const fields = (await getModelMap()).get(modelName.toLowerCase());
-        if (!fields) {
-          return;
-        }
-
-        // 3️⃣ detect quote style & whether there's already a closing quote
-        const quote = /["']$/.exec(before)?.[0] ?? "'";
-        const nextChar = doc.getText(
-          new vscode.Range(pos, pos.translate(0, 1))
-        );
-        const hasClose = nextChar === quote;
-
-        // helper to format the type
-        const fmt = (f: FieldInfo) =>
-          `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
-
-        // 4️⃣ finally build your CompletionItems
-        return [...fields.entries()].map(([name, info]) => {
-          const isOptional = !info.required;
-          const label: vscode.CompletionItemLabel = {
-            label: isOptional ? `${name}?` : name,
-            detail: `: ${fmt(info)}`,
-          };
-
-          const item = new vscode.CompletionItem(
-            label,
-            vscode.CompletionItemKind.Field
-          );
-          item.documentation = new vscode.MarkdownString(
-            `\`${label.label}${label.detail}\`\n\n` +
-              (isOptional ? optionalLabel : requiredLabel)
-          );
-
-          // use what they’d already typed to compute the replace range
-          const start = pos.translate(0, -alreadyTyped.length - 1);
-          const end = hasClose ? pos.translate(0, 1) : pos;
-          item.range = new vscode.Range(start, end);
-
-          item.insertText = new vscode.SnippetString(
-            `${quote}${name}${quote} => $0`
-          );
-          item.sortText = `0_${name}`;
-          item.filterText = `${quote}${name}`;
-
-          return item;
-        });
-      },
-    },
-    ...triggerChars
-  );
-}
-
 /* ────────────────────────────────────────────────────────────── *
  *                       EXTENSION ACTIVATION                       *
  * ────────────────────────────────────────────────────────────── */
@@ -841,78 +763,155 @@ export async function activate(context: vscode.ExtensionContext) {
     );
   }
 
-  // ── unified Prisma field‐completion ───────────────────────────
-  function registerPrismaFieldProvider() {
-    // 1️⃣ list your Prisma ops in one place
-    const prismaOps = [
+  // ── AST‑driven Prisma field‑completion ──────────────────────────
+  function registerPrismaFieldProvider(): vscode.Disposable {
+    const prismaOps = new Set([
       "create",
       "findMany",
       "findFirst",
       "findUnique",
       "update",
       "delete",
-      // …you can add more here later
-    ];
+    ]);
 
-    // 2️⃣ build a `foo|bar|baz` alternation for your regex
-    const opsPattern = prismaOps.join("|");
-
-    // 3️⃣ construct the RegExp once, from the dynamic ops list
-    //    — note we double-escape backslashes in a string literal
-    const invocationRe = new RegExp(
-      "\\$prisma->([A-Za-z_]\\w*)" + // capture the model name
-        "->(" +
-        opsPattern +
-        ")\\(" + // capture the op (from your array)
-        "[\\s\\S]*?['\"]" + // anything up to a quoted data|where
-        "(data|where)['\"]\\s*=>\\s*\\[\\s*['\"]" + // capture which block
-        "([\\w]*)$" // capture what they’ve already typed
-    );
+    type BlockKind = "data" | "where" | "select";
 
     return vscode.languages.registerCompletionItemProvider(
       "php",
       {
         async provideCompletionItems(doc, pos) {
+          /* 1️⃣ slice desde el último $prisma-> hasta el cursor ---------- */
           const before = doc.getText(
-            new vscode.Range(0, 0, pos.line, pos.character)
+            new vscode.Range(new vscode.Position(0, 0), pos)
           );
-
-          // only look at the very last "$prisma->…" so you don't accidentally match earlier calls
-          const tail = before.slice(before.lastIndexOf("$prisma->"));
-          const m = invocationRe.exec(tail);
-          if (!m) {
+          const last = before.lastIndexOf("$prisma->");
+          if (last === -1) {
             return;
           }
 
-          // [ fullMatch, modelName, op, blockKey, alreadyTyped ]
-          const [, modelName, op, blockKey, alreadyTyped] = m;
+          const tail = before.slice(last);
+          const offsetBase = last;
 
-          // …the rest of your logic is unchanged
+          /* 2️⃣ parseEval del fragmento --------------------------------- */
+          let ast: Node;
+          try {
+            ast = php.parseEval(tail);
+          } catch {
+            return;
+          }
+
+          /* 3️⃣ localizar la llamada y el bloque donde está el cursor ---- */
+          let target:
+            | {
+                model: string;
+                block: BlockKind;
+                already: string;
+              }
+            | undefined;
+
+          walk(ast, (node) => {
+            if (target || node.kind !== "call") {
+              return;
+            }
+
+            const call = node as Call;
+            if (!isPropLookup(call.what)) {
+              return;
+            }
+
+            const op = nodeName(call.what.offset);
+            if (typeof op !== "string" || !prismaOps.has(op)) {
+              return;
+            }
+
+            const mdlChain = call.what.what;
+            if (!isPropLookup(mdlChain)) {
+              return;
+            }
+            const model = nodeName(mdlChain.offset);
+            if (!model) {
+              return;
+            }
+
+            const base = mdlChain.what;
+            if (!(isVariable(base) && base.name === "prisma")) {
+              return;
+            }
+
+            const arr = call.arguments?.[0];
+            if (!arr || !isArray(arr) || !arr.loc) {
+              return;
+            }
+
+            const cur = doc.offsetAt(pos);
+            const absArrStart = offsetBase + arr.loc.start.offset;
+            const absArrEnd = offsetBase + arr.loc.end.offset;
+            if (cur < absArrStart || cur > absArrEnd) {
+              return;
+            }
+
+            for (const entry of arr.items as Entry[]) {
+              if (!entry.key || entry.key.kind !== "string" || !entry.value) {
+                continue;
+              }
+              const key = (entry.key as any).value as string as BlockKind;
+              if (key !== "data" && key !== "where" && key !== "select") {
+                continue;
+              }
+              if (!isArray(entry.value) || !entry.value.loc) {
+                continue;
+              }
+
+              const absStart = offsetBase + entry.value.loc.start.offset;
+              const absEnd = offsetBase + entry.value.loc.end.offset;
+              if (cur < absStart || cur > absEnd) {
+                continue;
+              }
+
+              const alreadyMatch = /['"]([\w]*)$/.exec(before);
+              const already = alreadyMatch ? alreadyMatch[1] : "";
+
+              target = {
+                model: typeof model === "string" ? model : "",
+                block: key,
+                already,
+              };
+              break;
+            }
+          });
+
+          if (!target) {
+            return;
+          }
+
+          /* 4️⃣ construir sugerencias ----------------------------------- */
           const map = await getModelMap();
-          const fields = map.get(modelName.toLowerCase());
+          const fields = map.get(target.model.toLowerCase());
           if (!fields) {
             return;
           }
 
-          const isWhere = blockKey === "where";
-          const optionalLabel = isWhere
-            ? "*optional filter*"
-            : "*optional field*";
-          const requiredLabel = isWhere
-            ? "*required filter*"
-            : "*required field*";
-
-          const quote = /["']$/.exec(tail)?.[0] ?? "'";
+          const quote = /["']$/.exec(before)?.[0] ?? "'";
           const nextChar = doc.getText(
             new vscode.Range(pos, pos.translate(0, 1))
           );
           const hasClose = nextChar === quote;
+          const isWhere = target.block === "where";
+          const isSelect = target.block === "select";
+
+          const optLabel = isWhere
+            ? "*optional filter*"
+            : isSelect
+            ? "*field to return*"
+            : "*optional field*";
+          const reqLabel = isWhere ? "*required filter*" : "*required field*";
 
           const fmt = (f: FieldInfo) =>
             `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
 
           return [...fields.entries()].map(([name, info]) => {
-            const optional = !info.required;
+            const optional = isSelect ? true : !info.required;
+
             const label: vscode.CompletionItemLabel = {
               label: optional ? `${name}?` : name,
               detail: `: ${fmt(info)}`,
@@ -922,18 +921,31 @@ export async function activate(context: vscode.ExtensionContext) {
               label,
               vscode.CompletionItemKind.Field
             );
+
+            /* documentación */
             item.documentation = new vscode.MarkdownString(
               `\`${label.label}${label.detail}\`\n\n` +
-                (optional ? optionalLabel : requiredLabel)
+                (optional ? optLabel : reqLabel)
             );
 
-            const replaceStart = pos.translate(0, -alreadyTyped.length - 1);
+            /* rango a reemplazar */
+            const replaceStart = target
+              ? pos.translate(0, -target.already.length)
+              : pos;
             const replaceEnd = hasClose ? pos.translate(0, 1) : pos;
             item.range = new vscode.Range(replaceStart, replaceEnd);
 
-            item.insertText = new vscode.SnippetString(
-              `${quote}${name}${quote} => $0`
-            );
+            /* snippet de inserción */
+            if (isSelect) {
+              item.insertText = new vscode.SnippetString(
+                `${quote}${name}${quote} => true`
+              );
+            } else {
+              item.insertText = new vscode.SnippetString(
+                `${quote}${name}${quote} => $0`
+              );
+            }
+
             item.sortText = `0_${name}`;
             item.filterText = `${quote}${name}`;
 
@@ -942,7 +954,7 @@ export async function activate(context: vscode.ExtensionContext) {
         },
       },
       "'",
-      `"` // trigger only inside quotes
+      '"'
     );
   }
 
@@ -1182,88 +1194,180 @@ function isValidPhpType(expr: string, info: FieldInfo): boolean {
   });
 }
 
+const php = new Engine({
+  parser: { php8: true, suppressErrors: true },
+  ast: { withPositions: true },
+});
+
+/* ---------- type‑guards ----------------------------------- */
+const isPropLookup = (n: Node): n is PropertyLookup =>
+  n.kind === "propertylookup";
+const isIdentifier = (n: Node): n is Identifier => n.kind === "identifier";
+const isVariable = (n: Node): n is Variable => n.kind === "variable";
+const isArray = (n: Node): n is PhpArray => n.kind === "array";
+
+const nodeName = (n: Node) =>
+  isIdentifier(n) ? n.name : isVariable(n) ? n.name : null;
+
+/* Loc → Range */
+const rangeOf = (doc: vscode.TextDocument, loc: Node["loc"]) =>
+  new vscode.Range(
+    doc.positionAt(loc!.start.offset),
+    doc.positionAt(loc!.end.offset)
+  );
+
+function walk(node: Node, visit: (n: Node) => void) {
+  visit(node);
+  for (const key of Object.keys(node)) {
+    const child = (node as any)[key];
+    if (!child) {
+      continue;
+    }
+    if (Array.isArray(child)) {
+      child.forEach((c) => c && walk(c, visit));
+    } else if (typeof child === "object" && (child as Node).kind) {
+      walk(child as Node, visit);
+    }
+  }
+}
+
+function printNode(n: Node | null) {
+  return n ? JSON.stringify(n, null, 2) : "";
+}
+function locToRange(
+  doc: vscode.TextDocument,
+  loc: { start: { offset: number }; end: { offset: number } }
+) {
+  return new vscode.Range(
+    doc.positionAt(loc!.start.offset),
+    doc.positionAt(loc!.end.offset)
+  );
+}
+
+function printArrayLiteral(arr: PhpArray): string {
+  return printPhpArray(arr); // devuelve “[ 'foo' => 'bar' ]…”
+
+  /**
+   * Custom function to print PHP arrays.
+   */
+  function printPhpArray(arr: PhpArray): string {
+    return JSON.stringify(
+      arr.items.map((item) => ({
+        ...(item.kind === "entry" &&
+        "key" in item &&
+        item.key?.kind === "string" &&
+        "value" in item.key &&
+        "value" in item.value
+          ? { [String(item.key.value) || ""]: item.value.value || "" }
+          : {}),
+      }))
+    );
+  }
+}
+
 export async function validateCreateCall(
   doc: vscode.TextDocument,
   collection: vscode.DiagnosticCollection
 ): Promise<void> {
-  const text = doc.getText();
-  const diags: vscode.Diagnostic[] = [];
-
-  // 1️⃣  Match every $prisma->Model->create([ … ])
-  const callRe = /\$prisma->(\w+)->create\(\s*\[([\s\S]*?)\]\s*\)/g;
-  let m: RegExpExecArray | null;
+  const diagnostics: vscode.Diagnostic[] = [];
   const modelMap = await getModelMap();
+  const ast = php.parseCode(doc.getText(), doc.fileName);
 
-  while ((m = callRe.exec(text))) {
-    const [fullMatch, modelName, argsLiteral] = m;
-    const fields = modelMap.get(modelName.toLowerCase());
-    if (!fields) {
-      continue;
+  /* ─── busca todas las llamadas $prisma->Model->create([...]) ─── */
+  walk(ast, (node) => {
+    if (node.kind !== "call") {
+      return;
     }
 
-    // range for the entire create() call
-    const callStart = doc.positionAt(m.index);
-    const callEnd = doc.positionAt(m.index + fullMatch.length);
-    const callRange = new vscode.Range(callStart, callEnd);
+    const call = node as Call;
+    if (!isPropLookup(call.what)) {
+      return;
+    } // …->create()
 
-    // 2️⃣  Require a 'data' block
-    if (!/['"]data['"]\s*=>\s*\[/.test(argsLiteral)) {
-      diags.push(
+    /* ① extraer op, modelo y base -------------------------------- */
+    const opNode = call.what.offset;
+    const opName = nodeName(opNode);
+    if (opName !== "create") {
+      return;
+    } // sólo create()
+
+    const modelChain = call.what.what; // …->Model
+    if (!isPropLookup(modelChain)) {
+      return;
+    }
+    const modelName = nodeName(modelChain.offset);
+    if (!modelName) {
+      return;
+    }
+
+    const base = modelChain.what; // $prisma
+    if (!(isVariable(base) && base.name === "prisma")) {
+      return;
+    }
+
+    /* ② validar que exista 'data' => [...] ----------------------- */
+    const args = call.arguments?.[0];
+    if (!isArray(args)) {
+      return;
+    } // create(); sin array
+
+    const dataEntry = (args.items as Entry[]).find(
+      (e) => e.key?.kind === "string" && (e.key as any).value === "data"
+    );
+    if (!dataEntry) {
+      diagnostics.push(
         new vscode.Diagnostic(
-          callRange,
-          `create() requires a 'data' block.`,
+          rangeOf(doc, call.loc),
+          "create() requires a 'data' block.",
           vscode.DiagnosticSeverity.Error
         )
       );
-      continue;
+      return;
     }
+    if (!isArray(dataEntry.value)) {
+      return;
+    } // data no es array
 
-    // 3️⃣  Extract the inside of data: [ … ]
-    const dataMatch = /['"]data['"]\s*=>\s*\[([\s\S]*?)\]/m.exec(argsLiteral)!;
-    const dataLiteral = dataMatch[1];
-    const dataOffset =
-      m.index +
-      fullMatch.indexOf(dataMatch[0]) +
-      dataMatch[0].indexOf(dataLiteral);
+    /* ③ validar cada campo dentro de data ----------------------- */
+    const fields =
+      typeof modelName === "string"
+        ? modelMap.get(modelName.toLowerCase())
+        : undefined;
+    if (!fields) {
+      return;
+    } // esquema desconocido
 
-    // 4️⃣  Walk each `'key' => rawValue`
-    const fieldRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
-    let f: RegExpExecArray | null;
+    for (const item of dataEntry.value.items as Entry[]) {
+      if (!item.key || item.key.kind !== "string") {
+        continue;
+      }
+      const key = (item.key as any).value as string;
+      const value = item.value;
 
-    while ((f = fieldRe.exec(dataLiteral))) {
-      const [, key, rawValue] = f;
-      const expr = rawValue.trim();
-
-      // ── a) skip any top-level logical operators
+      /* a) operadores Prisma de alto nivel -------------------- */
       if (PRISMA_OPERATORS.has(key)) {
         continue;
       }
 
-      // ── b) if this is a nested filter-array, run your existing validator on its contents
-      if (expr.startsWith("[")) {
-        // strip the surrounding [ ]
-        const inner = expr.replace(/^\[\s*|\s*\]$/g, "");
-        // calculate the offset of `inner` in the document
-        const innerOffset = dataOffset + f.index + rawValue.indexOf(inner);
+      /* b) anidado: value == array ---------------------------- */
+      if (isArray(value)) {
         validateFieldAssignments(
           doc,
-          inner,
-          innerOffset,
+          printArrayLiteral(value),
+          value.loc!.start.offset,
           fields,
-          modelName,
-          diags
+          typeof modelName === "string" ? modelName : "",
+          diagnostics
         );
         continue;
       }
 
-      // ── c) it must be a real column name
-      const start = doc.positionAt(dataOffset + f.index);
-      const range = new vscode.Range(start, start.translate(0, key.length));
-
+      /* c) columna real + tipado ------------------------------ */
       const info = fields.get(key);
+      const range = rangeOf(doc, item.key.loc);
+
       if (!info) {
-        // unknown column
-        diags.push(
+        diagnostics.push(
           new vscode.Diagnostic(
             range,
             `The column "${key}" does not exist in ${modelName}.`,
@@ -1273,324 +1377,276 @@ export async function validateCreateCall(
         continue;
       }
 
-      // ── d) scalar type-check (literals or vars)
-      if (!isValidPhpType(expr, info)) {
+      const rawExpr = doc.getText(rangeOf(doc, value.loc));
+      if (!isValidPhpType(rawExpr.trim(), info)) {
         const expected = info.isList ? `${info.type}[]` : info.type;
-        diags.push(
+        diagnostics.push(
           new vscode.Diagnostic(
             range,
-            `"${key}" expects ${expected}, but received "${expr}".`,
+            `"${key}" expects ${expected}, but received "${rawExpr}".`,
             vscode.DiagnosticSeverity.Error
           )
         );
       }
     }
-  }
+  });
 
-  collection.set(doc.uri, diags);
+  collection.set(doc.uri, diagnostics);
 }
 
-/**
- * Validate $prisma->X->find*(…) calls by checking
- * each `where: [ key => value ]` against your Prisma schema.
- */
-export async function validateReadCall(
+async function validateReadCall(
   doc: vscode.TextDocument,
   collection: vscode.DiagnosticCollection
-): Promise<void> {
-  const text = doc.getText();
+) {
   const diags: vscode.Diagnostic[] = [];
-
-  // match e.g. $prisma->user->findMany([ … ]), findFirst, or findUnique
-  const readRe =
-    /\$prisma->(\w+)->(findMany|findFirst|findUnique)\(\s*\[([\s\S]*?)\]\s*\)/g;
-  let m: RegExpExecArray | null;
   const modelMap = await getModelMap();
 
-  while ((m = readRe.exec(text))) {
-    const [fullMatch, modelName, op, argsLiteral] = m;
-    const fields = modelMap.get(modelName.toLowerCase());
+  for (const call of findPrismaCalls(doc.getText())) {
+    if (!["findMany", "findFirst", "findUnique"].includes(call.op)) {
+      continue;
+    }
+
+    const fields = modelMap.get(call.model.toLowerCase());
     if (!fields) {
       continue;
     }
 
-    // range covering the entire call
-    const callStart = doc.positionAt(m.index);
-    const callEnd = doc.positionAt(m.index + fullMatch.length);
-    const callRange = new vscode.Range(callStart, callEnd);
-
-    // require a 'where' block for findUnique
-    const whereMatch = /['"]where['"]\s*=>\s*\[([\s\S]*?)\]/m.exec(argsLiteral);
-    if (op === "findUnique" && !whereMatch) {
-      diags.push(
-        new vscode.Diagnostic(
-          callRange,
-          `findUnique() requires a 'where' block.`,
-          vscode.DiagnosticSeverity.Error
-        )
-      );
-      continue;
-    }
-    // no where at all → skip the rest
-    if (!whereMatch) {
+    /* ---- locate the ["where" => [ … ]] arg ---------------------- */
+    const arr = call.args[0];
+    if (!arr || arr.kind !== "array") {
       continue;
     }
 
-    // pull out the literal inside where: [ … ]
-    const dataLiteral = whereMatch[1];
-    const dataOffset =
-      m.index +
-      fullMatch.indexOf(whereMatch[0]) +
-      whereMatch[0].indexOf(dataLiteral);
+    const whereEntry = (arr as any).items.find(
+      (e: Entry) =>
+        e.key?.kind === "string" &&
+        (e.key as unknown as { value: string }).value === "where"
+    ) as Entry | undefined;
 
-    // walk each 'key' => rawValue
-    const fieldRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
-    let f: RegExpExecArray | null;
-    while ((f = fieldRe.exec(dataLiteral))) {
-      const [, key, rawValue] = f;
-      const expr = rawValue.trim();
-
-      // a) skip Prisma logical operators
-      if (PRISMA_OPERATORS.has(key)) {
-        continue;
-      }
-
-      // b) nested filter-array?  e.g. ['contains' => $search]
-      if (expr.startsWith("[")) {
-        const inner = expr.replace(/^\[\s*|\s*\]$/g, "");
-        const innerOffset = dataOffset + f.index + rawValue.indexOf(inner);
-        validateFieldAssignments(
-          doc,
-          inner,
-          innerOffset,
-          fields,
-          modelName,
-          diags
-        );
-        continue;
-      }
-
-      // c) it must be a real column
-      const start = doc.positionAt(dataOffset + f.index);
-      const range = new vscode.Range(start, start.translate(0, key.length));
-      const info = fields.get(key);
-      if (!info) {
+    if (!whereEntry) {
+      if (call.op === "findUnique") {
         diags.push(
           new vscode.Diagnostic(
-            range,
-            `The column "${key}" does not exist in ${modelName}.`,
-            vscode.DiagnosticSeverity.Error
-          )
-        );
-        continue;
-      }
-
-      // d) scalar type-check (literal or var)
-      if (!isValidPhpType(expr, info)) {
-        const expected = info.isList ? `${info.type}[]` : info.type;
-        diags.push(
-          new vscode.Diagnostic(
-            range,
-            `"${key}" expects ${expected}, but received "${expr}".`,
+            call.loc
+              ? locToRange(doc, call.loc)
+              : new vscode.Range(
+                  new vscode.Position(0, 0),
+                  new vscode.Position(0, 0)
+                ),
+            `findUnique() requires a 'where' block.`,
             vscode.DiagnosticSeverity.Error
           )
         );
       }
+      continue;
     }
+
+    /* ---- now walk the nested array and check every field -------- */
+    validateWhereArray(
+      doc,
+      whereEntry.value, // Node of the inner array literal
+      fields,
+      call.model,
+      diags
+    );
   }
 
   collection.set(doc.uri, diags);
 }
 
-/**
- * Validate $prisma->X->update([...]) calls:
- *  – the `data` block exactly like create
- *  – the `where` block exactly like find*
- */
+function validateWhereArray(
+  doc: vscode.TextDocument,
+  node: Node,
+  fields: Map<string, FieldInfo>,
+  model: string,
+  out: vscode.Diagnostic[]
+) {
+  if (node.kind !== "array") {
+    return;
+  }
+
+  for (const item of (node as any).items as Entry[]) {
+    if (!item.key || item.key.kind !== "string") {
+      continue;
+    }
+    const key = (item.key as any)?.value as string;
+
+    // A) logical / operator keys -------------------------------
+    if (PRISMA_OPERATORS.has(key)) {
+      if (item.value) {
+        validateWhereArray(doc, item.value, fields, model, out);
+      }
+      continue;
+    }
+
+    // B) real column name --------------------------------------
+    const info = fields.get(key);
+    const range = locToRange(doc, item.key.loc!);
+
+    if (!info) {
+      out.push(
+        new vscode.Diagnostic(
+          range,
+          `The column "${key}" does not exist in ${model}.`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      continue;
+    }
+
+    /* scalar / list / var checks stay exactly as in your old code */
+    if (!isValidPhpType(printNode(item.value), info)) {
+      out.push(
+        new vscode.Diagnostic(
+          range,
+          `"${key}" expects ${info.type}${info.isList ? "[]" : ""}.`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    }
+  }
+}
+
+/**  Validate $prisma->Model->update([
+ *       'data'  => [ … ],
+ *       'where' => [ … ]
+ *   ])  */
 export async function validateUpdateCall(
   doc: vscode.TextDocument,
   collection: vscode.DiagnosticCollection
 ): Promise<void> {
-  const text = doc.getText();
-  const diags: vscode.Diagnostic[] = [];
-  const updateRe = /\$prisma->(\w+)->update\(\s*\[([\s\S]*?)\]\s*\)/g;
-  let m: RegExpExecArray | null;
+  const diagnostics: vscode.Diagnostic[] = [];
   const modelMap = await getModelMap();
+  const ast = php.parseCode(doc.getText(), doc.fileName);
 
-  while ((m = updateRe.exec(text))) {
-    const [fullMatch, modelName, argsLiteral] = m;
-    const fields = modelMap.get(modelName.toLowerCase());
-    if (!fields) {
-      continue;
+  walk(ast, (node) => {
+    if (node.kind !== "call") {
+      return;
     }
 
-    // compute the Range of the entire update(...) call
-    const callStart = doc.positionAt(m.index);
-    const callEnd = doc.positionAt(m.index + fullMatch.length);
-    const callRange = new vscode.Range(callStart, callEnd);
+    /* ── identify $prisma->Model->update() ──────────────────── */
+    const call = node as Call;
+    if (!isPropLookup(call.what)) {
+      return;
+    }
 
-    // find 'data' and 'where' clauses
-    const dataMatch = /['"]data['"]\s*=>\s*\[([\s\S]*?)\]/m.exec(argsLiteral);
-    const whereMatch = /['"]where['"]\s*=>\s*\[([\s\S]*?)\]/m.exec(argsLiteral);
+    const opName = nodeName(call.what.offset);
+    if (opName !== "update") {
+      return;
+    }
 
-    // ❗ require both
-    if (!dataMatch || !whereMatch) {
+    const mdlChain = call.what.what;
+    if (!isPropLookup(mdlChain)) {
+      return;
+    }
+
+    const modelName = nodeName(mdlChain.offset);
+    if (!modelName) {
+      return;
+    }
+
+    const base = mdlChain.what;
+    if (!(isVariable(base) && base.name === "prisma")) {
+      return;
+    }
+
+    /* ── arg must be a single array literal ------------------- */
+    const arg0 = call.arguments?.[0];
+    if (!isArray(arg0)) {
+      return;
+    }
+
+    const items = arg0.items as Entry[];
+
+    /* locate 'data' and 'where' entries */
+    const dataEntry = items.find(
+      (e) => e.key?.kind === "string" && (e.key as any).value === "data"
+    ) as Entry | undefined;
+
+    const whereEntry = items.find(
+      (e) => e.key?.kind === "string" && (e.key as any).value === "where"
+    ) as Entry | undefined;
+
+    if (!dataEntry || !whereEntry) {
       const missing = [
-        !dataMatch ? "'data'" : null,
-        !whereMatch ? "'where'" : null,
+        !dataEntry ? "'data'" : null,
+        !whereEntry ? "'where'" : null,
       ]
         .filter(Boolean)
         .join(" and ");
-      diags.push(
+
+      diagnostics.push(
         new vscode.Diagnostic(
-          callRange,
+          rangeOf(doc, call.loc),
           `update() requires both ${missing} blocks.`,
           vscode.DiagnosticSeverity.Error
         )
       );
-      continue; // skip per-field checks if one is missing
+      return; // skip deeper checks
     }
 
-    // base offset for inner slices
-    const baseOffset = m.index + fullMatch.indexOf(argsLiteral);
-
-    // ── 1) validate `data` just like create ──────────────────────
-    {
-      const dataLiteral = dataMatch[1];
-      const dataOffset =
-        baseOffset +
-        argsLiteral.indexOf(dataMatch[0]) +
-        dataMatch[0].indexOf(dataLiteral);
-
-      const fieldRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
-      let f: RegExpExecArray | null;
-      while ((f = fieldRe.exec(dataLiteral))) {
-        const [, key, rawValue] = f;
-        const info = fields.get(key);
-        const start = doc.positionAt(dataOffset + f.index);
-        const range = new vscode.Range(start, start.translate(0, key.length));
-
-        if (!info) {
-          diags.push(
-            new vscode.Diagnostic(
-              range,
-              `The column "${key}" does not exist in ${modelName}.`,
-              vscode.DiagnosticSeverity.Error
-            )
-          );
-          continue;
-        }
-
-        // your phpDataTypes-based type check here…
-        validateFieldAssignments(
-          doc,
-          dataLiteral,
-          dataOffset,
-          fields,
-          modelName,
-          diags
+    if (!isArray(dataEntry.value) || !isArray(whereEntry.value)) {
+      /* one of them isn’t an array literal → highlight key itself */
+      if (!isArray(dataEntry.value)) {
+        diagnostics.push(
+          new vscode.Diagnostic(
+            rangeOf(doc, dataEntry.key!.loc),
+            "`data` must be an array literal.",
+            vscode.DiagnosticSeverity.Error
+          )
         );
       }
-    }
-
-    // ── 2) validate `where` just like read ──────────────────────
-    {
-      const whereLiteral = whereMatch[1];
-      const whereOffset =
-        baseOffset +
-        argsLiteral.indexOf(whereMatch[0]) +
-        whereMatch[0].indexOf(whereLiteral);
-
-      const fieldRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
-      let f: RegExpExecArray | null;
-      while ((f = fieldRe.exec(whereLiteral))) {
-        const [, key, rawValue] = f;
-        const info = fields.get(key);
-        const start = doc.positionAt(whereOffset + f.index);
-        const range = new vscode.Range(start, start.translate(0, key.length));
-
-        if (!info) {
-          diags.push(
-            new vscode.Diagnostic(
-              range,
-              `The column "${key}" does not exist in ${modelName}.`,
-              vscode.DiagnosticSeverity.Error
-            )
-          );
-          continue;
-        }
-
-        // same type-check as above
-        validateFieldAssignments(
-          doc,
-          whereLiteral,
-          whereOffset,
-          fields,
-          modelName,
-          diags
+      if (!isArray(whereEntry.value)) {
+        diagnostics.push(
+          new vscode.Diagnostic(
+            rangeOf(doc, whereEntry.key!.loc),
+            "`where` must be an array literal.",
+            vscode.DiagnosticSeverity.Error
+          )
         );
       }
+      return;
     }
-  }
 
-  collection.set(doc.uri, diags);
-}
-
-export async function validateDeleteCall(
-  doc: vscode.TextDocument,
-  collection: vscode.DiagnosticCollection
-): Promise<void> {
-  const text = doc.getText();
-  const diags: vscode.Diagnostic[] = [];
-  const deleteRe = /\$prisma->(\w+)->delete\(\s*\[([\s\S]*?)\]\s*\)/g;
-  let m: RegExpExecArray | null;
-  const modelMap = await getModelMap();
-
-  while ((m = deleteRe.exec(text))) {
-    const [fullMatch, modelName, argsLiteral] = m;
-    const fields = modelMap.get(modelName.toLowerCase());
+    /* ── schema for this model -------------------------------- */
+    const fields =
+      typeof modelName === "string"
+        ? modelMap.get(modelName.toLowerCase())
+        : undefined;
     if (!fields) {
-      continue;
-    }
+      return;
+    } // unknown model
 
-    // range covering the entire delete(...) call
-    const callStart = doc.positionAt(m.index);
-    const callEnd = doc.positionAt(m.index + fullMatch.length);
-    const callRange = new vscode.Range(callStart, callEnd);
+    /* ── 1) validate data  (same rules as create) -------------- */
+    for (const item of dataEntry.value.items as Entry[]) {
+      if (!item.key || item.key.kind !== "string") {
+        continue;
+      }
+      const key = (item.key as any).value as string;
+      const value = item.value;
 
-    // ❌ require a 'where' => [ … ]
-    if (!/['"]where['"]\s*=>\s*\[/.test(argsLiteral)) {
-      diags.push(
-        new vscode.Diagnostic(
-          callRange,
-          `delete() requires a 'where' block.`,
-          vscode.DiagnosticSeverity.Error
-        )
-      );
-      continue;
-    }
+      if (PRISMA_OPERATORS.has(key)) {
+        continue;
+      } // allow logical ops
 
-    // extract the inside of where => [ … ]
-    const whereMatch = /['"]where['"]\s*=>\s*\[([\s\S]*?)\]/m.exec(
-      argsLiteral
-    )!;
-    const whereLiteral = whereMatch[1];
-    const whereOffset =
-      m.index +
-      fullMatch.indexOf(whereMatch[0]) +
-      whereMatch[0].indexOf(whereLiteral);
+      if (isArray(value)) {
+        // nested array field
+        validateFieldAssignments(
+          doc,
+          printArrayLiteral(value),
+          value.loc!.start.offset,
+          fields,
+          typeof modelName === "string" ? modelName : "",
+          diagnostics
+        );
+        continue;
+      }
 
-    // same per-field checks as read/update
-    const fieldRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
-    let f: RegExpExecArray | null;
-    while ((f = fieldRe.exec(whereLiteral))) {
-      const [, key, rawValue] = f;
       const info = fields.get(key);
-      const start = doc.positionAt(whereOffset + f.index);
-      const range = new vscode.Range(start, start.translate(0, key.length));
+      const range = rangeOf(doc, item.key.loc);
 
       if (!info) {
-        diags.push(
+        diagnostics.push(
           new vscode.Diagnostic(
             range,
             `The column "${key}" does not exist in ${modelName}.`,
@@ -1600,19 +1656,124 @@ export async function validateDeleteCall(
         continue;
       }
 
-      // type‐check against phpDataTypes (just copy your existing logic here)
-      validateFieldAssignments(
-        doc,
-        whereLiteral,
-        whereOffset,
-        fields,
-        modelName,
-        diags
-      );
+      const rawExpr = doc.getText(rangeOf(doc, value.loc));
+      if (!isValidPhpType(rawExpr.trim(), info)) {
+        const expected = info.isList ? `${info.type}[]` : info.type;
+        diagnostics.push(
+          new vscode.Diagnostic(
+            range,
+            `"${key}" expects ${expected}, but received "${rawExpr}".`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      }
     }
-  }
 
-  collection.set(doc.uri, diags);
+    /* ── 2) validate where  (same helper as read) -------------- */
+    validateWhereArray(
+      doc,
+      whereEntry.value,
+      fields,
+      typeof modelName === "string" ? modelName : "",
+      diagnostics
+    );
+  });
+
+  collection.set(doc.uri, diagnostics);
+}
+
+/**  Validate  $prisma->Model->delete([ 'where' => [ … ] ])  */
+export async function validateDeleteCall(
+  doc: vscode.TextDocument,
+  collection: vscode.DiagnosticCollection
+): Promise<void> {
+  const diagnostics: vscode.Diagnostic[] = [];
+  const modelMap = await getModelMap();
+  const ast = php.parseCode(doc.getText(), doc.fileName);
+
+  walk(ast, (node) => {
+    if (node.kind !== "call") {
+      return;
+    }
+
+    /* ── localizar $prisma->Model->delete() ─────────────────── */
+    const call = node as Call;
+    if (!isPropLookup(call.what)) {
+      return;
+    }
+
+    const opName = nodeName(call.what.offset);
+    if (opName !== "delete") {
+      return;
+    }
+
+    const mdlChain = call.what.what;
+    if (!isPropLookup(mdlChain)) {
+      return;
+    }
+
+    const modelName = nodeName(mdlChain.offset);
+    if (!modelName) {
+      return;
+    }
+
+    const base = mdlChain.what;
+    if (!(isVariable(base) && base.name === "prisma")) {
+      return;
+    }
+
+    /* ── arg0 debe ser array literal -------------------------- */
+    const arrayArg = call.arguments?.[0];
+    if (!isArray(arrayArg)) {
+      return;
+    } // delete(); sin array
+
+    const items = arrayArg.items as Entry[];
+    const whereEntry = items.find(
+      (e) => e.key?.kind === "string" && (e.key as any).value === "where"
+    ) as Entry | undefined;
+
+    /* ① 'require where' -------------------------------------- */
+    if (!whereEntry) {
+      diagnostics.push(
+        new vscode.Diagnostic(
+          rangeOf(doc, call.loc),
+          "delete() requires a 'where' block.",
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      return;
+    }
+    if (!isArray(whereEntry.value)) {
+      diagnostics.push(
+        new vscode.Diagnostic(
+          rangeOf(doc, whereEntry.key!.loc),
+          "`where` must be an array literal.",
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      return;
+    }
+
+    /* ② schema y validación de campos ------------------------ */
+    const fields =
+      typeof modelName === "string"
+        ? modelMap.get(modelName.toLowerCase())
+        : undefined;
+    if (!fields) {
+      return;
+    } // modelo desconocido
+
+    validateWhereArray(
+      doc,
+      whereEntry.value,
+      fields,
+      typeof modelName === "string" ? modelName : "",
+      diagnostics
+    );
+  });
+
+  collection.set(doc.uri, diagnostics);
 }
 
 type NativeInfo = { sig: string; jsDoc?: string };

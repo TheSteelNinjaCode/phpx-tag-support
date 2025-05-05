@@ -57,6 +57,7 @@
   "license": "MIT",
   "dependencies": {
     "fast-xml-parser": "^5.2.1",
+    "php-parser": "^3.2.3",
     "typescript": "^5.8.3"
   }
 }
