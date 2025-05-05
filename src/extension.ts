@@ -884,6 +884,14 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
           }
 
+          // don’t trigger inside a value string (after `=>`)
+          const lineToCursor = doc.getText(
+            new vscode.Range(new vscode.Position(pos.line, 0), pos)
+          );
+          if (/=>\s*['"][^'"]*$/.test(lineToCursor)) {
+            return [];
+          }
+
           /* 4️⃣ construir sugerencias ----------------------------------- */
           const map = await getModelMap();
           const fields = map.get(target.model.toLowerCase());
@@ -1255,9 +1263,6 @@ function walk(node: Node, visit: (n: Node) => void) {
   }
 }
 
-function printNode(n: Node | null) {
-  return n ? JSON.stringify(n, null, 2) : "";
-}
 function locToRange(
   doc: vscode.TextDocument,
   loc: { start: { offset: number }; end: { offset: number } }
@@ -1493,24 +1498,25 @@ function validateWhereArray(
     if (!item.key || item.key.kind !== "string") {
       continue;
     }
-    const key = (item.key as any)?.value as string;
+    const key = (item.key as any).value as string;
 
-    // A) logical / operator keys -------------------------------
+    // ── 1) skip Prisma operators entirely ───────────────────
+    //    (but still recurse into their inner arrays)
     if (PRISMA_OPERATORS.has(key)) {
-      if (item.value) {
+      if (item.value && isArray(item.value)) {
         validateWhereArray(doc, item.value, fields, model, out);
       }
       continue;
     }
 
-    // B) real column name --------------------------------------
+    // ── 2) now you can safely treat everything else as a real column
     const info = fields.get(key);
-    const range = locToRange(doc, item.key.loc!);
+    const keyRange = locToRange(doc, item.key.loc!);
 
     if (!info) {
       out.push(
         new vscode.Diagnostic(
-          range,
+          keyRange,
           `The column "${key}" does not exist in ${model}.`,
           vscode.DiagnosticSeverity.Error
         )
@@ -1518,12 +1524,15 @@ function validateWhereArray(
       continue;
     }
 
-    /* scalar / list / var checks stay exactly as in your old code */
-    if (!isValidPhpType(printNode(item.value), info)) {
+    // ── 3) extract the *actual* PHP text of the value and type‐check
+    const valueRange = locToRange(doc, item.value.loc!);
+    const rawExpr = doc.getText(valueRange).trim();
+    if (!isValidPhpType(rawExpr, info)) {
+      const expected = info.isList ? `${info.type}[]` : info.type;
       out.push(
         new vscode.Diagnostic(
-          range,
-          `"${key}" expects ${info.type}${info.isList ? "[]" : ""}.`,
+          keyRange,
+          `"${key}" expects ${expected}, but received "${rawExpr}".`,
           vscode.DiagnosticSeverity.Error
         )
       );
