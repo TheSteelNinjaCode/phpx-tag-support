@@ -949,7 +949,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
           // ————— Special case: inside a where-filter of a *field* —————
           if (currentRoot === "where") {
-            // ② only consider true Entry nodes
+            // 1️⃣ Grab the actual `where` array entry
             const whereEntry = (argsArr as PhpArray).items
               .filter(isEntry)
               .find(
@@ -958,34 +958,27 @@ export async function activate(context: vscode.ExtensionContext) {
                   (e.key as any).value === "where" &&
                   isArray(e.value)
               );
-
             if (whereEntry) {
               const whereArr = whereEntry.value as PhpArray;
-              // ② look at each field => value pair inside that where array
-              for (const maybeEntry of whereArr.items) {
-                if (!isEntry(maybeEntry)) {
-                  continue;
-                }
-                const fieldEntry = maybeEntry;
+
+              // 2️⃣ Now look at each "field => array" inside `where`
+              for (const e of whereArr.items.filter(isEntry)) {
                 if (
-                  fieldEntry.key?.kind === "string" &&
-                  isArray(fieldEntry.value) &&
-                  fieldEntry.value.loc
+                  e.key?.kind === "string" &&
+                  isArray(e.value) &&
+                  e.value.loc
                 ) {
-                  const filterStart =
-                    lastPrisma + fieldEntry.value.loc.start.offset;
-                  const filterEnd =
-                    lastPrisma + fieldEntry.value.loc.end.offset;
-                  if (curOffset >= filterStart && curOffset <= filterEnd) {
-                    // ▶ you’re inside the [ … ] for a particular field filter!
-                    return FILTER_OPERATORS.map((op): vscode.CompletionItem => {
+                  const s = lastPrisma + e.value.loc.start.offset;
+                  const t = lastPrisma + e.value.loc.end.offset;
+                  // 3️⃣ If cursor is anywhere inside THAT inner array, show filter ops
+                  if (curOffset >= s && curOffset <= t) {
+                    return FILTER_OPERATORS.map((op) => {
                       const it = new vscode.CompletionItem(
                         op,
                         vscode.CompletionItemKind.Keyword
                       );
-                      // insert `'contains' => $0` etc.
                       it.insertText = new vscode.SnippetString(`${op}' => $0`);
-                      // replace the opening-quote + partial text
+                      // replace the opening quote + any partial
                       const replaceStart = pos.translate(0, -already.length);
                       const replaceEnd = pos.translate(0, 1);
                       it.range = new vscode.Range(replaceStart, replaceEnd);
@@ -1003,6 +996,7 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
           }
           const fields = [...fieldMap.entries()];
+          console.log("🚀 ~ provideCompletionItems ~ fields:", fields);
 
           // only some rootKeys make sense to suggest columns:
           if (
@@ -1017,25 +1011,46 @@ export async function activate(context: vscode.ExtensionContext) {
             ].includes(currentRoot)
           ) {
             return fields.map(([name, info]) => {
-              const label = `${name}${info.isList ? "[]" : ""}`;
+              // — build your human-readable type string once:
+              const fmtType = `${info.type}${info.isList ? "[]" : ""}`;
+
+              // — decide if it’s optional, just as you showed:
+              const optional = !info.required || info.nullable;
+
+              // — construct the label object
+              const labelObj: vscode.CompletionItemLabel = {
+                label: optional ? `${name}?` : name,
+                detail: `: ${fmtType}`, // shows to the right of the label
+                // description: "…"           // you could also add a description line here
+              };
+
+              // — feed that object straight into the CompletionItem
               const item = new vscode.CompletionItem(
-                label,
+                labelObj,
                 vscode.CompletionItemKind.Field
               );
+
+              // — what gets inserted when you pick it
               item.insertText = new vscode.SnippetString(
                 `${name}' => ${
-                  currentRoot === "select" ||
-                  currentRoot === "include" ||
-                  currentRoot === "omit"
+                  ["select", "include", "omit"].includes(currentRoot)
                     ? "true"
                     : "$0"
                 }`
               );
 
-              // overwrite exactly the opening‐quote + any partial you typed
+              // — richer hover/documentation popup
+              const md = new vscode.MarkdownString();
+              md.appendMarkdown(`**Type**: \`${fmtType}\`\n\n`);
+              md.appendMarkdown(`- **Required**: ${info.required}\n`);
+              md.appendMarkdown(`- **Nullable**: ${info.nullable}\n`);
+              item.documentation = md;
+
+              // — same replacement logic you already have
               const replaceStart = pos.translate(0, -already.length);
-              const replaceEnd = pos.translate(0, 1); // Define replaceEnd
+              const replaceEnd = pos.translate(0, 1);
               item.range = new vscode.Range(replaceStart, replaceEnd);
+
               return item;
             });
           }
