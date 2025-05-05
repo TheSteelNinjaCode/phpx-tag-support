@@ -424,13 +424,20 @@ function validatePphpCalls(
       .map((p) => p.trim())
       .filter((p) => !!p);
 
+    // detect whether there’s a rest-parameter (e.g. "...prefixes: string[]")
+    const hasRest = expectedParams.some((p) => p.startsWith("..."));
+    // everything that isn’t the rest-param
+    const nonRest = expectedParams.filter((p) => !p.startsWith("..."));
+
     // count what the user actually passed
     const passedCount = argsText.trim() === "" ? 0 : splitArgs(argsText).length;
 
-    // figure out how many *required* parameters there are
-    const requiredCount = expectedParams.filter((p) => !p.includes("?")).length;
+    // only non-rest params contribute to “required” count
+    const requiredCount = nonRest.filter((p) => !p.includes("?")).length;
+    // if there *is* a rest param, there’s no upper limit
+    const maxCount = hasRest ? Infinity : expectedParams.length;
 
-    if (passedCount < requiredCount || passedCount > expectedParams.length) {
+    if (passedCount < requiredCount || passedCount > maxCount) {
       // figure out where in the document this call happened
       const callStart = document.positionAt(m.index);
       const callEnd = document.positionAt(m.index + m[0].length);
@@ -1161,9 +1168,9 @@ export async function getModelMap(): Promise<ModelMap> {
     for (const f of model.fields) {
       fields.set(f.name, {
         type: f.type,
-        required: !f.isNullable && !f.hasDefaultValue && !f.relationName,
+        required: !f.isRequired && !f.hasDefaultValue && !f.relationName,
         isList: f.isList,
-        nullable: f.isNullable,
+        nullable: !f.isRequired,
       });
     }
     cache.set(model.name.toLowerCase(), fields); // user → …
@@ -1267,9 +1274,17 @@ function isValidPhpType(expr: string, info: FieldInfo): boolean {
   const isArray = /^\[.*\]$/.test(expr);
   const isVar = /^\$[A-Za-z_]\w*/.test(expr);
   const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(expr);
+  const isNull = /^null$/i.test(expr);
+  console.log("🚀 ~ isValidPhpType ~ isNull:", isNull);
+  console.log("🚀 ~ isValidPhpType ~ expr:", expr);
+  console.log("🚀 ~ isValidPhpType ~ info:", info);
 
   if (isVar) {
     return true;
+  }
+
+  if (isNull) {
+    return info.nullable === true;
   }
 
   return allowed.some((t) => {
