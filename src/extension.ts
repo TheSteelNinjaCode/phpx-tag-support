@@ -928,11 +928,35 @@ export async function activate(context: vscode.ExtensionContext) {
                 (optional ? optLabel : reqLabel)
             );
 
-            /* rango a reemplazar */
-            const replaceStart = target
-              ? pos.translate(0, -target.already.length)
-              : pos;
+            /* rango a reemplazar --------------------------------------- */
+            let replaceStart = pos;
+            if (target) {
+              replaceStart = pos.translate(0, -target.already.length);
+            }
             const replaceEnd = hasClose ? pos.translate(0, 1) : pos;
+
+            /* 🆕 ¿hay ya una comilla antes de lo que escribió el usuario? */
+            const charBeforePos = replaceStart.translate(0, -1);
+            const charBefore = doc.getText(
+              new vscode.Range(charBeforePos, replaceStart)
+            );
+            const openingExists = charBefore === quote;
+
+            if (openingExists) {
+              replaceStart = charBeforePos; // extiende el rango 1 char a la izda
+            }
+
+            /* y ahora el snippet -------------------------------------- */
+            if (isSelect) {
+              item.insertText = new vscode.SnippetString(
+                `${openingExists ? "" : quote}${name}${quote} => true`
+              );
+            } else {
+              item.insertText = new vscode.SnippetString(
+                `${openingExists ? "" : quote}${name}${quote} => $0`
+              );
+            }
+
             item.range = new vscode.Range(replaceStart, replaceEnd);
 
             /* snippet de inserción */
