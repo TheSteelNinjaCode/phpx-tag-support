@@ -763,7 +763,37 @@ export async function activate(context: vscode.ExtensionContext) {
     );
   }
 
-  // ── after your prismaOps set ─────────────────────────────────────
+  // ❶ ▶︎ Declare once at the top:
+  const ROOT_KEYS_MAP = {
+    create: ["data", "include", "omit", "select"] as const,
+    findMany: [
+      "where",
+      "select",
+      "include",
+      "orderBy",
+      "take",
+      "skip",
+      "cursor",
+      "distinct",
+    ] as const,
+    findFirst: [
+      "where",
+      "select",
+      "include",
+      "omit",
+      "orderBy",
+      "take",
+      "skip",
+      "cursor",
+      "distinct",
+    ] as const,
+    findUnique: ["where", "include", "omit", "select"] as const,
+    update: ["data", "where", "include", "omit", "select"] as const,
+    delete: ["where", "include", "omit", "select"] as const,
+  };
+  type PrismaOp = keyof typeof ROOT_KEYS_MAP;
+  type RootKey = (typeof ROOT_KEYS_MAP)[PrismaOp][number];
+
   const FILTER_OPERATORS = [
     "contains",
     "startsWith",
@@ -777,37 +807,28 @@ export async function activate(context: vscode.ExtensionContext) {
     "equals",
     "not",
   ] as const;
+  type FilterOp = (typeof FILTER_OPERATORS)[number];
+  // ① add this helper somewhere accessible
+  function isEntry(node: any): node is Entry {
+    return node.kind === "entry";
+  }
 
-  // ── AST‑driven Prisma field‑completion ──────────────────────────
+  // ❷ ▶︎ In your provider:
   function registerPrismaFieldProvider(): vscode.Disposable {
-    const prismaOps = new Set([
-      "create",
-      "findMany",
-      "findFirst",
-      "findUnique",
-      "update",
-      "delete",
-    ]);
-
-    type BlockKind = "data" | "where" | "select" | "include";
-
     return vscode.languages.registerCompletionItemProvider(
       "php",
       {
         async provideCompletionItems(doc, pos) {
-          /* 1️⃣ slice desde el último $prisma-> hasta el cursor ---------- */
+          // ————— Extract snippet & parse AST (unchanged) —————
           const before = doc.getText(
             new vscode.Range(new vscode.Position(0, 0), pos)
           );
-          const last = before.lastIndexOf("$prisma->");
-          if (last === -1) {
+          const lastPrisma = before.lastIndexOf("$prisma->");
+          console.log("🚀 ~ provideCompletionItems ~ lastPrisma:", lastPrisma);
+          if (lastPrisma === -1) {
             return;
           }
-
-          const tail = before.slice(last);
-          const offsetBase = last;
-
-          /* 2️⃣ parseEval del fragmento --------------------------------- */
+          const tail = before.slice(lastPrisma);
           let ast: Node;
           try {
             ast = php.parseEval(tail);
@@ -815,203 +836,216 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
           }
 
-          /* 3️⃣ localizar la llamada y el bloque donde está el cursor ---- */
-          let target:
-            | {
-                model: string;
-                block: BlockKind;
-                already: string;
+          const alreadyMatch = /['"]([\w]*)$/.exec(before);
+          const already = alreadyMatch ? alreadyMatch[1] : "";
+
+          // ————— Find the call, the op and the model —————
+          let callNode: Call | undefined,
+            opName: PrismaOp | undefined,
+            modelName: string | undefined;
+          walk(ast, (n) => {
+            if (callNode) {
+              return;
+            }
+            if (n.kind !== "call") {
+              return;
+            }
+            const c = n as Call;
+            if (!isPropLookup(c.what)) {
+              return;
+            }
+            const op = nodeName(c.what.offset) as PrismaOp;
+            if (!(op in ROOT_KEYS_MAP)) {
+              return;
+            }
+            const mChain = c.what.what;
+            if (!isPropLookup(mChain)) {
+              return;
+            }
+            const mdl = nodeName(mChain.offset);
+            if (!mdl) {
+              return;
+            }
+            callNode = c;
+            opName = op;
+            modelName = typeof mdl === "string" ? mdl.toLowerCase() : "";
+          });
+          if (!callNode || !opName || !modelName) {
+            return;
+          }
+
+          const rootKeys = ROOT_KEYS_MAP[opName] as readonly RootKey[];
+          const curOffset = doc.offsetAt(pos);
+
+          // ————— Are we directly inside the top-level array? —————
+          const argsArr = callNode.arguments?.[0];
+          if (isArray(argsArr) && argsArr.loc) {
+            const arrStart = lastPrisma + argsArr.loc.start.offset;
+            const arrEnd = lastPrisma + argsArr.loc.end.offset;
+
+            if (curOffset >= arrStart && curOffset <= arrEnd) {
+              // check if we're *not* inside any nested block
+              const inNested = (argsArr.items as Entry[]).some((item) => {
+                if (item.key?.kind !== "string") {
+                  return false;
+                }
+                const k = (item.key as any).value as RootKey;
+                if (!rootKeys.includes(k)) {
+                  return false;
+                }
+                if (!item.value?.loc) {
+                  return false;
+                }
+                const start = lastPrisma + item.value.loc.start.offset;
+                const end = lastPrisma + item.value.loc.end.offset;
+                return curOffset >= start && curOffset <= end;
+              });
+              if (!inNested) {
+                // ▶︎ suggest root keys: "'where' => $0", etc.
+                return rootKeys.map((rk): vscode.CompletionItem => {
+                  const it = new vscode.CompletionItem(
+                    `${rk}`,
+                    vscode.CompletionItemKind.Keyword
+                  );
+                  it.insertText = new vscode.SnippetString(`${rk}' => [$0]`);
+                  // overwrite exactly the opening‐quote + any partial you typed
+                  const replaceStart = pos.translate(0, -already.length);
+                  const replaceEnd = pos.translate(0, 1); // Define replaceEnd
+                  it.range = new vscode.Range(replaceStart, replaceEnd);
+                  return it;
+                });
               }
-            | undefined;
-
-          walk(ast, (node) => {
-            if (target || node.kind !== "call") {
-              return;
             }
+          }
 
-            const call = node as Call;
-            if (!isPropLookup(call.what)) {
-              return;
+          // ————— Are we inside a nested array for one of those rootKeys? —————
+          // loop over first-level entries to see which block we’re in:
+          let currentRoot: RootKey | undefined;
+          let nestedArrLoc: { start: number; end: number } | undefined;
+          for (const entry of (argsArr as PhpArray).items as Entry[]) {
+            if (
+              entry.key?.kind !== "string" ||
+              !entry.value ||
+              !entry.value.loc
+            ) {
+              continue;
             }
-
-            const op = nodeName(call.what.offset);
-            if (typeof op !== "string" || !prismaOps.has(op)) {
-              return;
+            const key = (entry.key as any).value as RootKey;
+            if (!rootKeys.includes(key)) {
+              continue;
             }
-
-            const mdlChain = call.what.what;
-            if (!isPropLookup(mdlChain)) {
-              return;
-            }
-            const model = nodeName(mdlChain.offset);
-            if (!model) {
-              return;
-            }
-
-            const base = mdlChain.what;
-            if (!(isVariable(base) && base.name === "prisma")) {
-              return;
-            }
-
-            const arr = call.arguments?.[0];
-            if (!arr || !isArray(arr) || !arr.loc) {
-              return;
-            }
-
-            const cur = doc.offsetAt(pos);
-            const absArrStart = offsetBase + arr.loc.start.offset;
-            const absArrEnd = offsetBase + arr.loc.end.offset;
-            if (cur < absArrStart || cur > absArrEnd) {
-              return;
-            }
-
-            for (const entry of arr.items as Entry[]) {
-              if (!entry.key || entry.key.kind !== "string" || !entry.value) {
-                continue;
-              }
-              const key = (entry.key as any).value as string as BlockKind;
-              if (!["data", "where", "select", "include"].includes(key)) {
-                continue;
-              }
-
-              if (!isArray(entry.value) || !entry.value.loc) {
-                continue;
-              }
-
-              const absStart = offsetBase + entry.value.loc.start.offset;
-              const absEnd = offsetBase + entry.value.loc.end.offset;
-              if (cur < absStart || cur > absEnd) {
-                continue;
-              }
-
-              const alreadyMatch = /['"]([\w]*)$/.exec(before);
-              const already = alreadyMatch ? alreadyMatch[1] : "";
-
-              target = {
-                model: typeof model === "string" ? model : "",
-                block: key,
-                already,
-              };
+            const s = lastPrisma + entry.value.loc.start.offset;
+            const e = lastPrisma + entry.value.loc.end.offset;
+            if (curOffset >= s && curOffset <= e) {
+              currentRoot = key;
+              nestedArrLoc = { start: s, end: e };
               break;
             }
-          });
+          }
 
-          if (!target) {
+          if (!currentRoot || !nestedArrLoc) {
             return;
           }
 
-          // don’t trigger inside a value string (after `=>`)
-          const lineToCursor = doc.getText(
-            new vscode.Range(new vscode.Position(pos.line, 0), pos)
-          );
-          if (/=>\s*['"][^'"]*$/.test(lineToCursor)) {
-            return [];
+          // ————— Special case: inside a where-filter of a *field* —————
+          if (currentRoot === "where") {
+            // ② only consider true Entry nodes
+            const whereEntry = (argsArr as PhpArray).items
+              .filter(isEntry)
+              .find(
+                (e) =>
+                  e.key?.kind === "string" &&
+                  (e.key as any).value === "where" &&
+                  isArray(e.value)
+              );
+
+            if (whereEntry) {
+              const whereArr = whereEntry.value as PhpArray;
+              // ② look at each field => value pair inside that where array
+              for (const maybeEntry of whereArr.items) {
+                if (!isEntry(maybeEntry)) {
+                  continue;
+                }
+                const fieldEntry = maybeEntry;
+                if (
+                  fieldEntry.key?.kind === "string" &&
+                  isArray(fieldEntry.value) &&
+                  fieldEntry.value.loc
+                ) {
+                  const filterStart =
+                    lastPrisma + fieldEntry.value.loc.start.offset;
+                  const filterEnd =
+                    lastPrisma + fieldEntry.value.loc.end.offset;
+                  if (curOffset >= filterStart && curOffset <= filterEnd) {
+                    // ▶ you’re inside the [ … ] for a particular field filter!
+                    return FILTER_OPERATORS.map((op): vscode.CompletionItem => {
+                      const it = new vscode.CompletionItem(
+                        op,
+                        vscode.CompletionItemKind.Keyword
+                      );
+                      // insert `'contains' => $0` etc.
+                      it.insertText = new vscode.SnippetString(`${op}' => $0`);
+                      // replace the opening-quote + partial text
+                      const replaceStart = pos.translate(0, -already.length);
+                      const replaceEnd = pos.translate(0, 1);
+                      it.range = new vscode.Range(replaceStart, replaceEnd);
+                      return it;
+                    });
+                  }
+                }
+              }
+            }
           }
 
-          /* 4️⃣ construir sugerencias ----------------------------------- */
-          const map = await getModelMap();
-          const fields = map.get(target.model.toLowerCase());
-          if (!fields) {
+          // ————— Otherwise: suggest *model fields* for blocks that accept fields —————
+          const fieldMap = (await getModelMap()).get(modelName);
+          if (!fieldMap) {
             return;
           }
+          const fields = [...fieldMap.entries()];
 
-          const quote = /["']$/.exec(before)?.[0] ?? "'";
-          const nextChar = doc.getText(
-            new vscode.Range(pos, pos.translate(0, 1))
-          );
-          const hasClose = nextChar === quote;
-          const isWhere = target.block === "where";
-          const isSelect = target.block === "select";
-          const isInclude = target.block === "include";
-
-          const optLabel = isWhere
-            ? "*optional filter*"
-            : isSelect || isInclude
-            ? "*field to return*"
-            : "*optional field*";
-          const reqLabel = isWhere ? "*required filter*" : "*required field*";
-
-          const fmt = (f: FieldInfo) =>
-            `${f.type}${f.isList ? "[]" : ""}${f.nullable ? " | null" : ""}`;
-
-          return [...fields.entries()].map(([name, info]) => {
-            const optional = isSelect
-              ? true
-              : isInclude
-              ? true
-              : !info.required;
-
-            const label: vscode.CompletionItemLabel = {
-              label: optional ? `${name}?` : name,
-              detail: `: ${fmt(info)}`,
-            };
-
-            const item = new vscode.CompletionItem(
-              label,
-              vscode.CompletionItemKind.Field
-            );
-
-            /* documentación */
-            item.documentation = new vscode.MarkdownString(
-              `\`${label.label}${label.detail}\`\n\n` +
-                (optional ? optLabel : reqLabel)
-            );
-
-            /* rango a reemplazar --------------------------------------- */
-            let replaceStart = pos;
-            if (target) {
-              replaceStart = pos.translate(0, -target.already.length);
-            }
-            const replaceEnd = hasClose ? pos.translate(0, 1) : pos;
-
-            /* 🆕 ¿hay ya una comilla antes de lo que escribió el usuario? */
-            const charBeforePos = replaceStart.translate(0, -1);
-            const charBefore = doc.getText(
-              new vscode.Range(charBeforePos, replaceStart)
-            );
-            const openingExists = charBefore === quote;
-
-            if (openingExists) {
-              replaceStart = charBeforePos; // extiende el rango 1 char a la izda
-            }
-
-            /* y ahora el snippet -------------------------------------- */
-            if (isSelect) {
-              item.insertText = new vscode.SnippetString(
-                `${openingExists ? "" : quote}${name}${quote} => true`
+          // only some rootKeys make sense to suggest columns:
+          if (
+            [
+              "data",
+              "where",
+              "select",
+              "include",
+              "orderBy",
+              "distinct",
+              "omit",
+            ].includes(currentRoot)
+          ) {
+            return fields.map(([name, info]) => {
+              const label = `${name}${info.isList ? "[]" : ""}`;
+              const item = new vscode.CompletionItem(
+                label,
+                vscode.CompletionItemKind.Field
               );
-            } else {
               item.insertText = new vscode.SnippetString(
-                `${openingExists ? "" : quote}${name}${quote} => $0`
+                `${name}' => ${
+                  currentRoot === "select" ||
+                  currentRoot === "include" ||
+                  currentRoot === "omit"
+                    ? "true"
+                    : "$0"
+                }`
               );
-            }
 
-            item.range = new vscode.Range(replaceStart, replaceEnd);
+              // overwrite exactly the opening‐quote + any partial you typed
+              const replaceStart = pos.translate(0, -already.length);
+              const replaceEnd = pos.translate(0, 1); // Define replaceEnd
+              item.range = new vscode.Range(replaceStart, replaceEnd);
+              return item;
+            });
+          }
 
-            /* snippet de inserción */
-            if (isSelect) {
-              item.insertText = new vscode.SnippetString(
-                `${quote}${name}${quote} => true`
-              );
-            } else if (isInclude) {
-              item.insertText = new vscode.SnippetString(
-                `${quote}${name}${quote} => true`
-              );
-            } else {
-              item.insertText = new vscode.SnippetString(
-                `${quote}${name}${quote} => $0`
-              );
-            }
-
-            item.sortText = `0_${name}`;
-            item.filterText = `${quote}${name}`;
-
-            return item;
-          });
+          // no suggestions otherwise
+          return;
         },
       },
-      "'",
-      '"'
+      "'", // trigger on quotes
+      '"' // and double-quotes
     );
   }
 
