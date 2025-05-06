@@ -245,8 +245,8 @@ export declare class PPHP {
   getCookie(name: string): string | null;
 }
 export declare class PPHPLocalStore {
+  state: LocalStoreState;
   private static instance;
-  private state;
   private listeners;
   private pphp;
   private STORAGE_KEY;

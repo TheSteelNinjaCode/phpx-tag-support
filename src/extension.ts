@@ -665,6 +665,13 @@ export async function activate(context: vscode.ExtensionContext) {
           }
 
           const [, root, partial] = m; // root = "user"
+
+          const special = new Set(["pphp", "store", "searchParams"]);
+          if (special.has(root)) {
+            // let your dedicated pphp/store/searchParams provider handle it
+            return;
+          }
+
           const stubProps = globalStubs[root] ?? [];
 
           /* ② build the list – project props first ---------------------- */
