@@ -826,6 +826,74 @@ export async function activate(context: vscode.ExtensionContext) {
     return node.kind === "entry";
   }
 
+  /**  Return "key", "value" or null for the given Entry + cursor  */
+  function sectionOfEntry(
+    entry: Entry,
+    curOffset: number,
+    baseOffset: number
+  ): "key" | "value" | null {
+    /* ① key not written yet – PHP short‑form entry */
+    if (!entry.key && entry.value?.loc) {
+      const vs = baseOffset + entry.value.loc.start.offset;
+      const ve = baseOffset + entry.value.loc.end.offset;
+      if (curOffset >= vs && curOffset <= ve) {
+        return "key"; // ← treat it as the *key* the user is typing
+      }
+    }
+
+    /* ② normal key range */
+    if (entry.key?.loc) {
+      const ks = baseOffset + entry.key.loc.start.offset;
+      const ke = baseOffset + entry.key.loc.end.offset;
+      if (curOffset >= ks && curOffset <= ke) {
+        return "key";
+      }
+    }
+
+    /* ③ normal value range */
+    if (entry.value?.loc) {
+      const vs = baseOffset + entry.value.loc.start.offset;
+      const ve = baseOffset + entry.value.loc.end.offset;
+      if (curOffset >= vs && curOffset <= ve) {
+        return "value";
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Return the PhpArray literal in which the cursor sits,
+   * starting from `argsArr` (the first call‑argument).
+   */
+  function arrayUnderCursor(
+    arr: PhpArray,
+    cur: number,
+    base: number
+  ): PhpArray | null {
+    if (!arr.loc) {
+      return null;
+    }
+
+    const start = base + arr.loc.start.offset;
+    const end = base + arr.loc.end.offset;
+    if (cur < start || cur > end) {
+      return null;
+    } // cursor is outside
+
+    // look first at every child‑array → return the *deepest* one
+    for (const it of arr.items.filter(isEntry)) {
+      if (isArray(it.value)) {
+        const deeper = arrayUnderCursor(it.value, cur, base);
+        if (deeper) {
+          return deeper;
+        }
+      }
+    }
+    // none of the children matched ⇒ this literal is the host
+    return arr;
+  }
+
   // ❷ ▶︎ In your provider:
   function registerPrismaFieldProvider(): vscode.Disposable {
     return vscode.languages.registerCompletionItemProvider(
@@ -891,6 +959,23 @@ export async function activate(context: vscode.ExtensionContext) {
 
           // ————— Are we directly inside the top-level array? —————
           const argsArr = callNode.arguments?.[0];
+          const hostArray = isArray(argsArr)
+            ? arrayUnderCursor(argsArr, curOffset, lastPrisma)
+            : null;
+
+          if (!hostArray) {
+            return;
+          }
+
+          // ── within that literal, which entry/side is it? ─────────────
+          let entrySide: "key" | "value" | null = null;
+          for (const ent of hostArray.items.filter(isEntry)) {
+            entrySide = sectionOfEntry(ent, curOffset, lastPrisma);
+            if (entrySide) {
+              break;
+            }
+          }
+
           if (isArray(argsArr) && argsArr.loc) {
             const arrStart = lastPrisma + argsArr.loc.start.offset;
             const arrEnd = lastPrisma + argsArr.loc.end.offset;
@@ -955,7 +1040,7 @@ export async function activate(context: vscode.ExtensionContext) {
             }
           }
 
-          if (!currentRoot || !nestedArrLoc) {
+          if (!currentRoot || !nestedArrLoc || entrySide !== "key") {
             return;
           }
 
@@ -1282,9 +1367,6 @@ function isValidPhpType(expr: string, info: FieldInfo): boolean {
   const isVar = /^\$[A-Za-z_]\w*/.test(expr);
   const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(expr);
   const isNull = /^null$/i.test(expr);
-  console.log("🚀 ~ isValidPhpType ~ isNull:", isNull);
-  console.log("🚀 ~ isValidPhpType ~ expr:", expr);
-  console.log("🚀 ~ isValidPhpType ~ info:", info);
 
   if (isVar) {
     return true;
