@@ -1333,6 +1333,82 @@ function validateFieldAssignments(
   }
 }
 
+/**
+ * Validate a `['col' => <expr>, …]` literal inside a select/include block.
+ *  • unknown columns ⇒ error
+ *  • non-boolean values ⇒ error
+ */
+function validateSelectIncludeBlock(
+  doc: vscode.TextDocument,
+  literal: string,
+  offset: number,
+  fields: Map<string, FieldInfo>,
+  modelName: string,
+  diags: vscode.Diagnostic[]
+) {
+  const selRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
+  let m: RegExpExecArray | null;
+
+  while ((m = selRe.exec(literal))) {
+    const key = m[1];
+    const raw = m[2].trim();
+    const info = fields.get(key);
+
+    // compute a range that covers just the key
+    const start = doc.positionAt(offset + m.index);
+    const range = new vscode.Range(start, start.translate(0, key.length));
+
+    // 1) unknown column
+    if (!info) {
+      diags.push(
+        new vscode.Diagnostic(
+          range,
+          `The column "${key}" does not exist in ${modelName}.`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      continue;
+    }
+
+    // 2) must be a literal boolean
+    if (!/^(true|false)$/i.test(raw)) {
+      diags.push(
+        new vscode.Diagnostic(
+          range,
+          `\`select\`/ \`include\` for "${key}" expects a boolean, but got "${raw}".`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    }
+  }
+}
+
+/**
+ * Within a PhpArray literal, find both "select" and "include" entries
+ * and run `validateSelectIncludeBlock` on them.
+ */
+function validateSelectIncludeEntries(
+  doc: vscode.TextDocument,
+  arr: PhpArray,
+  fields: Map<string, FieldInfo>,
+  modelName: string,
+  diags: vscode.Diagnostic[]
+) {
+  for (const prop of ["select", "include"] as const) {
+    const entry = (arr.items as Entry[]).find(
+      (e) => e.key?.kind === "string" && (e.key as any).value === prop
+    );
+    if (entry?.value?.loc && isArray(entry.value)) {
+      const start = entry.value.loc.start.offset;
+      const end = entry.value.loc.end.offset;
+      const lit = doc.getText(
+        new vscode.Range(doc.positionAt(start), doc.positionAt(end))
+      );
+      validateSelectIncludeBlock(doc, lit, start, fields, modelName, diags);
+    }
+  }
+}
+
 const PRISMA_OPERATORS = new Set([
   // logical combinators
   "AND",
@@ -1593,6 +1669,16 @@ export async function validateCreateCall(
         );
       }
     }
+
+    validateSelectIncludeEntries(
+      doc,
+      args,
+      modelName && typeof modelName === "string"
+        ? modelMap.get(modelName.toLowerCase()) ?? new Map<string, FieldInfo>()
+        : new Map<string, FieldInfo>(),
+      typeof modelName === "string" ? modelName : "",
+      diagnostics
+    );
   });
 
   collection.set(doc.uri, diagnostics);
@@ -1642,6 +1728,15 @@ async function validateReadCall(
           )
         );
       }
+
+      validateSelectIncludeEntries(
+        doc,
+        arr as PhpArray,
+        fields,
+        call.model,
+        diags
+      );
+
       continue;
     }
 
@@ -1649,6 +1744,14 @@ async function validateReadCall(
     validateWhereArray(
       doc,
       whereEntry.value, // Node of the inner array literal
+      fields,
+      call.model,
+      diags
+    );
+
+    validateSelectIncludeEntries(
+      doc,
+      arr as PhpArray,
       fields,
       call.model,
       diags
@@ -1919,6 +2022,16 @@ export async function validateUpdateCall(
       typeof modelName === "string" ? modelName : "",
       diagnostics
     );
+
+    validateSelectIncludeEntries(
+      doc,
+      arg0,
+      modelName && typeof modelName === "string"
+        ? modelMap.get(modelName.toLowerCase()) ?? new Map<string, FieldInfo>()
+        : new Map<string, FieldInfo>(),
+      typeof modelName === "string" ? modelName : "",
+      diagnostics
+    );
   });
 
   collection.set(doc.uri, diagnostics);
@@ -2010,6 +2123,16 @@ export async function validateDeleteCall(
       doc,
       whereEntry.value,
       fields,
+      typeof modelName === "string" ? modelName : "",
+      diagnostics
+    );
+
+    validateSelectIncludeEntries(
+      doc,
+      arrayArg,
+      modelName && typeof modelName === "string"
+        ? modelMap.get(modelName.toLowerCase()) ?? new Map<string, FieldInfo>()
+        : new Map<string, FieldInfo>(),
       typeof modelName === "string" ? modelName : "",
       diagnostics
     );
