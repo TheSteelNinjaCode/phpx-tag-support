@@ -1044,55 +1044,24 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
           }
 
-          // ————— Special case: inside a where-filter of a *field* —————
-          if (currentRoot === "where") {
-            // 1️⃣ Grab the actual `where` array entry
-            const whereEntry = (argsArr as PhpArray).items
-              .filter(isEntry)
-              .find(
-                (e) =>
-                  e.key?.kind === "string" &&
-                  (e.key as any).value === "where" &&
-                  isArray(e.value)
-              );
-            if (whereEntry) {
-              const whereArr = whereEntry.value as PhpArray;
-
-              // 2️⃣ Now look at each "field => array" inside `where`
-              for (const e of whereArr.items.filter(isEntry)) {
-                if (
-                  e.key?.kind === "string" &&
-                  isArray(e.value) &&
-                  e.value.loc
-                ) {
-                  const s = lastPrisma + e.value.loc.start.offset;
-                  const t = lastPrisma + e.value.loc.end.offset;
-                  // 3️⃣ If cursor is anywhere inside THAT inner array, show filter ops
-                  if (curOffset >= s && curOffset <= t) {
-                    return FILTER_OPERATORS.map((op) => {
-                      const it = new vscode.CompletionItem(
-                        op,
-                        vscode.CompletionItemKind.Keyword
-                      );
-                      it.insertText = new vscode.SnippetString(`${op}' => $0`);
-                      // replace the opening quote + any partial
-                      const replaceStart = pos.translate(0, -already.length);
-                      const replaceEnd = pos.translate(0, 1);
-                      it.range = new vscode.Range(replaceStart, replaceEnd);
-                      return it;
-                    });
-                  }
-                }
-              }
-            }
-          }
-
           // ————— Otherwise: suggest *model fields* for blocks that accept fields —————
           const fieldMap = (await getModelMap()).get(modelName);
           if (!fieldMap) {
             return;
           }
-          const fields = [...fieldMap.entries()];
+          const allFields = [...fieldMap.entries()];
+          let suggestions: [string, FieldInfo][];
+
+          if (currentRoot === "include") {
+            // only include relation fields—i.e. those whose type matches another model
+            const modelNames = new Set((await getModelMap()).keys());
+            suggestions = allFields.filter(([, info]) =>
+              modelNames.has(info.type.toLowerCase())
+            );
+          } else {
+            // select, data, where, etc. get every column
+            suggestions = allFields;
+          }
 
           // only some rootKeys make sense to suggest columns:
           if (
@@ -1106,53 +1075,178 @@ export async function activate(context: vscode.ExtensionContext) {
               "omit",
             ].includes(currentRoot)
           ) {
-            return fields.map(([name, info]) => {
-              // — build your human-readable type string once:
+            const items: vscode.CompletionItem[] = [];
+
+            // ── 1️⃣ Columns (Fields) ─────────────────────────────
+            for (const [name, info] of suggestions) {
               const fmtType = `${info.type}${info.isList ? "[]" : ""}`;
-
-              // — decide if it’s optional, just as you showed:
               const optional = !info.required || info.nullable;
-
-              // — construct the label object
               const labelObj: vscode.CompletionItemLabel = {
                 label: optional ? `${name}?` : name,
-                detail: `: ${fmtType}`, // shows to the right of the label
-                // description: "…"           // you could also add a description line here
+                detail: `: ${fmtType}`,
               };
 
-              // — feed that object straight into the CompletionItem
-              const item = new vscode.CompletionItem(
+              const colItem = new vscode.CompletionItem(
                 labelObj,
                 vscode.CompletionItemKind.Field
               );
+              // make sure columns sort first
+              colItem.sortText = `0_${name}`;
 
-              // — what gets inserted when you pick it
-              item.insertText = new vscode.SnippetString(
-                `${name}' => ${
-                  ["select", "include", "omit"].includes(currentRoot)
-                    ? "true"
-                    : "$0"
-                }`
+              // insert logic
+              const insertVal = ["select", "include", "omit"].includes(
+                currentRoot
+              )
+                ? "true"
+                : "$0";
+              colItem.insertText = new vscode.SnippetString(
+                `${name}' => ${insertVal}`
               );
 
-              // — richer hover/documentation popup
+              // hover docs
               const md = new vscode.MarkdownString();
               md.appendMarkdown(`**Type**: \`${fmtType}\`\n\n`);
               md.appendMarkdown(`- **Required**: ${info.required}\n`);
               md.appendMarkdown(`- **Nullable**: ${info.nullable}\n`);
-              item.documentation = md;
+              colItem.documentation = md;
 
-              // — same replacement logic you already have
+              // replacement range
               const replaceStart = pos.translate(0, -already.length);
               const replaceEnd = pos.translate(0, 1);
-              item.range = new vscode.Range(replaceStart, replaceEnd);
+              colItem.range = new vscode.Range(replaceStart, replaceEnd);
 
-              return item;
-            });
+              items.push(colItem);
+            }
+
+            function findParentEntry(
+              arr: PhpArray,
+              targetArr: PhpArray
+            ): Entry | null {
+              for (const e of arr.items as Entry[]) {
+                if (e.value === targetArr) {
+                  return e;
+                }
+                if (isArray(e.value)) {
+                  const found = findParentEntry(e.value, targetArr);
+                  if (found) {
+                    return found;
+                  }
+                }
+              }
+              return null;
+            }
+
+            if (
+              currentRoot === "where" &&
+              isArray(argsArr) &&
+              hostArray instanceof Object // just non-null
+            ) {
+              const phpArgs = argsArr as PhpArray;
+
+              // 1️⃣ locate the WHERE array
+              const whereEntry = (phpArgs.items as Entry[]).find(
+                (e) =>
+                  e.key?.kind === "string" &&
+                  (e.key as any).value === "where" &&
+                  isArray(e.value)
+              ) as Entry | undefined;
+              if (!whereEntry) {
+                return []; // nothing to do
+              }
+              const whereArr = whereEntry.value as PhpArray;
+
+              // 2️⃣ figure out your immediate parent key
+              const parentEntry = findParentEntry(phpArgs, hostArray);
+              const parentKey =
+                parentEntry?.key?.kind === "string"
+                  ? ((parentEntry.key as any).value as string)
+                  : null;
+
+              const items: vscode.CompletionItem[] = [];
+
+              // ── A) columns (Field suggestions) ─────────────────────────────────
+              // show whenever you're either:
+              //   • directly in theWHERE array, or
+              //   • in an AND/OR/NOT block
+              if (
+                hostArray === whereArr ||
+                (parentKey !== null && ["AND", "OR", "NOT"].includes(parentKey))
+              ) {
+                for (const [name, info] of fieldMap.entries()) {
+                  const fmt = `${info.type}${info.isList ? "[]" : ""}`;
+                  const isOpt = !info.required || info.nullable;
+                  const label: vscode.CompletionItemLabel = {
+                    label: isOpt ? `${name}?` : name,
+                    detail: `: ${fmt}`,
+                  };
+                  const colItem = new vscode.CompletionItem(
+                    label,
+                    vscode.CompletionItemKind.Field
+                  );
+                  colItem.sortText = `0_${name}`;
+                  const val = ["select", "include", "omit"].includes(
+                    currentRoot
+                  )
+                    ? "true"
+                    : "$0";
+                  colItem.insertText = new vscode.SnippetString(
+                    `${name}' => ${val}`
+                  );
+                  colItem.documentation = new vscode.MarkdownString(
+                    `**Type**: \`${fmt}\`\n\n- **Required**: ${info.required}\n- **Nullable**: ${info.nullable}`
+                  );
+                  colItem.range = new vscode.Range(
+                    pos.translate(0, -already.length),
+                    pos.translate(0, 1)
+                  );
+                  items.push(colItem);
+                }
+              }
+
+              // ── B) AND/OR/NOT ────────────────────────────────────────────────
+              // only when you’re at the very top inside the WHERE array
+              if (hostArray === whereArr) {
+                for (const comb of ["AND", "OR", "NOT"] as const) {
+                  const it = new vscode.CompletionItem(
+                    comb,
+                    vscode.CompletionItemKind.Keyword
+                  );
+                  it.sortText = `1_${comb}`;
+                  it.insertText = new vscode.SnippetString(`${comb}' => $0`);
+                  it.range = new vscode.Range(
+                    pos.translate(0, -already.length),
+                    pos.translate(0, 1)
+                  );
+                  items.push(it);
+                }
+              }
+
+              // ── C) filter operators ─────────────────────────────────────────
+              // only when you’re _inside_ a field’s array (parentKey is that field name)
+              // i.e. parentKey is neither WHERE nor a combiner
+              if (
+                hostArray !== whereArr &&
+                parentKey !== null &&
+                !["AND", "OR", "NOT"].includes(parentKey)
+              ) {
+                for (const op of FILTER_OPERATORS) {
+                  const it = new vscode.CompletionItem(
+                    op,
+                    vscode.CompletionItemKind.Keyword
+                  );
+                  it.sortText = `2_${op}`;
+                  it.insertText = new vscode.SnippetString(`${op}' => $0`);
+                  it.range = new vscode.Range(
+                    pos.translate(0, -already.length),
+                    pos.translate(0, 1)
+                  );
+                  items.push(it);
+                }
+              }
+
+              return items;
+            }
           }
-
-          // no suggestions otherwise
-          return;
         },
       },
       "'", // trigger on quotes
