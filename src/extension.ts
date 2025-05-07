@@ -491,10 +491,10 @@ export async function activate(context: vscode.ExtensionContext) {
   console.log("PHPX tag support is now active!");
 
   // Watch prisma-schema.json for changes and reset our cache
-  const ws = vscode.workspace.workspaceFolders?.[0];
-  if (ws) {
+  const wsFolder = vscode.workspace.workspaceFolders?.[0];
+  if (wsFolder) {
     const pattern = new vscode.RelativePattern(
-      ws,
+      wsFolder,
       "settings/prisma-schema.json"
     );
     const watcher = vscode.workspace.createFileSystemWatcher(pattern);
@@ -514,7 +514,6 @@ export async function activate(context: vscode.ExtensionContext) {
   activateNativeJsHelp(context);
 
   // instead of context.asAbsolutePath:
-  const wsFolder = vscode.workspace.workspaceFolders?.[0];
   if (!wsFolder) {
     console.warn("No workspace!");
     return;
@@ -777,26 +776,6 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   /* ---------------- live pphp.foo(...) validation ---------------- */
-
-  const pendingTimers = new Map<string, NodeJS.Timeout>();
-
-  function schedulePphpValidation(doc: vscode.TextDocument) {
-    if (doc.languageId !== PHP_LANGUAGE) {
-      return;
-    }
-
-    // one timer per document
-    const key = doc.uri.toString();
-    clearTimeout(pendingTimers.get(key));
-
-    pendingTimers.set(
-      key,
-      setTimeout(() => {
-        validatePphpCalls(doc, pphpSigDiags);
-        pendingTimers.delete(key);
-      }, 150) // 150 ms feels snappy without being heavy
-    );
-  }
 
   // ❶ ▶︎ Declare once at the top:
   const ROOT_KEYS_MAP = {
@@ -1280,9 +1259,29 @@ export async function activate(context: vscode.ExtensionContext) {
   const deleteDiags =
     vscode.languages.createDiagnosticCollection("prisma-delete");
 
+  const pendingTimers = new Map<string, NodeJS.Timeout>();
+  function scheduleValidation(doc: vscode.TextDocument) {
+    if (doc.languageId !== PHP_LANGUAGE) {
+      return;
+    }
+
+    // one timer per document
+    const key = doc.uri.toString();
+    clearTimeout(pendingTimers.get(key));
+
+    pendingTimers.set(
+      key,
+      setTimeout(() => {
+        validatePphpCalls(doc, pphpSigDiags);
+        rebuildMustacheStub(doc);
+        pendingTimers.delete(key);
+      }, 500)
+    );
+  }
+
   // Combined update validations function.
   const updateAllValidations = async (document: vscode.TextDocument) => {
-    schedulePphpValidation(document);
+    scheduleValidation(document);
     await validateCreateCall(document, createDiags);
     await validateReadCall(document, readDiags);
     await validateUpdateCall(document, updateDiags);
@@ -1315,19 +1314,12 @@ export async function activate(context: vscode.ExtensionContext) {
   vscode.window.onDidChangeActiveTextEditor(
     (editor) => {
       if (editor) {
-        validatePphpCalls(editor.document, pphpSigDiags);
         updateAllValidations(editor.document);
       }
     },
     null,
     context.subscriptions
   );
-
-  vscode.workspace.onDidSaveTextDocument((doc) => {
-    if (doc.languageId === "php") {
-      rebuildMustacheStub(doc);
-    }
-  });
 }
 
 /* ────────────────────────────────────────────────────────────── *
@@ -2681,7 +2673,7 @@ const registerPhpCompletionProvider = () => {
         /* ⬅️  EARLY EXIT while user is still typing "<?php" or "<?="  */
         if (/^\s*<\?[A-Za-z=]*$/i.test(uptoCursor)) {
           return [];
-        }        
+        }
 
         // 0️⃣ Top-level variable suggestions ("pphp", "store", "searchParams")
         const varNames = ["pphp", "store", "searchParams"] as const;
