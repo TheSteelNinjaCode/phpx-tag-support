@@ -2678,8 +2678,6 @@ const registerPhpCompletionProvider = () => {
         const line = document.lineAt(position.line).text;
         const uptoCursor = line.slice(0, position.character);
 
-        console.log("🚀 ~ provideCompletionItems ~ uptoCursor:", uptoCursor);
-
         /* ⬅️  EARLY EXIT while user is still typing "<?php" or "<?="  */
         if (/^\s*<\?[A-Za-z=]*$/i.test(uptoCursor)) {
           return [];
