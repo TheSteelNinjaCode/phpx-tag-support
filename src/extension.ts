@@ -1629,6 +1629,49 @@ function printArrayLiteral(arr: PhpArray): string {
   }
 }
 
+/**
+ * Checks for simultaneous use of `select` and `include` at the top level
+ * of a PhpArray literal. If both are found, pushes an Error diagnostic
+ * on each key and returns true.
+ */
+function validateSelectIncludeExclusivity(
+  arr: PhpArray,
+  doc: vscode.TextDocument,
+  diags: vscode.Diagnostic[]
+): boolean {
+  // do we have both blocks?
+  const entries = arr.items as Entry[];
+  const hasSelect = entries.some(
+    (e) => e.key?.kind === "string" && (e.key as any).value === "select"
+  );
+  const hasInclude = entries.some(
+    (e) => e.key?.kind === "string" && (e.key as any).value === "include"
+  );
+  if (!hasSelect || !hasInclude) {
+    return false;
+  }
+
+  // push an error on each offending key
+  for (const entry of entries) {
+    if (entry.key?.kind === "string") {
+      const keyName = (entry.key as any).value as string;
+      if (keyName === "select" || keyName === "include") {
+        const start = doc.positionAt(entry.key.loc!.start.offset);
+        const end = doc.positionAt(entry.key.loc!.end.offset);
+        diags.push(
+          new vscode.Diagnostic(
+            new vscode.Range(start, end),
+            `You may not use both \`select\` and \`include\` in the same query. Choose one or the other.`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      }
+    }
+  }
+
+  return true;
+}
+
 export async function validateCreateCall(
   doc: vscode.TextDocument,
   collection: vscode.DiagnosticCollection
@@ -1705,6 +1748,12 @@ export async function validateCreateCall(
       if (!item.key || item.key.kind !== "string") {
         continue;
       }
+
+      if (validateSelectIncludeExclusivity(args, doc, diagnostics)) {
+        collection.set(doc.uri, diagnostics);
+        continue;
+      }
+
       const key = (item.key as any).value as string;
       const value = item.value;
 
@@ -1788,6 +1837,11 @@ async function validateReadCall(
     /* ---- locate the ["where" => [ … ]] arg ---------------------- */
     const arr = call.args[0];
     if (!arr || arr.kind !== "array") {
+      continue;
+    }
+
+    if (validateSelectIncludeExclusivity(arr as PhpArray, doc, diags)) {
+      collection.set(doc.uri, diags);
       continue;
     }
 
@@ -1997,6 +2051,12 @@ export async function validateUpdateCall(
     if (!isArray(arg0)) {
       return;
     }
+
+    if (validateSelectIncludeExclusivity(arg0, doc, diagnostics)) {
+      collection.set(doc.uri, diagnostics);
+      return; // or continue, as appropriate
+    }
+
     const items = arg0.items as Entry[];
 
     // locate 'data' and 'where'
@@ -2166,6 +2226,11 @@ export async function validateDeleteCall(
     if (!isArray(arrayArg)) {
       return;
     } // delete(); sin array
+
+    if (validateSelectIncludeExclusivity(arrayArg, doc, diagnostics)) {
+      collection.set(doc.uri, diagnostics);
+      return; // or continue, as appropriate
+    }
 
     const items = arrayArg.items as Entry[];
     const whereEntry = items.find(
