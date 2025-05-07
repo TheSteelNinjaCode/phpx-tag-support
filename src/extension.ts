@@ -1082,13 +1082,13 @@ export async function activate(context: vscode.ExtensionContext) {
           //
           if (currentRoot !== "where") {
             return suggestions.map(([name, info]) => {
-              const fmt = `${info.type}${info.isList ? "[]" : ""}`;
-              const opt = !info.required || info.nullable;
+              const typeStr = `${info.type}${info.isList ? "[]" : ""}`;
+              const optional = info.nullable; // <-- now only nullable fields get “?”
               const label: vscode.CompletionItemLabel = {
-                label: opt ? `${name}?` : name,
-                detail: `: ${fmt}`,
+                label: optional ? `${name}?` : name,
+                detail: `: ${typeStr}`,
               };
-              const item = new vscode.CompletionItem(
+              const it = new vscode.CompletionItem(
                 label,
                 vscode.CompletionItemKind.Field
               );
@@ -1097,25 +1097,25 @@ export async function activate(context: vscode.ExtensionContext) {
               )
                 ? "true"
                 : "$0";
-              item.insertText = new vscode.SnippetString(
+              it.insertText = new vscode.SnippetString(
                 `${name}' => ${defaultVal}`
               );
-              item.documentation = new vscode.MarkdownString(
-                `**Type**: \`${fmt}\`\n\n- **Required**: ${info.required}\n- **Nullable**: ${info.nullable}`
+              it.documentation = new vscode.MarkdownString(
+                `**Type**: \`${typeStr}\`\n\n- **Required**: ${!info.nullable}\n- **Nullable**: ${
+                  info.nullable
+                }`
               );
-              item.range = new vscode.Range(
+              it.range = new vscode.Range(
                 pos.translate(0, -already.length),
                 pos.translate(0, 1)
               );
-              return item;
+              return it;
             });
           }
 
           //
-          // ── WHERE ROOT: split into three sub-cases ────────────────
+          // ── “where” root: split into three zones ──────────────────
           //
-
-          // locate the top-level `'where' => [...]` PhpArray
           const phpArgs = argsArr as PhpArray;
           const topWhereEnt = (phpArgs.items as Entry[]).find(
             (e) =>
@@ -1128,7 +1128,6 @@ export async function activate(context: vscode.ExtensionContext) {
           }
           const topWhereArr = topWhereEnt.value as PhpArray;
 
-          // helper to find which entry key owns a given array
           function findParentKey(
             arr: PhpArray,
             target: PhpArray
@@ -1148,17 +1147,17 @@ export async function activate(context: vscode.ExtensionContext) {
           }
           const parentKey = findParentKey(phpArgs, hostArray);
 
-          // A) Top‐level WHERE: columns + AND/OR/NOT
+          // A) Top-level WHERE: first columns, then AND|OR|NOT
           if (hostArray === topWhereArr) {
-            const items: vscode.CompletionItem[] = [];
+            const out: vscode.CompletionItem[] = [];
 
-            // 1) columns first
+            // 1) columns
             for (const [name, info] of fieldMap.entries()) {
-              const fmt = `${info.type}${info.isList ? "[]" : ""}`;
-              const opt = !info.required || info.nullable;
+              const typeStr = `${info.type}${info.isList ? "[]" : ""}`;
+              const optional = info.nullable;
               const label: vscode.CompletionItemLabel = {
-                label: opt ? `${name}?` : name,
-                detail: `: ${fmt}`,
+                label: optional ? `${name}?` : name,
+                detail: `: ${typeStr}`,
               };
               const col = new vscode.CompletionItem(
                 label,
@@ -1167,41 +1166,43 @@ export async function activate(context: vscode.ExtensionContext) {
               col.sortText = `0_${name}`;
               col.insertText = new vscode.SnippetString(`${name}' => $0`);
               col.documentation = new vscode.MarkdownString(
-                `**Type**: \`${fmt}\`\n\n- **Required**: ${info.required}\n- **Nullable**: ${info.nullable}`
+                `**Type**: \`${typeStr}\`\n\n- **Required**: ${!info.nullable}\n- **Nullable**: ${
+                  info.nullable
+                }`
               );
               col.range = new vscode.Range(
                 pos.translate(0, -already.length),
                 pos.translate(0, 1)
               );
-              items.push(col);
+              out.push(col);
             }
 
-            // 2) then AND/OR/NOT
-            for (const comb of ["AND", "OR", "NOT"] as const) {
+            // 2) combinators
+            for (const c of ["AND", "OR", "NOT"] as const) {
               const it = new vscode.CompletionItem(
-                comb,
+                c,
                 vscode.CompletionItemKind.Keyword
               );
-              it.sortText = `1_${comb}`;
-              it.insertText = new vscode.SnippetString(`${comb}' => $0`);
+              it.sortText = `1_${c}`;
+              it.insertText = new vscode.SnippetString(`${c}' => $0`);
               it.range = new vscode.Range(
                 pos.translate(0, -already.length),
                 pos.translate(0, 1)
               );
-              items.push(it);
+              out.push(it);
             }
 
-            return items;
+            return out;
           }
 
-          // B) Inside an AND/OR/NOT block: only columns
+          // B) inside an AND|OR|NOT block: only columns
           if (parentKey && ["AND", "OR", "NOT"].includes(parentKey)) {
             return [...fieldMap.entries()].map(([name, info]) => {
-              const fmt = `${info.type}${info.isList ? "[]" : ""}`;
-              const opt = !info.required || info.nullable;
+              const typeStr = `${info.type}${info.isList ? "[]" : ""}`;
+              const optional = info.nullable;
               const label: vscode.CompletionItemLabel = {
-                label: opt ? `${name}?` : name,
-                detail: `: ${fmt}`,
+                label: optional ? `${name}?` : name,
+                detail: `: ${typeStr}`,
               };
               const col = new vscode.CompletionItem(
                 label,
@@ -1210,7 +1211,9 @@ export async function activate(context: vscode.ExtensionContext) {
               col.sortText = `0_${name}`;
               col.insertText = new vscode.SnippetString(`${name}' => $0`);
               col.documentation = new vscode.MarkdownString(
-                `**Type**: \`${fmt}\`\n\n- **Required**: ${info.required}\n- **Nullable**: ${info.nullable}`
+                `**Type**: \`${typeStr}\`\n\n- **Required**: ${!info.nullable}\n- **Nullable**: ${
+                  info.nullable
+                }`
               );
               col.range = new vscode.Range(
                 pos.translate(0, -already.length),
@@ -1220,7 +1223,7 @@ export async function activate(context: vscode.ExtensionContext) {
             });
           }
 
-          // C) Inside a field's own array: only filter operators
+          // C) inside a specific field’s array: only filter ops
           return FILTER_OPERATORS.map((op) => {
             const it = new vscode.CompletionItem(
               op,
@@ -1236,8 +1239,8 @@ export async function activate(context: vscode.ExtensionContext) {
           });
         },
       },
-      "'", // trigger on single-quote
-      '"' // trigger on double-quote
+      "'", // single-quote trigger
+      '"' // double-quote trigger
     );
   }
 
