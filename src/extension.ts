@@ -1,8 +1,18 @@
-import * as vscode from "vscode";
+import { XMLValidator } from "fast-xml-parser";
 import * as fs from "fs";
 import * as path from "path";
-import { XMLValidator } from "fast-xml-parser";
+import {
+  Call,
+  Engine,
+  Entry,
+  Identifier,
+  Node,
+  Array as PhpArray,
+  PropertyLookup,
+  Variable,
+} from "php-parser";
 import ts from "typescript";
+import * as vscode from "vscode";
 import {
   CancellationToken,
   CodeAction,
@@ -17,16 +27,6 @@ import {
   TextDocument,
 } from "vscode";
 import { findPrismaCalls } from "./analysis/phpAst";
-import {
-  Entry,
-  Identifier,
-  Node,
-  PropertyLookup,
-  Variable,
-  Array as PhpArray,
-  Engine,
-  Call,
-} from "php-parser";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                    *
@@ -489,6 +489,27 @@ export async function activate(context: vscode.ExtensionContext) {
   }
 
   console.log("PHPX tag support is now active!");
+
+  // Watch prisma-schema.json for changes and reset our cache
+  const ws = vscode.workspace.workspaceFolders?.[0];
+  if (ws) {
+    const pattern = new vscode.RelativePattern(
+      ws,
+      "settings/prisma-schema.json"
+    );
+    const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+
+    const clear = () => {
+      cache = null;
+      console.log("🔄 Prisma schema changed – cache cleared");
+    };
+
+    watcher.onDidChange(clear);
+    watcher.onDidCreate(clear);
+    watcher.onDidDelete(clear);
+
+    context.subscriptions.push(watcher);
+  }
 
   activateNativeJsHelp(context);
 
@@ -1333,12 +1354,15 @@ export async function getModelMap(): Promise<ModelMap> {
     return new Map();
   }
 
-  const uri = vscode.Uri.joinPath(ws.uri, "settings", "prisma-schema.json");
-  const raw = await vscode.workspace.fs.readFile(uri);
+  const schemaUri = vscode.Uri.joinPath(
+    ws.uri,
+    "settings",
+    "prisma-schema.json"
+  );
+  const raw = await vscode.workspace.fs.readFile(schemaUri);
   const dmmf = JSON.parse(Buffer.from(raw).toString("utf8"));
 
   cache = new Map();
-
   for (const model of dmmf.datamodel.models) {
     const fields = new Map<string, FieldInfo>();
     for (const f of model.fields) {
@@ -1349,8 +1373,9 @@ export async function getModelMap(): Promise<ModelMap> {
         nullable: !f.isRequired,
       });
     }
-    cache.set(model.name.toLowerCase(), fields); // user → …
+    cache.set(model.name.toLowerCase(), fields);
   }
+
   return cache;
 }
 
