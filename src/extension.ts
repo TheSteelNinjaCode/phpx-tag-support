@@ -490,11 +490,17 @@ export async function activate(context: vscode.ExtensionContext) {
 
   console.log("PHPX tag support is now active!");
 
-  // Watch prisma-schema.json for changes and reset our cache
   const wsFolder = vscode.workspace.workspaceFolders?.[0];
-  if (wsFolder) {
+  const ws = vscode.workspace.workspaceFolders?.[0];
+
+  if (!wsFolder) {
+    console.warn("No workspace!");
+    return;
+  }
+
+  if (ws) {
     const pattern = new vscode.RelativePattern(
-      wsFolder,
+      ws,
       "settings/prisma-schema.json"
     );
     const watcher = vscode.workspace.createFileSystemWatcher(pattern);
@@ -513,13 +519,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
   activateNativeJsHelp(context);
 
-  // instead of context.asAbsolutePath:
-  if (!wsFolder) {
-    console.warn("No workspace!");
-    return;
-  }
-
-  // build the *project*-relative path
   const globalStubFsPath = path.join(
     wsFolder.uri.fsPath,
     ".pphp",
