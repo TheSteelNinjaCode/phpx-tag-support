@@ -11,7 +11,7 @@ import {
   PropertyLookup,
   Variable,
 } from "php-parser";
-import ts from "typescript";
+import ts, { CallExpression } from "typescript";
 import * as vscode from "vscode";
 import {
   CancellationToken,
@@ -360,33 +360,6 @@ const addImportCommand = async (
   await vscode.workspace.applyEdit(edit);
 };
 
-function splitArgs(str: string): string[] {
-  const out: string[] = [];
-  let buf = "";
-  let level = 0;
-
-  for (let i = 0; i < str.length; i++) {
-    const ch = str[i];
-    if (ch === "{" || ch === "(" || ch === "[") {
-      level++;
-    } else if (ch === "}" || ch === ")" || ch === "]") {
-      level--;
-    }
-
-    if (ch === "," && level === 0) {
-      out.push(buf.trim());
-      buf = "";
-    } else {
-      buf += ch;
-    }
-  }
-
-  if (buf.trim() !== "") {
-    out.push(buf.trim());
-  }
-  return out;
-}
-
 function validatePphpCalls(
   document: vscode.TextDocument,
   diagCollection: vscode.DiagnosticCollection
@@ -430,7 +403,8 @@ function validatePphpCalls(
     const nonRest = expectedParams.filter((p) => !p.startsWith("..."));
 
     // count what the user actually passed
-    const passedCount = argsText.trim() === "" ? 0 : splitArgs(argsText).length;
+    const parsedArgs = parseArgsWithTs(argsText);
+    const passedCount = parsedArgs.length;
 
     // only non-rest params contribute to “required” count
     const requiredCount = nonRest.filter((p) => !p.includes("?")).length;
@@ -3617,6 +3591,38 @@ const getLastPart = (path: string): string => {
   const parts = path.split("\\");
   return parts[parts.length - 1];
 };
+
+export function parseArgsWithTs(args: string): string[] {
+  // ① envolver en una llamada ficticia
+  const wrapper = `__dummy__(${args});`;
+
+  // ② parsear a AST
+  const sf = ts.createSourceFile(
+    "args.ts",
+    wrapper,
+    ts.ScriptTarget.Latest,
+    /*setParentNodes*/ false,
+    ts.ScriptKind.TS
+  );
+
+  // ③ localizar el CallExpression
+  let call: CallExpression | undefined;
+  sf.forEachChild((node) => {
+    if (
+      ts.isExpressionStatement(node) &&
+      ts.isCallExpression(node.expression)
+    ) {
+      call = node.expression;
+    }
+  });
+
+  if (!call) {
+    return [];
+  } // nunca debería ocurrir
+
+  // ④ extraer texto de cada argumento
+  return call.arguments.map((arg) => arg.getText(sf));
+}
 
 function parseStubsWithTS(source: string) {
   // 1) build a lookup of the class-names we care about
