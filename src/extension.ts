@@ -1318,6 +1318,7 @@ export type ModelMap = Map<string, Map<string, FieldInfo>>; // model → field �
 let cache: ModelMap | null = null;
 
 export async function getModelMap(): Promise<ModelMap> {
+  // ➊ cache already built?
   if (cache) {
     return cache;
   }
@@ -1332,21 +1333,39 @@ export async function getModelMap(): Promise<ModelMap> {
     "settings",
     "prisma-schema.json"
   );
-  const raw = await vscode.workspace.fs.readFile(schemaUri);
-  const dmmf = JSON.parse(Buffer.from(raw).toString("utf8"));
 
-  cache = new Map();
-  for (const model of dmmf.datamodel.models) {
-    const fields = new Map<string, FieldInfo>();
-    for (const f of model.fields) {
-      fields.set(f.name, {
-        type: f.type,
-        required: !f.isRequired && !f.hasDefaultValue && !f.relationName,
-        isList: f.isList,
-        nullable: !f.isRequired,
-      });
+  let raw: Uint8Array;
+  try {
+    raw = await vscode.workspace.fs.readFile(schemaUri);
+  } catch (err: unknown) {
+    // ➋ File missing or unreadable – log & fall back gracefully
+    console.warn(
+      "[phpx] prisma-schema.json not found – schema‑aware " +
+        "diagnostics disabled for now."
+    );
+    cache = new Map();
+    return cache;
+  }
+
+  /* same as before – parse & build the map */
+  try {
+    const dmmf = JSON.parse(Buffer.from(raw).toString("utf8"));
+    cache = new Map();
+    for (const model of dmmf.datamodel.models) {
+      const fields = new Map<string, FieldInfo>();
+      for (const f of model.fields) {
+        fields.set(f.name, {
+          type: f.type,
+          required: f.isRequired && !f.hasDefaultValue && !f.relationName,
+          isList: f.isList,
+          nullable: !f.isRequired,
+        });
+      }
+      cache.set(model.name.toLowerCase(), fields);
     }
-    cache.set(model.name.toLowerCase(), fields);
+  } catch (e) {
+    console.error("[phpx] Failed to parse prisma-schema.json:", e);
+    cache = new Map(); // ➌ malformed file → disable silently
   }
 
   return cache;
