@@ -1263,6 +1263,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Combined update validations function.
   const updateAllValidations = async (document: vscode.TextDocument) => {
+    scheduleValidation(document);
     await validateCreateCall(document, createDiags);
     await validateReadCall(document, readDiags);
     await validateUpdateCall(document, updateDiags);
@@ -1276,23 +1277,18 @@ export async function activate(context: vscode.ExtensionContext) {
       nativePropertyDecorationType
     );
     validateMissingImports(document, diagnosticCollection);
-    scheduleValidation(document);
   };
 
   context.subscriptions.push(objectPropertyDecorationType);
 
   // Register event listeners.
   vscode.workspace.onDidChangeTextDocument(
-    (e) => {
-      updateAllValidations(e.document);
-    },
+    (e) => updateAllValidations(e.document),
     null,
     context.subscriptions
   );
   vscode.workspace.onDidSaveTextDocument(
-    (e) => {
-      updateAllValidations(e);
-    },
+    updateAllValidations,
     null,
     context.subscriptions
   );
