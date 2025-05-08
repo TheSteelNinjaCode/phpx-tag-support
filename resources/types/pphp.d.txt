@@ -24,6 +24,7 @@ export declare class PPHP {
   private _processedPhpScripts;
   private _effects;
   private _pendingEffects;
+  private _refs;
   private readonly _builtInProps;
   private readonly _eventHandlers;
   private readonly _redirectRegex;
@@ -38,6 +39,21 @@ export declare class PPHP {
   private constructor();
   static get instance(): PPHP;
   private scheduleInitialHydration;
+  private initRefs;
+  /**
+   * Get one or more elements by pp-ref name.
+   *
+   * Usage:
+   *   only one element had pp-ref="foo":
+   *   const el = pphp.ref("foo");          // HTMLElement
+   *
+   *   multiple had pp-ref="bar":
+   *   const all = pphp.ref("bar") as HTMLElement[]; // array
+   *
+   *   pick the second one directly:
+   *   const second = pphp.ref("bar", 1);   // HTMLElement
+   */
+  ref(key: string, index?: number): HTMLElement | HTMLElement[];
   private _currentSectionId;
   private getNested;
   private setNested;
