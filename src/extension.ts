@@ -537,28 +537,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // watch for changes to your mustache stub
   const stubPattern = new vscode.RelativePattern(
-    wsFolder, // whatever you used for your workspace folder
+    wsFolder,
     ".pphp/phpx-mustache.d.ts"
   );
   const stubWatcher = vscode.workspace.createFileSystemWatcher(stubPattern);
-  stubWatcher.onDidChange(async (uri) => {
-    // 1) re-read & re-parse into `globalStubs`
-    const data = await vscode.workspace.fs.readFile(uri);
-    parseGlobalsWithTS(data.toString());
-
-    // 2) tell the TS server to reload all .d.ts files
-    await vscode.commands.executeCommand("typescript.restartTsServer");
-  });
-  stubWatcher.onDidCreate(async (uri) => {
-    // Reuse the logic from onDidChange
-    const data = await vscode.workspace.fs.readFile(uri);
-    parseGlobalsWithTS(data.toString());
-    await vscode.commands.executeCommand("typescript.restartTsServer");
-  });
-  stubWatcher.onDidDelete(() => {
-    globalStubs = {};
-    vscode.commands.executeCommand("typescript.restartTsServer");
-  });
   context.subscriptions.push(stubWatcher);
 
   const stubPath = context.asAbsolutePath("resources/types/pphp.d.txt");
@@ -1281,7 +1263,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Combined update validations function.
   const updateAllValidations = async (document: vscode.TextDocument) => {
-    scheduleValidation(document);
     await validateCreateCall(document, createDiags);
     await validateReadCall(document, readDiags);
     await validateUpdateCall(document, updateDiags);
@@ -1295,18 +1276,23 @@ export async function activate(context: vscode.ExtensionContext) {
       nativePropertyDecorationType
     );
     validateMissingImports(document, diagnosticCollection);
+    scheduleValidation(document);
   };
 
   context.subscriptions.push(objectPropertyDecorationType);
 
   // Register event listeners.
   vscode.workspace.onDidChangeTextDocument(
-    (e) => updateAllValidations(e.document),
+    (e) => {
+      updateAllValidations(e.document);
+    },
     null,
     context.subscriptions
   );
   vscode.workspace.onDidSaveTextDocument(
-    updateAllValidations,
+    (e) => {
+      updateAllValidations(e);
+    },
     null,
     context.subscriptions
   );
@@ -2493,17 +2479,22 @@ function updateStringDecorations(document: vscode.TextDocument) {
   editor.setDecorations(stringDecorationType, decos);
 }
 
-async function rebuildMustacheStub(document: TextDocument) {
+// at top-level of your extension module:
+let lastStubText = "";
+
+/**
+ * Scan the document for {{…}} roots, build a .d.ts stub,
+ * and only write + restart TS if it actually changed.
+ */
+async function rebuildMustacheStub(document: vscode.TextDocument) {
   const text = document.getText();
-  // match {{ … }} and capture only the leading identifier or dotted path
   const mustacheRe =
     /{{\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)[\s\S]*?}}/g;
   const map = new Map<string, Set<string>>();
   let m: RegExpExecArray | null;
+
   while ((m = mustacheRe.exec(text))) {
-    const parts = m[1].split(".");
-    const root = parts[0];
-    const prop = parts[1];
+    const [root, prop] = m[1].split(".", 2);
     if (!map.has(root)) {
       map.set(root, new Set());
     }
@@ -2520,22 +2511,30 @@ async function rebuildMustacheStub(document: TextDocument) {
       const entries = Array.from(props)
         .map((p) => `${p}: any`)
         .join(";\n  ");
-      lines.push(`declare var ${root}: {
-  ${entries};
-  [key: string]: any;
-};`);
+      lines.push(
+        `declare var ${root}: {\n  ${entries};\n  [key: string]: any;\n};`
+      );
     }
   }
 
+  // final contents with a trailing newline
+  const newText = lines.join("\n\n") + "\n";
+  if (newText === lastStubText) {
+    // nothing changed since last time → skip write & restart
+    return;
+  }
+  lastStubText = newText;
+
+  // write the stub into .pphp/phpx-mustache.d.ts under the workspace
   const stubUri = vscode.Uri.joinPath(
     vscode.workspace.workspaceFolders![0].uri,
     ".pphp",
     "phpx-mustache.d.ts"
   );
-  await vscode.workspace.fs.writeFile(
-    stubUri,
-    Buffer.from(lines.join("\n\n") + "\n", "utf8")
-  );
+  await vscode.workspace.fs.writeFile(stubUri, Buffer.from(newText, "utf8"));
+
+  // immediately re-parse into your in-memory globals
+  parseGlobalsWithTS(newText);
 }
 
 const updateEditorConfiguration = (): void => {
