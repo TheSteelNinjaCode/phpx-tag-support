@@ -11,7 +11,7 @@ import {
   PropertyLookup,
   Variable,
 } from "php-parser";
-import ts, { CallExpression } from "typescript";
+import ts, { CallExpression, SyntaxKind as S } from "typescript";
 import * as vscode from "vscode";
 import {
   CancellationToken,
@@ -1264,11 +1264,12 @@ export async function activate(context: vscode.ExtensionContext) {
   // Combined update validations function.
   const updateAllValidations = async (document: vscode.TextDocument) => {
     scheduleValidation(document);
+
     await validateCreateCall(document, createDiags);
     await validateReadCall(document, readDiags);
     await validateUpdateCall(document, updateDiags);
     await validateDeleteCall(document, deleteDiags);
-    updateJsVariableDecorations(document, braceDecorationType);
+
     updateStringDecorations(document);
     validateJsVariablesInCurlyBraces(document, jsVarDiagnostics);
     updateNativeTokenDecorations(
@@ -1276,6 +1277,7 @@ export async function activate(context: vscode.ExtensionContext) {
       nativeFunctionDecorationType,
       nativePropertyDecorationType
     );
+    updateJsVariableDecorations(document, braceDecorationType);
     validateMissingImports(document, diagnosticCollection);
   };
 
@@ -3334,6 +3336,9 @@ function updateJsVariableDecorations(
 }
 
 const isValidJsExpression = (expr: string): boolean => {
+  if (containsJsAssignment(expr)) {
+    return false;
+  }
   try {
     new Function(`return (${expr});`);
     return true;
@@ -3341,6 +3346,61 @@ const isValidJsExpression = (expr: string): boolean => {
     return false;
   }
 };
+
+const ASSIGNMENT_KINDS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.EqualsToken,
+  ts.SyntaxKind.PlusEqualsToken,
+  ts.SyntaxKind.MinusEqualsToken,
+  ts.SyntaxKind.AsteriskEqualsToken,
+  ts.SyntaxKind.SlashEqualsToken,
+  ts.SyntaxKind.PercentEqualsToken,
+  ts.SyntaxKind.AsteriskAsteriskEqualsToken,
+  ts.SyntaxKind.LessThanLessThanEqualsToken,
+  ts.SyntaxKind.GreaterThanGreaterThanEqualsToken,
+  ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken,
+  ts.SyntaxKind.AmpersandEqualsToken,
+  ts.SyntaxKind.BarEqualsToken,
+  ts.SyntaxKind.CaretEqualsToken,
+  ts.SyntaxKind.BarBarEqualsToken,
+  ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+  ts.SyntaxKind.QuestionQuestionEqualsToken,
+]);
+
+/**
+ * Devuelve true si la expresión contiene **cualquier** operador de asignación.
+ * Usa el AST de TypeScript, sin dependencias internas.
+ */
+export function containsJsAssignment(expr: string): boolean {
+  // envolvemos la expresión para garantizar código completo
+  const sf = ts.createSourceFile(
+    "tmp.ts",
+    `(${expr});`,
+    ts.ScriptTarget.Latest,
+    /*setParentNodes*/ false,
+    ts.ScriptKind.TSX
+  );
+
+  let found = false;
+
+  const visit = (node: ts.Node): void => {
+    if (found) {
+      return;
+    } // corto‑circuito
+
+    if (
+      ts.isBinaryExpression(node) &&
+      ASSIGNMENT_KINDS.has(node.operatorToken.kind)
+    ) {
+      found = true;
+      return;
+    }
+
+    node.forEachChild(visit);
+  };
+
+  sf.forEachChild(visit);
+  return found;
+}
 
 const validateJsVariablesInCurlyBraces = (
   document: vscode.TextDocument,
@@ -3359,6 +3419,24 @@ const validateJsVariablesInCurlyBraces = (
   // 2️⃣ run your existing JS_EXPR_REGEX *against* the sanitized text
   while ((match = JS_EXPR_REGEX.exec(sanitizedText)) !== null) {
     const expr = match[1].trim();
+
+    // 🚩 1)  Asignaciones prohibidas
+    if (containsJsAssignment(expr)) {
+      diagnostics.push(
+        new vscode.Diagnostic(
+          new vscode.Range(
+            document.positionAt(match.index + 2), // «{{
+            document.positionAt(match.index + match[0].length - 2) // «}}»
+          ),
+          "⚠️  No está permitido realizar asignaciones dentro de {{ … }}. " +
+            "Use valores u operaciones puras.",
+          vscode.DiagnosticSeverity.Warning
+        )
+      );
+      // No sigas con las demás comprobaciones para esta expresión
+      continue;
+    }
+
     if (!isValidJsExpression(expr)) {
       // calculate positions *in* the original text (indexes line up thanks to blanking)
       const startIndex = match.index + match[0].indexOf(expr);
