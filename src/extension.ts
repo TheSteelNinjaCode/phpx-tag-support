@@ -849,6 +849,21 @@ export async function activate(context: vscode.ExtensionContext) {
     return arr;
   }
 
+  function findParentKey(arr: PhpArray, target: PhpArray): string | null {
+    for (const e of arr.items as Entry[]) {
+      if (e.value === target && e.key?.kind === "string") {
+        return (e.key as any).value as string;
+      }
+      if (isArray(e.value)) {
+        const sub = findParentKey(e.value, target);
+        if (sub) {
+          return sub;
+        }
+      }
+    }
+    return null;
+  }
+
   // ❷ ▶︎ In your provider:
   function registerPrismaFieldProvider(): vscode.Disposable {
     return vscode.languages.registerCompletionItemProvider(
@@ -1005,16 +1020,52 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
           }
           const allFields = [...fieldMap.entries()];
-          let suggestions: [string, FieldInfo][];
+          let suggestions: [string, FieldInfo][] = [];
 
-          if (currentRoot === "include") {
-            // only include relation fields—i.e. those whose type matches another model
-            const modelNames = new Set((await getModelMap()).keys());
+          // find the immediate entry-key whose value is your hostArray
+          const nestedRoot = hostArray
+            ? findParentKey(argsArr as PhpArray, hostArray)
+            : null;
+
+          // use nestedRoot if present, otherwise fall back to the top-level key
+          const activeRoot = nestedRoot ?? currentRoot;
+          const modelNames = new Set((await getModelMap()).keys());
+
+          if (activeRoot === "_count") {
+            // inside the _count => [ … ] block → only offer `select`
+            const selectItem = new vscode.CompletionItem(
+              "select",
+              vscode.CompletionItemKind.Keyword
+            );
+            selectItem.insertText = new vscode.SnippetString(`select' => $0`);
+            selectItem.documentation = new vscode.MarkdownString(
+              "**Select** which fields to count"
+            );
+            selectItem.range = new vscode.Range(
+              pos.translate(0, -already.length),
+              pos.translate(0, 1)
+            );
+            return [selectItem];
+          } else if (activeRoot === "select") {
             suggestions = allFields.filter(([, info]) =>
               modelNames.has(info.type.toLowerCase())
             );
+          } else if (activeRoot === "include") {
+            // back up to include → offer relations + _count
+            suggestions = allFields.filter(([, info]) =>
+              modelNames.has(info.type.toLowerCase())
+            );
+            suggestions.push([
+              "_count",
+              {
+                type: "boolean",
+                required: false,
+                isList: false,
+                nullable: true,
+              },
+            ]);
           } else {
-            // select, data, where, etc. get every column
+            // your other roots (data, where, etc.)
             suggestions = allFields;
           }
 
@@ -1047,14 +1098,8 @@ export async function activate(context: vscode.ExtensionContext) {
                 label,
                 vscode.CompletionItemKind.Field
               );
-              const defaultVal = ["select", "include", "omit"].includes(
-                currentRoot
-              )
-                ? "true"
-                : "$0";
-              it.insertText = new vscode.SnippetString(
-                `${name}' => ${defaultVal}`
-              );
+
+              it.insertText = new vscode.SnippetString(`${name}' => $0`);
               it.documentation = new vscode.MarkdownString(
                 `**Type**: \`${typeStr}\`\n\n- **Required**: ${!info.nullable}\n- **Nullable**: ${
                   info.nullable
@@ -1082,24 +1127,6 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
           }
           const topWhereArr = topWhereEnt.value as PhpArray;
-
-          function findParentKey(
-            arr: PhpArray,
-            target: PhpArray
-          ): string | null {
-            for (const e of arr.items as Entry[]) {
-              if (e.value === target && e.key?.kind === "string") {
-                return (e.key as any).value as string;
-              }
-              if (isArray(e.value)) {
-                const sub = findParentKey(e.value, target);
-                if (sub) {
-                  return sub;
-                }
-              }
-            }
-            return null;
-          }
           const parentKey = findParentKey(phpArgs, hostArray);
 
           // A) Top-level WHERE: first columns, then AND|OR|NOT
@@ -1408,13 +1435,8 @@ function validateFieldAssignments(
   }
 }
 
-/**
- * Validate a `['col' => <expr>, …]` literal inside a select/include block.
- *  • unknown columns ⇒ error
- *  • non-boolean values ⇒ error
- */
-function validateSelectIncludeBlock(
-  doc: vscode.TextDocument,
+function validateSelectBlock(
+  doc: TextDocument,
   literal: string,
   offset: number,
   fields: Map<string, FieldInfo>,
@@ -1423,17 +1445,13 @@ function validateSelectIncludeBlock(
 ) {
   const selRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
   let m: RegExpExecArray | null;
-
   while ((m = selRe.exec(literal))) {
-    const key = m[1];
-    const raw = m[2].trim();
+    const [full, key, rawExpr] = m;
+    const raw = rawExpr.trim();
     const info = fields.get(key);
+    const startPos = doc.positionAt(offset + m.index);
+    const range = new vscode.Range(startPos, startPos.translate(0, key.length));
 
-    // compute a range that covers just the key
-    const start = doc.positionAt(offset + m.index);
-    const range = new vscode.Range(start, start.translate(0, key.length));
-
-    // 1) unknown column
     if (!info) {
       diags.push(
         new vscode.Diagnostic(
@@ -1444,17 +1462,141 @@ function validateSelectIncludeBlock(
       );
       continue;
     }
-
-    // 2) must be a literal boolean
     if (!/^(true|false)$/i.test(raw)) {
       diags.push(
         new vscode.Diagnostic(
           range,
-          `\`select\`/ \`include\` for "${key}" expects a boolean, but got "${raw}".`,
+          `\`select\` for "${key}" expects a boolean, but got "${raw}".`,
           vscode.DiagnosticSeverity.Error
         )
       );
     }
+  }
+}
+
+function validateIncludeBlock(
+  doc: TextDocument,
+  includeEntry: Entry,
+  fields: Map<string, FieldInfo>,
+  modelName: string,
+  diags: vscode.Diagnostic[]
+) {
+  // make sure we actually have an array literal:
+  if (!isArray(includeEntry.value) || !includeEntry.value.loc) {
+    return;
+  }
+
+  const arrNode = includeEntry.value as PhpArray;
+
+  for (const item of arrNode.items as Entry[]) {
+    if (item.key?.kind !== "string" || !item.value?.loc) {
+      continue;
+    }
+
+    const keyName = (item.key as any).value as string;
+    const keyRange = new vscode.Range(
+      item.key.loc
+        ? doc.positionAt(item.key.loc.start.offset)
+        : doc.positionAt(0),
+      item.key.loc ? doc.positionAt(item.key.loc.end.offset) : doc.positionAt(0)
+    );
+
+    // ——— 1) normal relation => boolean ———
+    if (keyName !== "_count") {
+      const raw = doc
+        .getText(
+          new vscode.Range(
+            doc.positionAt(item.value.loc.start.offset),
+            doc.positionAt(item.value.loc.end.offset)
+          )
+        )
+        .trim();
+
+      if (!fields.has(keyName)) {
+        diags.push(
+          new vscode.Diagnostic(
+            keyRange,
+            `The relation "${keyName}" does not exist on ${modelName}.`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      } else if (!/^(true|false)$/i.test(raw)) {
+        diags.push(
+          new vscode.Diagnostic(
+            keyRange,
+            `\`include\` for "${keyName}" expects a boolean, but got "${raw}".`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      }
+      continue;
+    }
+
+    // ——— 2) special `_count` ———
+    // a) boolean?
+    if (!isArray(item.value)) {
+      const raw = doc
+        .getText(
+          new vscode.Range(
+            doc.positionAt(item.value.loc.start.offset),
+            doc.positionAt(item.value.loc.end.offset)
+          )
+        )
+        .trim();
+
+      if (!/^(true|false)$/i.test(raw)) {
+        diags.push(
+          new vscode.Diagnostic(
+            keyRange,
+            "`include._count` expects a boolean or a nested [ 'select' => [...] ], but got " +
+              JSON.stringify(raw),
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      }
+      continue;
+    }
+
+    // b) array ⇒ must contain exactly a `select` entry whose values are booleans
+    const countArr = item.value as PhpArray;
+    const selEntry = (countArr.items as Entry[]).find(
+      (e) => e.key?.kind === "string" && (e.key as any).value === "select"
+    );
+
+    if (!selEntry) {
+      diags.push(
+        new vscode.Diagnostic(
+          keyRange,
+          "`include._count` array must contain a `select` entry.",
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      continue;
+    }
+    if (!isArray(selEntry.value) || !selEntry.value.loc) {
+      diags.push(
+        new vscode.Diagnostic(
+          keyRange,
+          "`include._count.select` must be an array literal.",
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      continue;
+    }
+
+    // c) finally, validate that each field => boolean in that inner select
+    const innerArr = selEntry.value as PhpArray;
+    if (!innerArr.loc) {
+      return;
+    }
+    const start = innerArr.loc.start.offset;
+    const end = innerArr.loc.end.offset;
+    const innerText = doc.getText(
+      new vscode.Range(doc.positionAt(start), doc.positionAt(end))
+    );
+
+    // re-use your boolean-only validator
+    validateSelectBlock(doc, innerText, start, fields, modelName, diags);
   }
 }
 
@@ -1463,7 +1605,7 @@ function validateSelectIncludeBlock(
  * and run `validateSelectIncludeBlock` on them.
  */
 function validateSelectIncludeEntries(
-  doc: vscode.TextDocument,
+  doc: TextDocument,
   arr: PhpArray,
   fields: Map<string, FieldInfo>,
   modelName: string,
@@ -1473,13 +1615,18 @@ function validateSelectIncludeEntries(
     const entry = (arr.items as Entry[]).find(
       (e) => e.key?.kind === "string" && (e.key as any).value === prop
     );
-    if (entry?.value?.loc && isArray(entry.value)) {
-      const start = entry.value.loc.start.offset;
-      const end = entry.value.loc.end.offset;
-      const lit = doc.getText(
-        new vscode.Range(doc.positionAt(start), doc.positionAt(end))
-      );
-      validateSelectIncludeBlock(doc, lit, start, fields, modelName, diags);
+    if (!entry?.value?.loc || !isArray(entry.value)) {
+      continue;
+    }
+    const { start, end } = entry.value.loc;
+    const literal = doc.getText(
+      new Range(doc.positionAt(start.offset), doc.positionAt(end.offset))
+    );
+
+    if (prop === "select") {
+      validateSelectBlock(doc, literal, start.offset, fields, modelName, diags);
+    } else if (prop === "include") {
+      validateIncludeBlock(doc, entry, fields, modelName, diags);
     }
   }
 }
