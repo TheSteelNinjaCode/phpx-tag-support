@@ -27,6 +27,7 @@ import {
   TextDocument,
 } from "vscode";
 import { findPrismaCalls } from "./analysis/phpAst";
+import { buildAttrCompletions } from "./settings/pp-attributes";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                    *
@@ -519,6 +520,60 @@ export async function activate(context: vscode.ExtensionContext) {
   const stubPath = context.asAbsolutePath("resources/types/pphp.d.txt");
   const stubText = fs.readFileSync(stubPath, "utf8");
   parseStubsWithTS(stubText);
+
+  context.subscriptions.push(
+    vscode.languages.registerCompletionItemProvider(
+      { language: "php" }, // o ['php','html','blade'] etc.
+      {
+        provideCompletionItems(doc, pos) {
+          const line = doc.lineAt(pos.line).text;
+          const uptoCursor = line.slice(0, pos.character);
+
+          /* ① Debemos estar dentro de una etiqueta abierta -------- */
+          // Busca el último "<" antes del cursor que **no** sea "</"
+          const lt = uptoCursor.lastIndexOf("<");
+          if (lt === -1 || uptoCursor[lt + 1] === "/") {
+            return; // no estamos en <Tag …>
+          }
+          // Ya se cerró la etiqueta?  Ignora si hay “>” entre < y el cursor
+          if (uptoCursor.slice(lt).includes(">")) {
+            return;
+          }
+
+          /* ② Averigua qué atributos ya están escritos ------------ */
+          // Divide por espacios y = para quedarte con la "clave"    pp-bind=
+          const written = new Set<string>(
+            uptoCursor
+              .slice(lt) // solo "<Tag …"
+              .match(/\b[\w-]+(?==)/g) || []
+          );
+
+          /* ③ Prefijo que el usuario ya empezó a escribir --------- */
+          const word = doc.getWordRangeAtPosition(pos, /[\w-]+/);
+          const partial = word ? doc.getText(word) : "";
+
+          /* ④ Devuelve los atributos que faltan y matchean el pref. */
+          return buildAttrCompletions()
+            .filter(
+              (it: vscode.CompletionItem) =>
+                !written.has(it.label as string) &&
+                (it.label as string).startsWith(partial)
+            )
+            .map((it: vscode.CompletionItem) => {
+              // Si el usuario ya comenzó, sobre‑escribe solo esa parte
+              if (word) {
+                it.range = word;
+              }
+              return it;
+            });
+        },
+      },
+      " ",
+      ":",
+      "\t", // disparadores típicos mientras escribes attrs
+      ..."abcdefghijklmnopqrstuvwxyz".split("")
+    )
+  );
 
   context.subscriptions.push(
     vscode.languages.registerHoverProvider(
@@ -2871,6 +2926,15 @@ const registerPhpCompletionProvider = () => {
         const lastClose = before.lastIndexOf("}}");
         if (lastOpen > lastClose) {
           return [];
+        }
+
+        // ────────── Bail out if inside a PHP tag <…> or </…> ───────────────
+        const lt = uptoCursor.lastIndexOf("<");
+        if (lt !== -1) {
+          const afterLt = uptoCursor.slice(lt + 1);
+          if (/\s/.test(afterLt)) {
+            return; // ← NEW EARLY EXIT
+          }
         }
 
         // 3️⃣ Load class-log and build component completions
