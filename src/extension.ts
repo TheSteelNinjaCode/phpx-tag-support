@@ -56,7 +56,6 @@ interface PrismaFieldProviderConfig {
 }
 
 type VarName = "pphp" | "store" | "searchParams";
-type PrismaOp = "create" | "find" | "updateData" | "updateWhere" | "delete";
 
 const classNameMap: Record<
   VarName,
