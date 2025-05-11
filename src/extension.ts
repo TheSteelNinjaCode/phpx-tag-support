@@ -27,6 +27,11 @@ import {
   TextDocument,
 } from "vscode";
 import { findPrismaCalls } from "./analysis/phpAst";
+import type { FqcnToFile } from "./analysis/component-props";
+import {
+  ComponentPropsProvider,
+  buildDynamicAttrItems,
+} from "./analysis/component-props";
 import { buildAttrCompletions } from "./settings/pp-attributes";
 
 /* ────────────────────────────────────────────────────────────── *
@@ -528,43 +533,51 @@ export async function activate(context: vscode.ExtensionContext) {
           const line = doc.lineAt(pos.line).text;
           const uptoCursor = line.slice(0, pos.character);
 
-          /* ① Debemos estar dentro de una etiqueta abierta -------- */
-          // Busca el último "<" antes del cursor que **no** sea "</"
+          /* ① must be inside an open tag -------------------------------- */
           const lt = uptoCursor.lastIndexOf("<");
-          if (lt === -1 || uptoCursor[lt + 1] === "/") {
-            return; // no estamos en <Tag …>
-          }
-          // Ya se cerró la etiqueta?  Ignora si hay “>” entre < y el cursor
-          if (uptoCursor.slice(lt).includes(">")) {
-            return;
-          }
+          if (lt === -1 || uptoCursor[lt + 1] === "/") return; // not <Tag …
+          if (uptoCursor.slice(lt).includes(">")) return; // tag already closed
 
-          /* ② Averigua qué atributos ya están escritos ------------ */
-          // Divide por espacios y = para quedarte con la "clave"    pp-bind=
+          /* ② figure out which <Tag … ---------------------------------- */
+          const tagMatch = uptoCursor.slice(lt).match(/^<\s*([A-Za-z0-9_]+)/);
+          const tagName = tagMatch ? tagMatch[1] : null;
+
+          /* ③ attributes already written -------------------------------- */
           const written = new Set<string>(
-            uptoCursor
-              .slice(lt) // solo "<Tag …"
-              .match(/\b[\w-]+(?==)/g) || []
+            uptoCursor.slice(lt).match(/\b[\w-]+(?==)/g) || []
           );
 
-          /* ③ Prefijo que el usuario ya empezó a escribir --------- */
+          /* ④ what’s the user typing right now? ------------------------- */
           const word = doc.getWordRangeAtPosition(pos, /[\w-]+/);
           const partial = word ? doc.getText(word) : "";
 
-          /* ④ Devuelve los atributos que faltan y matchean el pref. */
-          return buildAttrCompletions()
+          /* ⑤ STATIC completions – the list you already had ------------- */
+          const staticItems = buildAttrCompletions()
             .filter(
-              (it: vscode.CompletionItem) =>
+              (it) =>
                 !written.has(it.label as string) &&
                 (it.label as string).startsWith(partial)
             )
-            .map((it: vscode.CompletionItem) => {
-              // Si el usuario ya comenzó, sobre‑escribe solo esa parte
-              if (word) {
-                it.range = word;
-              }
+            .map((it) => {
+              if (word) it.range = word; // overwrite the partial
               return it;
             });
+
+          /* ⑥ DYNAMIC completions – public props of the component -------- */
+          const dynamicItems = tagName
+            ? buildDynamicAttrItems(
+                tagName,
+                written,
+                partial,
+                propsProvider
+              ).map((it) => {
+                if (word) it.range = word; // same overwrite behaviour
+                return it;
+              })
+            : [];
+
+          /* ⑦ return both lists (static first keeps their ordering) ------ */
+          return [...staticItems, ...dynamicItems];
         },
       },
       " ",
@@ -608,10 +621,35 @@ export async function activate(context: vscode.ExtensionContext) {
       "settings/class-log.json"
     )
   );
-  watcher.onDidChange(() => loadComponentsFromClassLog());
+  watcher.onDidChange(() => {
+    loadComponentsFromClassLog();
+    propsProvider.clear();
+  });
   watcher.onDidCreate(() => loadComponentsFromClassLog());
   watcher.onDidDelete(() => componentsCache.clear());
   context.subscriptions.push(watcher);
+
+  const fqcnToFile: FqcnToFile = (fqcn) => {
+    const entry = getComponentsFromClassLog().get(getLastPart(fqcn));
+    if (!entry) {
+      return undefined;
+    }
+
+    const sourceRoot = vscode.workspace
+      .getConfiguration("phpx-tag-support")
+      .get("sourceRoot", "src");
+
+    return path.join(
+      vscode.workspace.workspaceFolders![0].uri.fsPath,
+      sourceRoot,
+      entry.replace(/\\/g, "/") + ".php"
+    );
+  };
+
+  const propsProvider = new ComponentPropsProvider(
+    getComponentsFromClassLog(), // tag → FQCN
+    fqcnToFile // FQCN → file
+  );
 
   // Force Peek Definition for Go to Definition globally.
   updateEditorConfiguration();
