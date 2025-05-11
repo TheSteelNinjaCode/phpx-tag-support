@@ -26,8 +26,8 @@ interface PropMeta {
   doc?: string; //  first line of PHP‑Doc
 }
 
-/* helper ──────────────────────────────────────────── */
-/* helper ──────────────────────────────────────────── */
+type Cached = { mtime: number; props: PropMeta[] };
+
 function typeToString(t: any | undefined): string {
   if (!t) {
     return "mixed";
@@ -60,7 +60,33 @@ function typeToString(t: any | undefined): string {
   }
 }
 
-type Cached = { mtime: number; props: PropMeta[] };
+/** Si no hay tipo declarado, dedúcelo a partir del literal. */
+function inferTypeFromValue(v: any | undefined): string {
+  console.log("🚀 ~ inferTypeFromValue ~ v:", v);
+  if (!v) {
+    return "mixed";
+  }
+
+  switch (v.kind) {
+    case "string":
+      return "string";
+    case "number":
+      return Number.isInteger(v.value) ? "int" : "float";
+    case "boolean":
+      return "bool";
+    case "array": {
+      // ¿array homogéneo de strings?  →  string[]
+      const allStrings = (v.items as any[]).every(
+        (it) => (it.value ?? it).kind === "string"
+      );
+      return allStrings ? "string[]" : "array";
+    }
+    case "nullkeyword":
+      return "null";
+    default:
+      return "mixed";
+  }
+}
 
 /* ------------------------------------------------------------- *
  *  ComponentPropsProvider – extracts public props from PHPX classes
@@ -73,12 +99,6 @@ export class ComponentPropsProvider {
     private readonly fqcnToFile: FqcnToFile
   ) {}
 
-  /** Public properties for <Tag>.  Empty array if not found. */
-  /** Return the public props (name + type + doc) declared on a component */
-  /** Return the public props (name + type + default + doc) declared on a component */
-  public getProps(
-    tag: string
-  ): PropMeta[]; /** Grab the public props (name + type + default + doc) for <Tag>. */
   public getProps(tag: string): PropMeta[] {
     /* 1️⃣  where is the PHP file for this tag? */
     const fqcn = this.tagMap.get(tag);
@@ -96,12 +116,14 @@ export class ComponentPropsProvider {
 
     /* 3️⃣  parse + extract  -------------------------------------- */
     const ast = php.parseCode(fs.readFileSync(file, "utf8"), file);
+    console.log("🚀 ~ ComponentPropsProvider ~ getProps ~ ast:", ast);
     const props: PropMeta[] = [];
 
     this.walk(ast, (node) => {
       if (
         node.kind !== "propertystatement" &&
-        node.kind !== "promotedproperty"
+        node.kind !== "promotedproperty" &&
+        node.kind !== "classconstant"
       ) {
         return;
       }
@@ -113,25 +135,41 @@ export class ComponentPropsProvider {
         return;
       }
 
-      /* PHP‑Doc (optional) that precedes the statement */
-      const docRaw: string | undefined = (stmt.leadingComments ?? [])
+      /* PHP‑Doc (optional) */
+      const docRaw = (stmt.leadingComments ?? [])
         .filter(
           (c: any) => c.kind === "commentblock" && c.value.startsWith("*")
         )
         .map((c: any) => c.value.replace(/^\*\s*/gm, "").trim())
         .pop();
 
-      for (const p of stmt.properties ?? []) {
+      /* ───────────────────────────────────────────────────────────── */
+      /* A) ‑‑‑ properties & promoted‑properties ‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑ */
+      if (node.kind !== "classconstant") {
+        for (const p of stmt.properties ?? []) {
+          handleMember(p.name, p.value);
+        }
+      } else {
+        /* B) ‑‑‑ class constants ‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑ */
+        for (const c of stmt.constants ?? []) {
+          handleMember(c.name, c.value);
+        }
+      }
+      /* ───────────────────────────────────────────────────────────── */
+
+      function handleMember(nameNode: any, valueNode: any | undefined): void {
+        console.log(
+          "🚀 ~ ComponentPropsProvider ~ handleMember ~ valueNode:",
+          valueNode
+        );
         const name =
-          typeof p.name === "string"
-            ? p.name
-            : (p.name?.name as string | undefined);
+          typeof nameNode === "string" ? nameNode : (nameNode?.name as string);
         if (!name) {
-          continue;
+          return;
         }
 
-        /* ← type resolution */
-        let finalType = typeToString(p.type ?? stmt.type);
+        // 1) @var PHP‑Doc siempre manda
+        let finalType: string | undefined;
         if (docRaw) {
           const m = /@var\s+([^\s]+)/.exec(docRaw);
           if (m) {
@@ -139,29 +177,40 @@ export class ComponentPropsProvider {
           }
         }
 
-        /* ← default scalar value, if any */
+        // 2) declaración de tipo en código (propiedad/promoted property)
+        if (!finalType && stmt.type) {
+          finalType = typeToString(stmt.type);
+        }
+
+        // 3) nada aún → intenta deducir del valor literal
+        if (!finalType || finalType === "mixed") {
+          finalType = inferTypeFromValue(valueNode);
+        }
+
+        /* ← default value (usa la lógica nueva array‑keys) */
         let def: string | string[] | undefined;
-
-        if (p.value) {
-          switch (p.value.kind) {
+        if (valueNode) {
+          switch (valueNode.kind) {
             case "string":
-              // pipe‑string  → keep as text
-              def = p.value.value; // "default|outline"
+              def = valueNode.value;
               break;
-
-            case "array":
-              // literal [ 'default', 'outline' ]
-              def = (p.value.items as any[])
-                .filter((it) => it.value?.kind === "string")
-                .map((it) => it.value.value as string);
+            case "array": {
+              const keys: string[] = [];
+              for (const item of valueNode.items as any[]) {
+                if (item.key && item.key.kind === "string") {
+                  keys.push(item.key.value as string);
+                } else if (!item.key && item.value?.kind === "string") {
+                  keys.push(item.value.value as string);
+                }
+              }
+              def = keys;
               break;
-
-            /* basic scalars for completeness */
+            }
             case "number":
-              def = String(p.value.value);
+              def = String(valueNode.value);
               break;
             case "boolean":
-              def = p.value.value ? "true" : "false";
+              def = valueNode.value ? "true" : "false";
               break;
             case "nullkeyword":
               def = "null";
@@ -169,17 +218,16 @@ export class ComponentPropsProvider {
           }
         }
 
-        const doc = docRaw?.split(/\r?\n/)[0]; // first line of PHP‑Doc
         props.push({
           name,
           type: finalType,
           default: Array.isArray(def) ? def.join("|") : def,
-          doc,
+          doc: docRaw?.split(/\r?\n/)[0],
         });
       }
     });
 
-    /* 4️⃣  cache + return  -------------------------------------- */
+    /* 4️⃣  cache + return */
     this.cache.set(tag, { mtime, props });
     return props;
   }
