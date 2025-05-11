@@ -527,7 +527,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.languages.registerCompletionItemProvider(
-      { language: "php" }, // o ['php','html','blade'] etc.
+      { language: "php" },
       {
         provideCompletionItems(doc, pos) {
           const line = doc.lineAt(pos.line).text;
@@ -535,8 +535,12 @@ export async function activate(context: vscode.ExtensionContext) {
 
           /* ① must be inside an open tag -------------------------------- */
           const lt = uptoCursor.lastIndexOf("<");
-          if (lt === -1 || uptoCursor[lt + 1] === "/") return; // not <Tag …
-          if (uptoCursor.slice(lt).includes(">")) return; // tag already closed
+          if (lt === -1 || uptoCursor[lt + 1] === "/") {
+            return;
+          }
+          if (uptoCursor.slice(lt).includes(">")) {
+            return;
+          }
 
           /* ② figure out which <Tag … ---------------------------------- */
           const tagMatch = uptoCursor.slice(lt).match(/^<\s*([A-Za-z0-9_]+)/);
@@ -559,7 +563,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 (it.label as string).startsWith(partial)
             )
             .map((it) => {
-              if (word) it.range = word; // overwrite the partial
+              if (word) {
+                it.range = word;
+              }
               return it;
             });
 
@@ -571,7 +577,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 partial,
                 propsProvider
               ).map((it) => {
-                if (word) it.range = word; // same overwrite behaviour
+                if (word) {
+                  it.range = word;
+                }
                 return it;
               })
             : [];
@@ -628,6 +636,117 @@ export async function activate(context: vscode.ExtensionContext) {
   watcher.onDidCreate(() => loadComponentsFromClassLog());
   watcher.onDidDelete(() => componentsCache.clear());
   context.subscriptions.push(watcher);
+
+  // ── <Tag  attr="…">  HOVER  ────────────────────────────────────
+  context.subscriptions.push(
+    vscode.languages.registerHoverProvider("php", {
+      provideHover(doc, pos) {
+        /* ① Make sure we are inside an opening tag,   <Tag …          */
+        const line = doc.lineAt(pos.line).text;
+        const uptoCur = line.slice(0, pos.character);
+        const lt = uptoCur.lastIndexOf("<");
+        if (lt === -1 || uptoCur[lt + 1] === "/") {
+          return;
+        }
+        if (uptoCur.slice(lt).includes(">")) {
+          return;
+        }
+
+        /* ② What tag are we in?   <Button … */
+        const tagMatch = uptoCur.slice(lt).match(/^<\s*([A-Za-z0-9_]+)/);
+        const tagName = tagMatch?.[1];
+        if (!tagName) {
+          return;
+        }
+
+        /* ③ Which *word* are we hovering?  (php matches attr names well) */
+        const wr = doc.getWordRangeAtPosition(pos, /[\w-]+/);
+        if (!wr) {
+          return;
+        }
+        const attr = doc.getText(wr);
+
+        /* ④ Ask our props‑provider for meta */
+        const meta = propsProvider
+          .getProps(tagName)
+          .find((p) => p.name === attr);
+        if (!meta) {
+          return;
+        }
+
+        /* ⑤ Build the Markdown tooltip */
+        const md = new vscode.MarkdownString();
+        md.appendCodeblock(
+          meta.default
+            ? `${meta.name}: ${meta.type} = ${meta.default}`
+            : `${meta.name}: ${meta.type}`,
+          "php"
+        );
+        if (meta.doc) {
+          md.appendMarkdown("\n\n" + meta.doc);
+        }
+
+        return new vscode.Hover(md, wr);
+      },
+    })
+  );
+
+  /* ── attr="…" VALUE completion ─────────────────────────────── */
+  context.subscriptions.push(
+    vscode.languages.registerCompletionItemProvider(
+      "php",
+      {
+        provideCompletionItems(doc, pos) {
+          const line = doc.lineAt(pos.line).text;
+          const uptoCur = line.slice(0, pos.character);
+
+          /* ① we must be inside  … name="|" …  ------------------- */
+          const attrValRe =
+            /<\s*([A-Za-z0-9_]+)[^>]*\b([A-Za-z0-9_-]+)\s*=\s*"([^"]*)$/;
+          const m = attrValRe.exec(uptoCur);
+          if (!m) {
+            return;
+          }
+
+          const [, tag, attrName, partial] = m;
+
+          /* ② find the prop meta (has name, type, default, doc) -- */
+          const meta = propsProvider
+            .getProps(tag)
+            .find((p) => p.name === attrName);
+          if (!meta?.default) {
+            return;
+          }
+
+          /* ③ collect options ----------------------------------- */
+          let options: string[];
+          if (Array.isArray(meta.default)) {
+            // future‑proof: default stored as an array
+            options = meta.default;
+          } else {
+            // pipe‑separated string  'a|b|c'
+            options = String(meta.default).split("|");
+          }
+
+          return options
+            .filter((opt) => opt.startsWith(partial)) // honour prefix
+            .map((opt) => {
+              const it = new vscode.CompletionItem(
+                opt,
+                vscode.CompletionItemKind.EnumMember
+              );
+              it.insertText = opt; // just the value
+              it.range = new vscode.Range(
+                pos.translate(0, -partial.length),
+                pos
+              );
+              return it;
+            });
+        },
+      },
+      '"' // trigger when user types a quote inside attr value
+    )
+  );
 
   const fqcnToFile: FqcnToFile = (fqcn) => {
     const entry = getComponentsFromClassLog().get(getLastPart(fqcn));

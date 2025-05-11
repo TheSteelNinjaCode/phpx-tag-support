@@ -19,11 +19,54 @@ const FLAG_PUBLIC = 4;
 export type FqcnToFile = (fqcn: string) => string | undefined;
 export type TagMap = Map<string, string>; // «<TagName>» -> FQCN
 
+interface PropMeta {
+  name: string;
+  type: string; //  string|int|null …
+  default?: string; //  already‑formatted literal
+  doc?: string; //  first line of PHP‑Doc
+}
+
+/* helper ──────────────────────────────────────────── */
+/* helper ──────────────────────────────────────────── */
+function typeToString(t: any | undefined): string {
+  if (!t) {
+    return "mixed";
+  }
+
+  switch (t.kind) {
+    /* plain Foo */
+    case "identifier":
+      return t.name;
+
+    /* string, int, DateTime, …   (php‑parser’s own node) */
+    case "typereference":
+      return t.raw ?? t.name;
+
+    /* ?Foo */
+    case "nullabletype":
+    case "nullabletypereference": // ← new
+      return `${typeToString(t.what ?? t.type)}|null`;
+
+    /* Foo|Bar */
+    case "uniontype":
+      return t.types.map(typeToString).join("|");
+
+    /* Foo&Bar */
+    case "intersectiontype":
+      return t.types.map(typeToString).join("&");
+
+    default:
+      return "mixed";
+  }
+}
+
+type Cached = { mtime: number; props: PropMeta[] };
+
 /* ------------------------------------------------------------- *
  *  ComponentPropsProvider – extracts public props from PHPX classes
  * ------------------------------------------------------------- */
 export class ComponentPropsProvider {
-  private readonly cache = new Map<string, string[]>(); // tag -> props[]
+  private readonly cache = new Map<string, Cached>();
 
   constructor(
     private readonly tagMap: TagMap,
@@ -31,46 +74,113 @@ export class ComponentPropsProvider {
   ) {}
 
   /** Public properties for <Tag>.  Empty array if not found. */
-  public getProps(tag: string): string[] {
-    console.log("🚀 ~ ComponentPropsProvider ~ getProps ~ tag:", tag);
-    if (this.cache.has(tag)) return this.cache.get(tag)!;
-
+  /** Return the public props (name + type + doc) declared on a component */
+  /** Return the public props (name + type + default + doc) declared on a component */
+  public getProps(
+    tag: string
+  ): PropMeta[]; /** Grab the public props (name + type + default + doc) for <Tag>. */
+  public getProps(tag: string): PropMeta[] {
+    /* 1️⃣  where is the PHP file for this tag? */
     const fqcn = this.tagMap.get(tag);
-    console.log("🚀 ~ ComponentPropsProvider ~ getProps ~ fqcn:", fqcn);
-    if (!fqcn) return [];
+    const file = fqcn && this.fqcnToFile(fqcn);
+    if (!file || !fs.existsSync(file)) {
+      return [];
+    }
 
-    const file = this.fqcnToFile(fqcn);
-    console.log("🚀 ~ ComponentPropsProvider ~ getProps ~ file:", file);
-    if (!file || !fs.existsSync(file)) return [];
+    /* 2️⃣  up‑to‑date cache hit?  -------------------------------- */
+    const mtime = fs.statSync(file).mtimeMs; // current disk stamp
+    const hit = this.cache.get(tag); // {mtime, props}
+    if (hit && hit.mtime === mtime) {
+      return hit.props;
+    } // still fresh
 
-    const code = fs.readFileSync(file, "utf8");
-    const ast = php.parseCode(code, file);
-    console.log("🚀 ~ ComponentPropsProvider ~ getProps ~ ast:", ast);
+    /* 3️⃣  parse + extract  -------------------------------------- */
+    const ast = php.parseCode(fs.readFileSync(file, "utf8"), file);
+    const props: PropMeta[] = [];
 
-    const props: string[] = [];
-
-    this.walk(ast, (n) => {
-      /* we only care about propertystatement (or promotedproperty in ≥3.3) */
-      if (n.kind !== "propertystatement" && n.kind !== "promotedproperty")
+    this.walk(ast, (node) => {
+      if (
+        node.kind !== "propertystatement" &&
+        node.kind !== "promotedproperty"
+      ) {
         return;
+      }
 
-      const stmt: any = n;
-
-      /* ── visibility ─────────────────────────────────────────────── */
+      const stmt: any = node;
       const isPublic =
-        (stmt.flags !== undefined ? (stmt.flags & FLAG_PUBLIC) !== 0 : false) ||
-        stmt.visibility === "public";
-      if (!isPublic) return;
+        ((stmt.flags ?? 0) & FLAG_PUBLIC) !== 0 || stmt.visibility === "public";
+      if (!isPublic) {
+        return;
+      }
 
-      /* ── iterate over every declared variable on this line ───────── */
-      for (const prop of stmt.properties ?? []) {
-        const nm = typeof prop.name === "string" ? prop.name : prop.name?.name;
-        if (nm) props.push(nm);
+      /* PHP‑Doc (optional) that precedes the statement */
+      const docRaw: string | undefined = (stmt.leadingComments ?? [])
+        .filter(
+          (c: any) => c.kind === "commentblock" && c.value.startsWith("*")
+        )
+        .map((c: any) => c.value.replace(/^\*\s*/gm, "").trim())
+        .pop();
+
+      for (const p of stmt.properties ?? []) {
+        const name =
+          typeof p.name === "string"
+            ? p.name
+            : (p.name?.name as string | undefined);
+        if (!name) {
+          continue;
+        }
+
+        /* ← type resolution */
+        let finalType = typeToString(p.type ?? stmt.type);
+        if (docRaw) {
+          const m = /@var\s+([^\s]+)/.exec(docRaw);
+          if (m) {
+            finalType = m[1];
+          }
+        }
+
+        /* ← default scalar value, if any */
+        let def: string | string[] | undefined;
+
+        if (p.value) {
+          switch (p.value.kind) {
+            case "string":
+              // pipe‑string  → keep as text
+              def = p.value.value; // "default|outline"
+              break;
+
+            case "array":
+              // literal [ 'default', 'outline' ]
+              def = (p.value.items as any[])
+                .filter((it) => it.value?.kind === "string")
+                .map((it) => it.value.value as string);
+              break;
+
+            /* basic scalars for completeness */
+            case "number":
+              def = String(p.value.value);
+              break;
+            case "boolean":
+              def = p.value.value ? "true" : "false";
+              break;
+            case "nullkeyword":
+              def = "null";
+              break;
+          }
+        }
+
+        const doc = docRaw?.split(/\r?\n/)[0]; // first line of PHP‑Doc
+        props.push({
+          name,
+          type: finalType,
+          default: Array.isArray(def) ? def.join("|") : def,
+          doc,
+        });
       }
     });
 
-    this.cache.set(tag, props);
-    console.log("🚀 ~ ComponentPropsProvider ~ getProps ~ props:", props);
+    /* 4️⃣  cache + return  -------------------------------------- */
+    this.cache.set(tag, { mtime, props });
     return props;
   }
 
@@ -84,10 +194,14 @@ export class ComponentPropsProvider {
     visit(node);
     for (const key of Object.keys(node)) {
       const child = (node as any)[key];
-      if (!child) continue;
-      if (Array.isArray(child)) child.forEach((c) => c && this.walk(c, visit));
-      else if (typeof child === "object" && child.kind)
+      if (!child) {
+        continue;
+      }
+      if (Array.isArray(child)) {
+        child.forEach((c) => c && this.walk(c, visit));
+      } else if (typeof child === "object" && child.kind) {
         this.walk(child as Node, visit);
+      }
     }
   }
 }
@@ -101,19 +215,32 @@ export function buildDynamicAttrItems(
   partial: string,
   provider: ComponentPropsProvider
 ): vscode.CompletionItem[] {
-  console.log("🚀 ~ tag:", tag);
-  console.log("🚀 ~ written:", written);
-  console.log("🚀 ~ partial:", partial);
-  console.log("🚀 ~ provider:", provider);
   return provider
     .getProps(tag)
-    .filter((p) => !written.has(p) && p.startsWith(partial))
-    .map((p) => {
-      const it = new vscode.CompletionItem(p, vscode.CompletionItemKind.Field);
-      it.insertText = new vscode.SnippetString(`${p}="$0"`);
-      it.documentation = new vscode.MarkdownString(
-        `Public **property** \`${p}\` of the component \`${tag}\``
+    .filter(({ name }) => !written.has(name) && name.startsWith(partial))
+    .map(({ name, type, default: def, doc }) => {
+      const item = new vscode.CompletionItem(
+        name,
+        vscode.CompletionItemKind.Field
       );
-      return it;
+
+      /* insert   variant="$0"   as before */
+      item.insertText = new vscode.SnippetString(`${name}="$0"`);
+
+      /* list label  →  ": string = \"default\""  */
+      item.detail = def ? `: ${type} = ${def}` : `: ${type}`;
+
+      /* docs / hover */
+      const md = new vscode.MarkdownString();
+      md.appendCodeblock(
+        def ? `${name}: ${type} = ${def}` : `${name}: ${type}`,
+        "php"
+      );
+      if (doc) {
+        md.appendMarkdown("\n\n" + doc);
+      }
+      item.documentation = md;
+
+      return item;
     });
 }
