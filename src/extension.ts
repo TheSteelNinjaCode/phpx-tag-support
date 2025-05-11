@@ -526,6 +526,98 @@ export async function activate(context: vscode.ExtensionContext) {
   parseStubsWithTS(stubText);
 
   context.subscriptions.push(
+    vscode.languages.registerDefinitionProvider(
+      { language: "php", scheme: "file" },
+      {
+        provideDefinition(document, position) {
+          // 1) Are we on an identifier?
+          const wordRange = document.getWordRangeAtPosition(
+            position,
+            /[A-Za-z_]\w*/
+          );
+          if (!wordRange) {
+            return;
+          }
+
+          const word = document.getText(wordRange);
+          const line = document.lineAt(position).text;
+          // 2) Are we inside an onXXX="…"?  (simple check)
+          const beforeCursor = line.slice(0, position.character + 1);
+          if (!/\bon[A-Za-z]+\s*=\s*"[^"]*$/.test(beforeCursor)) {
+            return;
+          }
+
+          // 3) Look for `function <word>(` somewhere in the file
+          const text = document.getText();
+          const fnRegex = new RegExp(`function\\s+${word}\\s*\\(`, "g");
+          let match: RegExpExecArray | null;
+          while ((match = fnRegex.exec(text))) {
+            // positionAt(match.index) is at the `f` of `function`
+            // but we want to point at the start of the identifier:
+            const idOffset = match.index + match[0].indexOf(word);
+            const loc = document.positionAt(idOffset);
+            return new vscode.Location(document.uri, loc);
+          }
+        },
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.languages.registerCompletionItemProvider(
+      { language: "php", scheme: "file" },
+      {
+        provideCompletionItems(document, position) {
+          // 1) Only when inside onXXX="…"
+          const line = document
+            .lineAt(position.line)
+            .text.slice(0, position.character);
+          if (!/\bon[A-Za-z]+\s*=\s*"[^"]*$/.test(line)) {
+            return;
+          }
+
+          // 2) What the user’s already typed
+          const wordRange = document.getWordRangeAtPosition(
+            position,
+            /[A-Za-z_]\w*/
+          );
+          const partial = wordRange ? document.getText(wordRange) : "";
+
+          // 3) Grab the full document text
+          const text = document.getText();
+          const names = new Set<string>();
+
+          // 4) Scan only your PHP blocks for functions (skip any starting with “_”)
+          const phpBlockRe = /<\?php\b([\s\S]*?)\?>/gi;
+          for (const block of text.matchAll(phpBlockRe)) {
+            const phpCode = block[1];
+            for (const fn of phpCode.matchAll(
+              /function\s+([A-Za-z]\w*)\s*\(/g
+            )) {
+              names.add(fn[1]);
+            }
+          }
+
+          // 5) Build and return CompletionItems for those PHP functions
+          return Array.from(names)
+            .filter((fn) => !partial || fn.startsWith(partial))
+            .map((fn) => {
+              const item = new vscode.CompletionItem(
+                fn,
+                vscode.CompletionItemKind.Function
+              );
+              if (wordRange) {
+                item.range = wordRange;
+              }
+              return item;
+            });
+        },
+      },
+      `"` // trigger inside on…=""
+    )
+  );
+
+  context.subscriptions.push(
     vscode.languages.registerCompletionItemProvider(
       { language: "php" },
       {
@@ -1557,13 +1649,17 @@ function validateComponentPropValues(
   while ((m = tagRe.exec(text))) {
     const [, tag, attrPart] = m;
     const props = propsProvider.getProps(tag); // meta for this tag
-    if (!props.length) { continue; }
+    if (!props.length) {
+      continue;
+    }
 
     let a: RegExpExecArray | null;
     while ((a = attrRe.exec(attrPart))) {
       const [, attrName, value] = a;
       const meta = props.find((p) => p.name === attrName);
-      if (!meta?.default) { continue; } // nothing to validate
+      if (!meta?.default) {
+        continue;
+      } // nothing to validate
 
       /* build the allowed list – either pipe or literal array */
       const allowed = String(meta.default).split("|").filter(Boolean);
