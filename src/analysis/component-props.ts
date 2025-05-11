@@ -62,7 +62,6 @@ function typeToString(t: any | undefined): string {
 
 /** Si no hay tipo declarado, dedúcelo a partir del literal. */
 function inferTypeFromValue(v: any | undefined): string {
-  console.log("🚀 ~ inferTypeFromValue ~ v:", v);
   if (!v) {
     return "mixed";
   }
@@ -70,10 +69,21 @@ function inferTypeFromValue(v: any | undefined): string {
   switch (v.kind) {
     case "string":
       return "string";
-    case "number":
-      return Number.isInteger(v.value) ? "int" : "float";
+
+    case "number": {
+      // ① parsear el literal
+      const num = Number(v.value);
+      // ② si no es un número válido → mixed
+      if (Number.isNaN(num)) {
+        return "mixed";
+      }
+      // ③ comprobar si es entero o no
+      return Number.isInteger(num) ? "int" : "float";
+    }
+
     case "boolean":
       return "bool";
+
     case "array": {
       // ¿array homogéneo de strings?  →  string[]
       const allStrings = (v.items as any[]).every(
@@ -81,8 +91,10 @@ function inferTypeFromValue(v: any | undefined): string {
       );
       return allStrings ? "string[]" : "array";
     }
+
     case "nullkeyword":
       return "null";
+
     default:
       return "mixed";
   }
@@ -116,7 +128,6 @@ export class ComponentPropsProvider {
 
     /* 3️⃣  parse + extract  -------------------------------------- */
     const ast = php.parseCode(fs.readFileSync(file, "utf8"), file);
-    console.log("🚀 ~ ComponentPropsProvider ~ getProps ~ ast:", ast);
     const props: PropMeta[] = [];
 
     this.walk(ast, (node) => {
@@ -158,10 +169,6 @@ export class ComponentPropsProvider {
       /* ───────────────────────────────────────────────────────────── */
 
       function handleMember(nameNode: any, valueNode: any | undefined): void {
-        console.log(
-          "🚀 ~ ComponentPropsProvider ~ handleMember ~ valueNode:",
-          valueNode
-        );
         const name =
           typeof nameNode === "string" ? nameNode : (nameNode?.name as string);
         if (!name) {
