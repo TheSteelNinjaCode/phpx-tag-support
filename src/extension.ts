@@ -542,6 +542,19 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
           }
 
+          /* 0️⃣  bail out if we’re already inside an attribute value  */
+          /* look for the *last* equal‑sign before the cursor *inside* the tag */
+          const eq = uptoCursor.lastIndexOf("=");
+          if (eq > lt) {
+            // any quote after that “=” that hasn’t been closed yet?
+            const afterEq = uptoCursor.slice(eq + 1);
+            const openQuote = afterEq.match(/['"]/); // first quote
+            const closeQuote = afterEq.match(/(['"])[^'"]*\1\s*$/); // matching closer
+            if (openQuote && !closeQuote) {
+              return; // ↩︎  we’re inside  foo="|"
+            }
+          }
+
           /* ② figure out which <Tag … ---------------------------------- */
           const tagMatch = uptoCursor.slice(lt).match(/^<\s*([A-Za-z0-9_]+)/);
           const tagName = tagMatch ? tagMatch[1] : null;
@@ -1467,6 +1480,7 @@ export async function activate(context: vscode.ExtensionContext) {
       setTimeout(() => {
         validatePphpCalls(doc, pphpSigDiags);
         rebuildMustacheStub(doc);
+        validateComponentPropValues(doc, propsProvider);
         pendingTimers.delete(key);
       }, 500)
     );
@@ -1515,6 +1529,64 @@ export async function activate(context: vscode.ExtensionContext) {
     null,
     context.subscriptions
   );
+}
+
+/* ────────────────────────────────────────────────────────────── *
+ *        1️⃣  A tiny validator for component‑prop *values*        *
+ * ────────────────────────────────────────────────────────────── */
+
+const ATTR_VALUE_DIAG =
+  vscode.languages.createDiagnosticCollection("phpx-attr-values");
+
+function validateComponentPropValues(
+  doc: vscode.TextDocument,
+  propsProvider: ComponentPropsProvider
+) {
+  if (doc.languageId !== "php") {
+    return;
+  }
+
+  const text = doc.getText();
+  const diags: vscode.Diagnostic[] = [];
+
+  //   <Tag  foo="bar"  other="…" >
+  const tagRe = /<\s*([A-Z][A-Za-z0-9_]*)\b([^>]*?)\/?>/g; // ① whole tag
+  const attrRe = /([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"/g; // ② every attr="val"
+
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(text))) {
+    const [, tag, attrPart] = m;
+    const props = propsProvider.getProps(tag); // meta for this tag
+    if (!props.length) { continue; }
+
+    let a: RegExpExecArray | null;
+    while ((a = attrRe.exec(attrPart))) {
+      const [, attrName, value] = a;
+      const meta = props.find((p) => p.name === attrName);
+      if (!meta?.default) { continue; } // nothing to validate
+
+      /* build the allowed list – either pipe or literal array */
+      const allowed = String(meta.default).split("|").filter(Boolean);
+
+      if (allowed.length && !allowed.includes(value)) {
+        // map the attr name to its location in the real document
+        const tagStart = m.index; // where "<Tag" is
+        const attrIndexInTag = m[0].indexOf(a[0]); // offset inside tag
+        const absStart = tagStart + attrIndexInTag + a[0].indexOf(value); // «v» in foo="v"
+        const absEnd = absStart + value.length;
+
+        diags.push(
+          new vscode.Diagnostic(
+            new vscode.Range(doc.positionAt(absStart), doc.positionAt(absEnd)),
+            `Invalid value "${value}". Allowed: ${allowed.join(", ")}`,
+            vscode.DiagnosticSeverity.Warning
+          )
+        );
+      }
+    }
+  }
+
+  ATTR_VALUE_DIAG.set(doc.uri, diags);
 }
 
 /* ────────────────────────────────────────────────────────────── *
