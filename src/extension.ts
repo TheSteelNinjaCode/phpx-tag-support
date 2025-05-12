@@ -2191,6 +2191,85 @@ function validateSelectIncludeExclusivity(
   return true;
 }
 
+/**
+ * Validates an orderBy => [ 'field' => 'asc'|'desc', … ] block
+ */
+function validateOrderByEntries(
+  doc: vscode.TextDocument,
+  arr: PhpArray,
+  fields: Map<string, FieldInfo>,
+  modelName: string,
+  diags: vscode.Diagnostic[]
+) {
+  // 1) find the “orderBy” entry
+  const orderByEntry = (arr.items as Entry[]).find(
+    (e) => e.key?.kind === "string" && (e.key as any).value === "orderBy"
+  );
+  if (!orderByEntry) {
+    return;
+  }
+
+  // 2) ensure it’s an array literal
+  if (!isArray(orderByEntry.value)) {
+    diags.push(
+      new vscode.Diagnostic(
+        rangeOf(doc, orderByEntry.key!.loc!),
+        "`orderBy` must be an array literal of { field => 'asc'|'desc' } objects.",
+        vscode.DiagnosticSeverity.Error
+      )
+    );
+    return;
+  }
+
+  // 3) loop over each entry inside that array
+  const orderArr = orderByEntry.value as PhpArray;
+  for (const itm of orderArr.items.filter(
+    // inline the type-guard here to avoid any scope issues
+    (n): n is Entry => n.kind === "entry"
+  )) {
+    // only string keys are valid
+    if (itm.key!.kind !== "string") {
+      continue;
+    }
+
+    // 3a) field must exist on the model
+    const col =
+      itm.key && itm.key.kind === "string" ? (itm.key as any).value : null;
+    if (!itm.key) {
+      return;
+    }
+    const keyRange = rangeOf(doc, itm.key.loc!);
+    if (!fields.has(col)) {
+      diags.push(
+        new vscode.Diagnostic(
+          keyRange,
+          `The column "${col}" in orderBy does not exist on ${modelName}.`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      continue;
+    }
+
+    // 3b) direction must be exactly 'asc' or 'desc'
+    if (!itm.value?.loc) {
+      continue;
+    }
+    const raw = doc
+      .getText(rangeOf(doc, itm.value.loc))
+      .trim()
+      .replace(/^['"]|['"]$/g, "");
+    if (raw !== "asc" && raw !== "desc") {
+      diags.push(
+        new vscode.Diagnostic(
+          rangeOf(doc, itm.value.loc),
+          `Invalid sort direction "${raw}". Allowed values: "asc", "desc".`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    }
+  }
+}
+
 export async function validateCreateCall(
   doc: vscode.TextDocument,
   collection: vscode.DiagnosticCollection
@@ -2394,6 +2473,8 @@ async function validateReadCall(
         diags
       );
 
+      validateOrderByEntries(doc, arr as PhpArray, fields, call.model, diags);
+
       continue;
     }
 
@@ -2413,6 +2494,8 @@ async function validateReadCall(
       call.model,
       diags
     );
+
+    validateOrderByEntries(doc, arr as PhpArray, fields, call.model, diags);
   }
 
   collection.set(doc.uri, diags);
