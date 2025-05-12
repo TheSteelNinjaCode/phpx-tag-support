@@ -1046,8 +1046,6 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  /* ---------------- live pphp.foo(...) validation ---------------- */
-
   // ❶ ▶︎ Declare once at the top:
   const ROOT_KEYS_MAP = {
     create: ["data", "include", "omit", "select"] as const,
@@ -1180,6 +1178,18 @@ export async function activate(context: vscode.ExtensionContext) {
     return null;
   }
 
+  function makeReplaceRange(
+    doc: vscode.TextDocument,
+    pos: vscode.Position,
+    alreadyLen: number
+  ): vscode.Range {
+    const start = pos.translate(0, -alreadyLen);
+    const tail = doc.getText(new vscode.Range(pos, pos.translate(0, 4)));
+    const m = /^\s*=>\s*/.exec(tail);
+    const end = m ? pos.translate(0, m[0].length) : pos.translate(0, 1);
+    return new vscode.Range(start, end);
+  }
+
   // ❷ ▶︎ In your provider:
   function registerPrismaFieldProvider(): vscode.Disposable {
     return vscode.languages.registerCompletionItemProvider(
@@ -1291,10 +1301,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     vscode.CompletionItemKind.Keyword
                   );
                   it.insertText = new vscode.SnippetString(`${rk}' => $0`);
-                  // overwrite exactly the opening‐quote + any partial you typed
-                  const replaceStart = pos.translate(0, -already.length);
-                  const replaceEnd = pos.translate(0, 1); // Define replaceEnd
-                  it.range = new vscode.Range(replaceStart, replaceEnd);
+                  it.range = makeReplaceRange(doc, pos, already.length);
                   return it;
                 });
               }
@@ -1326,15 +1333,49 @@ export async function activate(context: vscode.ExtensionContext) {
             }
           }
 
-          if (!currentRoot || !nestedArrLoc || entrySide !== "key") {
-            return;
-          }
-
-          // ————— Otherwise: suggest *model fields* for blocks that accept fields —————
           const fieldMap = (await getModelMap()).get(modelName);
           if (!fieldMap) {
             return;
           }
+
+          // ── special: handle both key & value for orderBy ────────────
+          if (currentRoot === "orderBy") {
+            const orderByEntry = (argsArr as PhpArray).items.find(
+              (e): e is Entry =>
+                e.kind === "entry" &&
+                isEntry(e) &&
+                e.key?.kind === "string" &&
+                (e.key as any).value === "orderBy"
+            );
+            if (orderByEntry && isArray(orderByEntry.value)) {
+              const orderArr = orderByEntry.value as PhpArray;
+              const s = lastPrisma + orderArr.loc!.start.offset;
+              const e = lastPrisma + orderArr.loc!.end.offset;
+              if (curOffset >= s && curOffset <= e) {
+                for (const itm of orderArr.items.filter(isEntry) as Entry[]) {
+                  const side = sectionOfEntry(itm, curOffset, lastPrisma);
+                  if (entrySide !== "key" && side === "value") {
+                    return ["asc", "desc"].map((dir) => {
+                      const it = new vscode.CompletionItem(
+                        dir,
+                        vscode.CompletionItemKind.Value
+                      );
+                      it.insertText = new vscode.SnippetString(`${dir}'`);
+                      it.range = makeReplaceRange(doc, pos, already.length);
+                      return it;
+                    });
+                  }
+                }
+              }
+            }
+          }
+
+          // ── all other roots only on the *key* side ───────────────────
+          if (!currentRoot || !nestedArrLoc || entrySide !== "key") {
+            return;
+          }
+
+          // ── we’re inside a nested array for one of the rootKeys ───────
           const allFields = [...fieldMap.entries()];
           let suggestions: [string, FieldInfo][] = [];
 
@@ -1357,10 +1398,7 @@ export async function activate(context: vscode.ExtensionContext) {
             selectItem.documentation = new vscode.MarkdownString(
               "**Select** which fields to count"
             );
-            selectItem.range = new vscode.Range(
-              pos.translate(0, -already.length),
-              pos.translate(0, 1)
-            );
+            selectItem.range = makeReplaceRange(doc, pos, already.length);
             return [selectItem];
           } else if (activeRoot === "select") {
             suggestions = allFields.filter(([, info]) =>
@@ -1421,10 +1459,7 @@ export async function activate(context: vscode.ExtensionContext) {
                   info.nullable
                 }`
               );
-              it.range = new vscode.Range(
-                pos.translate(0, -already.length),
-                pos.translate(0, 1)
-              );
+              it.range = makeReplaceRange(doc, pos, already.length);
               return it;
             });
           }
@@ -1468,10 +1503,7 @@ export async function activate(context: vscode.ExtensionContext) {
                   info.nullable
                 }`
               );
-              col.range = new vscode.Range(
-                pos.translate(0, -already.length),
-                pos.translate(0, 1)
-              );
+              col.range = makeReplaceRange(doc, pos, already.length);
               out.push(col);
             }
 
@@ -1483,10 +1515,7 @@ export async function activate(context: vscode.ExtensionContext) {
               );
               it.sortText = `1_${c}`;
               it.insertText = new vscode.SnippetString(`${c}' => $0`);
-              it.range = new vscode.Range(
-                pos.translate(0, -already.length),
-                pos.translate(0, 1)
-              );
+              it.range = makeReplaceRange(doc, pos, already.length);
               out.push(it);
             }
 
@@ -1513,10 +1542,7 @@ export async function activate(context: vscode.ExtensionContext) {
                   info.nullable
                 }`
               );
-              col.range = new vscode.Range(
-                pos.translate(0, -already.length),
-                pos.translate(0, 1)
-              );
+              col.range = makeReplaceRange(doc, pos, already.length);
               return col;
             });
           }
@@ -1529,10 +1555,7 @@ export async function activate(context: vscode.ExtensionContext) {
             );
             it.sortText = `2_${op}`;
             it.insertText = new vscode.SnippetString(`${op}' => $0`);
-            it.range = new vscode.Range(
-              pos.translate(0, -already.length),
-              pos.translate(0, 1)
-            );
+            it.range = makeReplaceRange(doc, pos, already.length);
             return it;
           });
         },
@@ -2201,67 +2224,77 @@ function validateOrderByEntries(
   modelName: string,
   diags: vscode.Diagnostic[]
 ) {
-  // 1) find the “orderBy” entry
-  const orderByEntry = (arr.items as Entry[]).find(
+  // 1️⃣ only look at actual Entry nodes
+  const entries = (arr.items as Node[]).filter(
+    (node): node is Entry => node.kind === "entry"
+  ) as Entry[];
+
+  // 2️⃣ find the “orderBy” entry
+  const orderByEntry = entries.find(
     (e) => e.key?.kind === "string" && (e.key as any).value === "orderBy"
   );
   if (!orderByEntry) {
     return;
   }
 
-  // 2) ensure it’s an array literal
-  if (!isArray(orderByEntry.value)) {
-    diags.push(
-      new vscode.Diagnostic(
-        rangeOf(doc, orderByEntry.key!.loc!),
-        "`orderBy` must be an array literal of { field => 'asc'|'desc' } objects.",
-        vscode.DiagnosticSeverity.Error
-      )
-    );
+  // 3️⃣ guard against missing or non-array values
+  if (!orderByEntry.value || orderByEntry.value.kind !== "array") {
+    if (orderByEntry.key?.loc) {
+      diags.push(
+        new vscode.Diagnostic(
+          rangeOf(doc, orderByEntry.key.loc),
+          "`orderBy` must be an array literal of `{ field => 'asc'|'desc' }` entries.",
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    }
     return;
   }
 
-  // 3) loop over each entry inside that array
+  // 4️⃣ now it's safe to treat it as a PhpArray
   const orderArr = orderByEntry.value as PhpArray;
-  for (const itm of orderArr.items.filter(
-    // inline the type-guard here to avoid any scope issues
-    (n): n is Entry => n.kind === "entry"
-  )) {
-    // only string keys are valid
-    if (itm.key!.kind !== "string") {
+  for (const item of (orderArr.items as Node[]).filter(
+    (node): node is Entry => node.kind === "entry"
+  ) as Entry[]) {
+    // a) skip anything without a string key or without a value loc
+    if (item.key?.kind !== "string" || !item.value?.loc) {
       continue;
     }
 
-    // 3a) field must exist on the model
-    const col =
-      itm.key && itm.key.kind === "string" ? (itm.key as any).value : null;
-    if (!itm.key) {
-      return;
-    }
-    const keyRange = rangeOf(doc, itm.key.loc!);
-    if (!fields.has(col)) {
+    const fieldName = (item.key as any).value as string;
+    const fieldLoc = item.key.loc!;
+    const valLoc = item.value.loc!;
+
+    // b) unknown field?
+    if (!fields.has(fieldName)) {
       diags.push(
         new vscode.Diagnostic(
-          keyRange,
-          `The column "${col}" in orderBy does not exist on ${modelName}.`,
+          rangeOf(doc, fieldLoc),
+          `The column "${fieldName}" does not exist on ${modelName}.`,
           vscode.DiagnosticSeverity.Error
         )
       );
       continue;
     }
 
-    // 3b) direction must be exactly 'asc' or 'desc'
-    if (!itm.value?.loc) {
-      continue;
-    }
+    // c) check that the **value** is exactly 'asc' or 'desc'
     const raw = doc
-      .getText(rangeOf(doc, itm.value.loc))
+      .getText(
+        new vscode.Range(
+          doc.positionAt(valLoc.start.offset),
+          doc.positionAt(valLoc.end.offset)
+        )
+      )
       .trim()
       .replace(/^['"]|['"]$/g, "");
+
     if (raw !== "asc" && raw !== "desc") {
       diags.push(
         new vscode.Diagnostic(
-          rangeOf(doc, itm.value.loc),
+          new vscode.Range(
+            doc.positionAt(valLoc.start.offset),
+            doc.positionAt(valLoc.end.offset)
+          ),
           `Invalid sort direction "${raw}". Allowed values: "asc", "desc".`,
           vscode.DiagnosticSeverity.Error
         )
