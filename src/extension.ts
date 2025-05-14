@@ -3118,13 +3118,26 @@ let lastStubText = "";
  * Scan the document for {{…}} roots, build a .d.ts stub,
  * and only write + restart TS if it actually changed.
  */
-async function rebuildMustacheStub(document: vscode.TextDocument) {
+export async function rebuildMustacheStub(document: vscode.TextDocument) {
   const text = document.getText();
+
+  // ① Mustache expressions {{ foo.bar }}
   const mustacheRe =
     /{{\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)[\s\S]*?}}/g;
+
+  // ② Generic state scan: state('key', …)
+  const genericStateRe =
+    /(?:pphp\.)?state(?:<[^>]*>)?\(\s*['"]([A-Za-z_$][\w$]*)['"]\s*,/g;
+
+  // ③ Object-literal state scan: state('key', { … })
+  //    group1 = key, group2 = the {...} text
+  const objStateRe =
+    /(?:pphp\.)?state(?:<[^>]*>)?\(\s*['"]([A-Za-z_$][\w$]*)['"]\s*,\s*({[\s\S]*?})\s*\)/g;
+
   const map = new Map<string, Set<string>>();
   let m: RegExpExecArray | null;
 
+  // ── 1) Mustache roots + props ───────────────────────────────
   while ((m = mustacheRe.exec(text))) {
     const [root, prop] = m[1].split(".", 2);
     if (!map.has(root)) {
@@ -3135,6 +3148,63 @@ async function rebuildMustacheStub(document: vscode.TextDocument) {
     }
   }
 
+  // ── 2) Any state('key', …) → ensure key exists
+  while ((m = genericStateRe.exec(text))) {
+    const key = m[1];
+    if (!map.has(key)) {
+      map.set(key, new Set());
+    }
+  }
+
+  // ── 3) state('key', { … }) → parse that object for its own props
+  while ((m = objStateRe.exec(text))) {
+    const key = m[1];
+    const objLiteral = m[2];
+    // ensure map entry
+    if (!map.has(key)) {
+      map.set(key, new Set());
+    }
+    const props = map.get(key)!;
+
+    // wrap in a dummy TS file so we can walk the AST
+    const fake = `const __o = ${objLiteral};`;
+    const sf = ts.createSourceFile(
+      "stub.ts",
+      fake,
+      ts.ScriptTarget.Latest,
+      /*setParentNodes*/ true,
+      ts.ScriptKind.TS
+    );
+
+    sf.forEachChild((stmt) => {
+      if (
+        ts.isVariableStatement(stmt) &&
+        stmt.declarationList.declarations.length
+      ) {
+        for (const decl of stmt.declarationList.declarations) {
+          const init = decl.initializer;
+          if (init && ts.isObjectLiteralExpression(init)) {
+            for (const propNode of init.properties) {
+              // both “foo: …” and shorthand “foo,”
+              if (
+                ts.isPropertyAssignment(propNode) &&
+                ts.isIdentifier(propNode.name)
+              ) {
+                props.add(propNode.name.text);
+              } else if (
+                ts.isShorthandPropertyAssignment(propNode) &&
+                ts.isIdentifier(propNode.name)
+              ) {
+                props.add(propNode.name.text);
+              }
+            }
+          }
+        }
+      }
+    });
+  }
+
+  // ── 4) Build the .d.ts lines ────────────────────────────────
   const lines: string[] = [];
   for (const [root, props] of map) {
     if (props.size === 0) {
@@ -3149,23 +3219,19 @@ async function rebuildMustacheStub(document: vscode.TextDocument) {
     }
   }
 
-  // final contents with a trailing newline
   const newText = lines.join("\n\n") + "\n";
   if (newText === lastStubText) {
-    // nothing changed since last time → skip write & restart
     return;
   }
   lastStubText = newText;
 
-  // write the stub into .pphp/phpx-mustache.d.ts under the workspace
+  // ── 5) Write it back & notify TS ────────────────────────────
   const stubUri = vscode.Uri.joinPath(
     vscode.workspace.workspaceFolders![0].uri,
     ".pphp",
     "phpx-mustache.d.ts"
   );
   await vscode.workspace.fs.writeFile(stubUri, Buffer.from(newText, "utf8"));
-
-  // immediately re-parse into your in-memory globals
   parseGlobalsWithTS(newText);
 }
 

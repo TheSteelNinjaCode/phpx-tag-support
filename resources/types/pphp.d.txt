@@ -32,7 +32,6 @@ export declare class PPHP {
   private readonly _htmlEntitiesRe;
   private readonly _mutators;
   private readonly _arrayMethodCache;
-  private static readonly _pathPattern;
   private static readonly _mustacheTest;
   private static readonly _mustachePattern;
   private constructor();
@@ -60,6 +59,7 @@ export declare class PPHP {
   private hasNested;
   private scopeKey;
   private alreadyScoped;
+  private scheduleFlush;
   /**
    * Run a side-effect after every reactive update.
    * @param fn - called after each flushBindings()
