@@ -25,6 +25,7 @@ export declare class PPHP {
   private _effects;
   private _pendingEffects;
   private _refs;
+  private _declaredStateRoots;
   private readonly _eventHandlers;
   private readonly _redirectRegex;
   private readonly _mustacheRe;
@@ -174,7 +175,7 @@ export declare class PPHP {
   private handleElementDisplay;
   private handleElementChange;
   private handleAnchorTag;
-  handleNavigation(): Promise<void>;
+  private handleNavigation;
   /**
    * Tries to find the best-matching <div pp-loading-url="..."> for the current path,
    * walking “up” the URL hierarchy until it finds a match or hits root `/`.

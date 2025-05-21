@@ -1609,6 +1609,9 @@ export async function activate(context: vscode.ExtensionContext) {
     await validateReadCall(document, readDiags);
     await validateUpdateCall(document, updateDiags);
     await validateDeleteCall(document, deleteDiags);
+    await validateUpsertCall(document, updateDiags);
+    await validateGroupByCall(document, readDiags);
+    await validateAggregateCall(document, readDiags);
 
     updateStringDecorations(document);
     validateJsVariablesInCurlyBraces(document, jsVarDiagnostics);
@@ -2311,7 +2314,7 @@ export async function validateCreateCall(
   const modelMap = await getModelMap();
   const ast = php.parseCode(doc.getText(), doc.fileName);
 
-  /* ─── busca todas las llamadas $prisma->Model->create([...]) ─── */
+  /* ─── busca todas las llamadas $prisma->Model->create[…] ─── */
   walk(ast, (node) => {
     if (node.kind !== "call") {
       return;
@@ -2320,35 +2323,34 @@ export async function validateCreateCall(
     const call = node as Call;
     if (!isPropLookup(call.what)) {
       return;
-    } // …->create()
+    }
 
-    /* ① extraer op, modelo y base -------------------------------- */
-    const opNode = call.what.offset;
-    const opName = nodeName(opNode);
-    if (opName !== "create") {
+    /* ① extraer op y modelo */
+    const opName = nodeName(call.what.offset);
+    if (opName !== "create" && opName !== "createMany") {
       return;
-    } // sólo create()
+    }
 
-    const modelChain = call.what.what; // …->Model
+    const modelChain = call.what.what;
     if (!isPropLookup(modelChain)) {
       return;
     }
     const modelName = nodeName(modelChain.offset);
-    if (!modelName) {
+    if (typeof modelName !== "string") {
       return;
     }
 
-    const base = modelChain.what; // $prisma
+    /* ② asegurar que sea $prisma */
+    const base = modelChain.what;
     if (!(isVariable(base) && base.name === "prisma")) {
       return;
     }
 
-    /* ② validar que exista 'data' => [...] ----------------------- */
+    /* ③ encontrar el bloque 'data' */
     const args = call.arguments?.[0];
     if (!isArray(args)) {
       return;
-    } // create(); sin array
-
+    }
     const dataEntry = (args.items as Entry[]).find(
       (e) => e.key?.kind === "string" && (e.key as any).value === "data"
     );
@@ -2356,93 +2358,142 @@ export async function validateCreateCall(
       diagnostics.push(
         new vscode.Diagnostic(
           rangeOf(doc, call.loc),
-          "create() requires a 'data' block.",
+          `${opName}() requires a 'data' block.`,
           vscode.DiagnosticSeverity.Error
         )
       );
+      collection.set(doc.uri, diagnostics);
       return;
     }
     if (!isArray(dataEntry.value)) {
       return;
-    } // data no es array
+    }
 
-    /* ③ validar cada campo dentro de data ----------------------- */
+    /* ④ obtener esquema de campos del modelo */
     const fields =
-      typeof modelName === "string"
-        ? modelMap.get(modelName.toLowerCase())
-        : undefined;
-    if (!fields) {
+      modelMap.get(modelName.toLowerCase()) ?? new Map<string, FieldInfo>();
+    if (!fields.size) {
       return;
-    } // esquema desconocido
+    }
 
-    for (const item of dataEntry.value.items as Entry[]) {
-      if (!item.key || item.key.kind !== "string") {
-        continue;
+    /* ⑤ para create(): un solo objeto */
+    if (opName === "create") {
+      for (const item of (dataEntry.value as PhpArray).items as Entry[]) {
+        if (!item.key || item.key.kind !== "string") {
+          continue;
+        }
+
+        if (validateSelectIncludeExclusivity(args, doc, diagnostics)) {
+          break;
+        }
+
+        const key = (item.key as any).value as string;
+        if (PRISMA_OPERATORS.has(key)) {
+          continue;
+        }
+
+        const value = item.value;
+        if (isArray(value)) {
+          validateFieldAssignments(
+            doc,
+            printArrayLiteral(value),
+            value.loc!.start.offset,
+            fields,
+            modelName,
+            diagnostics
+          );
+          continue;
+        }
+
+        const info = fields.get(key);
+        const keyRange = rangeOf(doc, item.key.loc!);
+        if (!info) {
+          diagnostics.push(
+            new vscode.Diagnostic(
+              keyRange,
+              `The column "${key}" does not exist in ${modelName}.`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+          continue;
+        }
+
+        const raw = doc.getText(rangeOf(doc, value.loc!)).trim();
+        if (!isValidPhpType(raw, info)) {
+          const expected = info.isList ? `${info.type}[]` : info.type;
+          diagnostics.push(
+            new vscode.Diagnostic(
+              keyRange,
+              `"${key}" expects ${expected}, but received "${raw}".`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+        }
       }
 
-      if (validateSelectIncludeExclusivity(args, doc, diagnostics)) {
-        collection.set(doc.uri, diagnostics);
-        continue;
-      }
+      validateSelectIncludeEntries(doc, args, fields, modelName, diagnostics);
+    }
 
-      const key = (item.key as any).value as string;
-      const value = item.value;
+    /* ⑥ para createMany(): múltiples filas */
+    if (opName === "createMany") {
+      // cada elemento de data debe ser un array literal
+      for (const rowItem of (dataEntry.value as PhpArray).items) {
+        if (
+          rowItem.kind !== "entry" ||
+          !(rowItem as Entry).value ||
+          !isArray((rowItem as Entry).value)
+        ) {
+          diagnostics.push(
+            new vscode.Diagnostic(
+              rangeOf(doc, rowItem.loc!),
+              `Each element of 'data' in createMany() must be an array of column=>value pairs.`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+          continue;
+        }
 
-      /* a) operadores Prisma de alto nivel -------------------- */
-      if (PRISMA_OPERATORS.has(key)) {
-        continue;
-      }
+        const rowArr = (rowItem as Entry).value as PhpArray;
+        // validar cada campo de la fila igual que en create()
+        for (const cell of rowArr.items as Entry[]) {
+          if (!cell.key || cell.key.kind !== "string") {
+            continue;
+          }
 
-      /* b) anidado: value == array ---------------------------- */
-      if (isArray(value)) {
-        validateFieldAssignments(
-          doc,
-          printArrayLiteral(value),
-          value.loc!.start.offset,
-          fields,
-          typeof modelName === "string" ? modelName : "",
-          diagnostics
-        );
-        continue;
-      }
+          const key = (cell.key as any).value as string;
+          if (PRISMA_OPERATORS.has(key)) {
+            continue;
+          }
 
-      /* c) columna real + tipado ------------------------------ */
-      const info = fields.get(key);
-      const range = rangeOf(doc, item.key.loc);
+          const info = fields.get(key);
+          const keyRange = rangeOf(doc, cell.key.loc!);
+          if (!info) {
+            diagnostics.push(
+              new vscode.Diagnostic(
+                keyRange,
+                `The column "${key}" does not exist in ${modelName}.`,
+                vscode.DiagnosticSeverity.Error
+              )
+            );
+            continue;
+          }
 
-      if (!info) {
-        diagnostics.push(
-          new vscode.Diagnostic(
-            range,
-            `The column "${key}" does not exist in ${modelName}.`,
-            vscode.DiagnosticSeverity.Error
-          )
-        );
-        continue;
-      }
-
-      const rawExpr = doc.getText(rangeOf(doc, value.loc));
-      if (!isValidPhpType(rawExpr.trim(), info)) {
-        const expected = info.isList ? `${info.type}[]` : info.type;
-        diagnostics.push(
-          new vscode.Diagnostic(
-            range,
-            `"${key}" expects ${expected}, but received "${rawExpr}".`,
-            vscode.DiagnosticSeverity.Error
-          )
-        );
+          const raw = doc.getText(rangeOf(doc, cell.value.loc!)).trim();
+          if (!isValidPhpType(raw, info)) {
+            const expected = info.isList ? `${info.type}[]` : info.type;
+            diagnostics.push(
+              new vscode.Diagnostic(
+                keyRange,
+                `"${key}" expects ${expected}, but received "${raw}".`,
+                vscode.DiagnosticSeverity.Error
+              )
+            );
+          }
+        }
       }
     }
 
-    validateSelectIncludeEntries(
-      doc,
-      args,
-      modelName && typeof modelName === "string"
-        ? modelMap.get(modelName.toLowerCase()) ?? new Map<string, FieldInfo>()
-        : new Map<string, FieldInfo>(),
-      typeof modelName === "string" ? modelName : "",
-      diagnostics
-    );
+    collection.set(doc.uri, diagnostics);
   });
 
   collection.set(doc.uri, diagnostics);
@@ -2640,10 +2691,6 @@ function validateWhereArray(
   }
 }
 
-/**  Validate $prisma->Model->update([
- *       'data'  => [ … ],
- *       'where' => [ … ]
- *   ])  */
 export async function validateUpdateCall(
   doc: vscode.TextDocument,
   collection: vscode.DiagnosticCollection
@@ -2657,78 +2704,82 @@ export async function validateUpdateCall(
       return;
     }
 
-    // ── identify $prisma->Model->update() ───────────────────────
     const call = node as Call;
     if (!isPropLookup(call.what)) {
       return;
     }
+
+    // ── identify $prisma->Model->update() or updateMany() ──
     const opName = nodeName(call.what.offset);
-    if (opName !== "update") {
+    if (opName !== "update" && opName !== "updateMany") {
       return;
     }
 
+    // ── get the model name ──
     const mdlChain = call.what.what;
     if (!isPropLookup(mdlChain)) {
       return;
     }
     const modelName = nodeName(mdlChain.offset);
-    if (!modelName) {
+    if (typeof modelName !== "string") {
       return;
     }
 
+    // ── must be $prisma->… ──
     const base = mdlChain.what;
     if (!(isVariable(base) && base.name === "prisma")) {
       return;
     }
 
-    // ── arg must be a single array literal ----------------------
+    // ── first (and only) argument must be an array literal ──
     const arg0 = call.arguments?.[0];
     if (!isArray(arg0)) {
       return;
     }
 
+    // ── you may not mix select/include at the top level ──
     if (validateSelectIncludeExclusivity(arg0, doc, diagnostics)) {
       collection.set(doc.uri, diagnostics);
-      return; // or continue, as appropriate
+      return;
     }
 
     const items = arg0.items as Entry[];
 
-    // locate 'data' and 'where'
-    const dataEntry = items.find(
-      (e) => e.key?.kind === "string" && (e.key as any).value === "data"
-    ) as Entry | undefined;
+    // ── find 'where' and 'data' entries ──
     const whereEntry = items.find(
       (e) => e.key?.kind === "string" && (e.key as any).value === "where"
     ) as Entry | undefined;
+    const dataEntry = items.find(
+      (e) => e.key?.kind === "string" && (e.key as any).value === "data"
+    ) as Entry | undefined;
 
-    if (!dataEntry || !whereEntry) {
+    // ── both blocks are required for update* ──
+    if (!whereEntry || !dataEntry) {
       const missing = [
-        !dataEntry ? "'data'" : null,
         !whereEntry ? "'where'" : null,
+        !dataEntry ? "'data'" : null,
       ]
         .filter(Boolean)
         .join(" and ");
       diagnostics.push(
         new vscode.Diagnostic(
           rangeOf(doc, call.loc!),
-          `update() requires both ${missing} blocks.`,
+          `${opName}() requires both ${missing} blocks.`,
           vscode.DiagnosticSeverity.Error
         )
       );
+      collection.set(doc.uri, diagnostics);
       return;
     }
 
-    // retrieve the schema for this model
+    // ── schema lookup ──
     const fields =
-      typeof modelName === "string"
-        ? modelMap.get(modelName.toLowerCase())
-        : undefined;
-    if (!fields) {
+      modelMap.get(modelName.toLowerCase()) ?? new Map<string, FieldInfo>();
+    if (!fields.size) {
       return;
     }
 
-    // ── only enforce array‐literal on WHERE
+    // ── validate the WHERE block ──
     if (!isArray(whereEntry.value)) {
       diagnostics.push(
         new vscode.Diagnostic(
@@ -2737,36 +2788,46 @@ export async function validateUpdateCall(
           vscode.DiagnosticSeverity.Error
         )
       );
+    } else {
+      validateWhereArray(doc, whereEntry.value, fields, modelName, diagnostics);
     }
 
-    // ── validate DATA *only* if they actually passed a literal array
-    if (isArray(dataEntry.value)) {
-      for (const item of dataEntry.value.items as Entry[]) {
+    // ── validate the DATA block ──
+    if (!isArray(dataEntry.value)) {
+      diagnostics.push(
+        new vscode.Diagnostic(
+          rangeOf(doc, dataEntry.key!.loc!),
+          "`data` must be an array literal.",
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    } else {
+      for (const item of (dataEntry.value as PhpArray).items as Entry[]) {
         if (!item.key || item.key.kind !== "string") {
           continue;
         }
         const key = (item.key as any).value as string;
         const value = item.value;
 
-        // top-level Prisma operators are always allowed
+        // Prisma operators like _count, AND, etc. are always allowed
         if (PRISMA_OPERATORS.has(key)) {
           continue;
         }
 
-        // nested array fields
+        // nested object: e.g. { push: [...], set: [...], ... }
         if (isArray(value)) {
           validateFieldAssignments(
             doc,
             printArrayLiteral(value),
             value.loc!.start.offset,
             fields,
-            typeof modelName === "string" ? modelName : "",
+            modelName,
             diagnostics
           );
           continue;
         }
 
-        // scalar columns
+        // scalar column update
         const info = fields.get(key);
         const keyRange = rangeOf(doc, item.key.loc!);
         if (!info) {
@@ -2779,6 +2840,7 @@ export async function validateUpdateCall(
           );
           continue;
         }
+
         const raw = doc.getText(rangeOf(doc, value.loc!)).trim();
         if (!isValidPhpType(raw, info)) {
           const expected = info.isList ? `${info.type}[]` : info.type;
@@ -2793,30 +2855,15 @@ export async function validateUpdateCall(
       }
     }
 
-    // ──  validate WHERE block (same helper as read)
-    validateWhereArray(
-      doc,
-      whereEntry.value,
-      fields,
-      typeof modelName === "string" ? modelName : "",
-      diagnostics
-    );
+    // ── finally, validate select/include in the same call ──
+    validateSelectIncludeEntries(doc, arg0, fields, modelName, diagnostics);
 
-    validateSelectIncludeEntries(
-      doc,
-      arg0,
-      modelName && typeof modelName === "string"
-        ? modelMap.get(modelName.toLowerCase()) ?? new Map<string, FieldInfo>()
-        : new Map<string, FieldInfo>(),
-      typeof modelName === "string" ? modelName : "",
-      diagnostics
-    );
+    collection.set(doc.uri, diagnostics);
   });
 
   collection.set(doc.uri, diagnostics);
 }
 
-/**  Validate  $prisma->Model->delete([ 'where' => [ … ] ])  */
 export async function validateDeleteCall(
   doc: vscode.TextDocument,
   collection: vscode.DiagnosticCollection
@@ -2830,96 +2877,690 @@ export async function validateDeleteCall(
       return;
     }
 
-    /* ── localizar $prisma->Model->delete() ─────────────────── */
     const call = node as Call;
     if (!isPropLookup(call.what)) {
       return;
     }
 
+    // only delete() and deleteMany()
     const opName = nodeName(call.what.offset);
-    if (opName !== "delete") {
+    if (opName !== "delete" && opName !== "deleteMany") {
       return;
     }
 
+    // $prisma->Model
     const mdlChain = call.what.what;
     if (!isPropLookup(mdlChain)) {
       return;
     }
-
     const modelName = nodeName(mdlChain.offset);
-    if (!modelName) {
+    if (typeof modelName !== "string") {
       return;
     }
 
+    // ensure it's prisma
     const base = mdlChain.what;
     if (!(isVariable(base) && base.name === "prisma")) {
       return;
     }
 
-    /* ── arg0 debe ser array literal -------------------------- */
+    // first argument must be array literal
     const arrayArg = call.arguments?.[0];
     if (!isArray(arrayArg)) {
       return;
-    } // delete(); sin array
-
-    if (validateSelectIncludeExclusivity(arrayArg, doc, diagnostics)) {
-      collection.set(doc.uri, diagnostics);
-      return; // or continue, as appropriate
     }
 
+    // cannot mix select/include
+    if (validateSelectIncludeExclusivity(arrayArg, doc, diagnostics)) {
+      collection.set(doc.uri, diagnostics);
+      return;
+    }
+
+    // find the where entry
     const items = arrayArg.items as Entry[];
     const whereEntry = items.find(
       (e) => e.key?.kind === "string" && (e.key as any).value === "where"
     ) as Entry | undefined;
 
-    /* ① 'require where' -------------------------------------- */
+    // require 'where'
     if (!whereEntry) {
       diagnostics.push(
         new vscode.Diagnostic(
-          rangeOf(doc, call.loc),
-          "delete() requires a 'where' block.",
+          rangeOf(doc, call.loc!),
+          `${opName}() requires a 'where' block.`,
           vscode.DiagnosticSeverity.Error
         )
       );
+      collection.set(doc.uri, diagnostics);
       return;
     }
     if (!isArray(whereEntry.value)) {
       diagnostics.push(
         new vscode.Diagnostic(
-          rangeOf(doc, whereEntry.key!.loc),
+          rangeOf(doc, whereEntry.key!.loc!),
           "`where` must be an array literal.",
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      collection.set(doc.uri, diagnostics);
+      return;
+    }
+
+    // schema lookup
+    const fields =
+      modelMap.get(modelName.toLowerCase()) ?? new Map<string, FieldInfo>();
+    if (!fields.size) {
+      return;
+    }
+
+    // validate the where filters
+    validateWhereArray(doc, whereEntry.value, fields, modelName, diagnostics);
+
+    // still forbid mixing select/include
+    validateSelectIncludeEntries(doc, arrayArg, fields, modelName, diagnostics);
+  });
+
+  collection.set(doc.uri, diagnostics);
+}
+
+export async function validateUpsertCall(
+  doc: vscode.TextDocument,
+  collection: vscode.DiagnosticCollection
+): Promise<void> {
+  const diagnostics: vscode.Diagnostic[] = [];
+  const modelMap = await getModelMap();
+  const ast = php.parseCode(doc.getText(), doc.fileName);
+
+  walk(ast, (node) => {
+    if (node.kind !== "call") {
+      return;
+    }
+
+    const call = node as Call;
+    if (!isPropLookup(call.what)) {
+      return;
+    }
+
+    // only upsert()
+    const opName = nodeName(call.what.offset);
+    if (opName !== "upsert") {
+      return;
+    }
+
+    // get Model
+    const mdlChain = call.what.what;
+    if (!isPropLookup(mdlChain)) {
+      return;
+    }
+    const modelName = nodeName(mdlChain.offset);
+    if (typeof modelName !== "string") {
+      return;
+    }
+
+    // must be prisma
+    const base = mdlChain.what;
+    if (!(isVariable(base) && base.name === "prisma")) {
+      return;
+    }
+
+    // first arg must be an array literal
+    const arg0 = call.arguments?.[0];
+    if (!isArray(arg0)) {
+      return;
+    }
+
+    // forbid mixing select/include
+    if (validateSelectIncludeExclusivity(arg0, doc, diagnostics)) {
+      collection.set(doc.uri, diagnostics);
+      return;
+    }
+
+    const items = arg0.items as Entry[];
+
+    // pick out where, update & create
+    const whereEntry = items.find(
+      (e) => e.key?.kind === "string" && (e.key as any).value === "where"
+    ) as Entry | undefined;
+    const updateEntry = items.find(
+      (e) => e.key?.kind === "string" && (e.key as any).value === "update"
+    ) as Entry | undefined;
+    const createEntry = items.find(
+      (e) => e.key?.kind === "string" && (e.key as any).value === "create"
+    ) as Entry | undefined;
+
+    // require all three
+    if (!whereEntry || !updateEntry || !createEntry) {
+      const missing = [
+        !whereEntry ? "'where'" : null,
+        !updateEntry ? "'update'" : null,
+        !createEntry ? "'create'" : null,
+      ]
+        .filter(Boolean)
+        .join(" and ");
+      diagnostics.push(
+        new vscode.Diagnostic(
+          rangeOf(doc, call.loc!),
+          `upsert() requires ${missing}.`,
           vscode.DiagnosticSeverity.Error
         )
       );
       return;
     }
 
-    /* ② schema y validación de campos ------------------------ */
+    // lookup schema
     const fields =
-      typeof modelName === "string"
-        ? modelMap.get(modelName.toLowerCase())
-        : undefined;
-    if (!fields) {
+      modelMap.get(modelName.toLowerCase()) ?? new Map<string, FieldInfo>();
+    if (!fields.size) {
       return;
-    } // modelo desconocido
+    }
 
-    validateWhereArray(
-      doc,
-      whereEntry.value,
-      fields,
-      typeof modelName === "string" ? modelName : "",
-      diagnostics
-    );
+    // ── validate WHERE ──
+    if (!isArray(whereEntry.value)) {
+      diagnostics.push(
+        new vscode.Diagnostic(
+          rangeOf(doc, whereEntry.key!.loc!),
+          "`where` must be an array literal.",
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    } else {
+      validateWhereArray(doc, whereEntry.value, fields, modelName, diagnostics);
+    }
 
-    validateSelectIncludeEntries(
-      doc,
-      arrayArg,
-      modelName && typeof modelName === "string"
-        ? modelMap.get(modelName.toLowerCase()) ?? new Map<string, FieldInfo>()
-        : new Map<string, FieldInfo>(),
-      typeof modelName === "string" ? modelName : "",
-      diagnostics
+    // ── validate UPDATE ──
+    if (!isArray(updateEntry.value)) {
+      diagnostics.push(
+        new vscode.Diagnostic(
+          rangeOf(doc, updateEntry.key!.loc!),
+          "`update` must be an array literal.",
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    } else {
+      for (const item of (updateEntry.value as PhpArray).items as Entry[]) {
+        if (!item.key || item.key.kind !== "string") {
+          continue;
+        }
+        const key = (item.key as any).value as string;
+
+        // top‐level Prisma ops
+        if (PRISMA_OPERATORS.has(key)) {
+          continue;
+        }
+
+        const value = item.value;
+        if (isArray(value)) {
+          validateFieldAssignments(
+            doc,
+            printArrayLiteral(value),
+            value.loc!.start.offset,
+            fields,
+            modelName,
+            diagnostics
+          );
+          continue;
+        }
+
+        const info = fields.get(key);
+        const keyRange = rangeOf(doc, item.key.loc!);
+        if (!info) {
+          diagnostics.push(
+            new vscode.Diagnostic(
+              keyRange,
+              `The column "${key}" does not exist in ${modelName}.`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+          continue;
+        }
+
+        const raw = doc.getText(rangeOf(doc, value.loc!)).trim();
+        if (!isValidPhpType(raw, info)) {
+          const expected = info.isList ? `${info.type}[]` : info.type;
+          diagnostics.push(
+            new vscode.Diagnostic(
+              keyRange,
+              `"${key}" expects ${expected}, but received "${raw}".`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+        }
+      }
+    }
+
+    // ── validate CREATE ──
+    if (!isArray(createEntry.value)) {
+      diagnostics.push(
+        new vscode.Diagnostic(
+          rangeOf(doc, createEntry.key!.loc!),
+          "`create` must be an array literal.",
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    } else {
+      for (const item of (createEntry.value as PhpArray).items as Entry[]) {
+        if (!item.key || item.key.kind !== "string") {
+          continue;
+        }
+        const key = (item.key as any).value as string;
+
+        if (PRISMA_OPERATORS.has(key)) {
+          continue;
+        }
+
+        const value = item.value;
+        if (isArray(value)) {
+          validateFieldAssignments(
+            doc,
+            printArrayLiteral(value),
+            value.loc!.start.offset,
+            fields,
+            modelName,
+            diagnostics
+          );
+          continue;
+        }
+
+        const info = fields.get(key);
+        const keyRange = rangeOf(doc, item.key.loc!);
+        if (!info) {
+          diagnostics.push(
+            new vscode.Diagnostic(
+              keyRange,
+              `The column "${key}" does not exist in ${modelName}.`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+          continue;
+        }
+
+        const raw = doc.getText(rangeOf(doc, value.loc!)).trim();
+        if (!isValidPhpType(raw, info)) {
+          const expected = info.isList ? `${info.type}[]` : info.type;
+          diagnostics.push(
+            new vscode.Diagnostic(
+              keyRange,
+              `"${key}" expects ${expected}, but received "${raw}".`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+        }
+      }
+    }
+
+    // ── validate select/include at top level ──
+    validateSelectIncludeEntries(doc, arg0, fields, modelName, diagnostics);
+  });
+
+  collection.set(doc.uri, diagnostics);
+}
+
+export async function validateGroupByCall(
+  doc: vscode.TextDocument,
+  collection: vscode.DiagnosticCollection
+): Promise<void> {
+  const diagnostics: vscode.Diagnostic[] = [];
+  const modelMap = await getModelMap();
+  const ast = php.parseCode(doc.getText(), doc.fileName);
+
+  walk(ast, (node) => {
+    if (node.kind !== "call") {
+      return;
+    }
+    const call = node as Call;
+    if (!isPropLookup(call.what)) {
+      return;
+    }
+
+    // only groupBy()
+    if (nodeName(call.what.offset) !== "groupBy") {
+      return;
+    }
+
+    // $prisma->Model
+    const mdlChain = call.what.what;
+    if (!isPropLookup(mdlChain)) {
+      return;
+    }
+    const modelName = nodeName(mdlChain.offset);
+    if (typeof modelName !== "string") {
+      return;
+    }
+
+    // ensure prisma
+    if (!(isVariable(mdlChain.what) && mdlChain.what.name === "prisma")) {
+      return;
+    }
+
+    // args must be array
+    const arg0 = call.arguments?.[0];
+    if (!isArray(arg0)) {
+      return;
+    }
+
+    // forbid select/include
+    if (validateSelectIncludeExclusivity(arg0, doc, diagnostics)) {
+      collection.set(doc.uri, diagnostics);
+      return;
+    }
+
+    const items = arg0.items as Entry[];
+
+    // require 'by'
+    const byEntry = items.find(
+      (e) => e.key?.kind === "string" && (e.key as any).value === "by"
+    ) as Entry | undefined;
+    if (!byEntry) {
+      diagnostics.push(
+        new vscode.Diagnostic(
+          rangeOf(doc, call.loc!),
+          "groupBy() requires a 'by' block.",
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      return;
+    }
+
+    // the value of 'by' can be:
+    //  • an array literal of string or variable/property
+    //  • OR a bare variable/property itself
+    const byValue = byEntry.value;
+
+    // fetch your model’s fields once
+    const fields =
+      modelMap.get(modelName.toLowerCase()) ?? new Map<string, FieldInfo>();
+
+    if (isArray(byValue)) {
+      // array literal: allow strings or vars/props
+      for (const ent of (byValue as PhpArray).items as Entry[]) {
+        const v = ent.value;
+        // ① string literal → verify it’s a real column
+        if (v.kind === "string") {
+          const col = (v as any).value as string;
+          if (!fields.has(col)) {
+            diagnostics.push(
+              new vscode.Diagnostic(
+                rangeOf(doc, v.loc!),
+                `The column "${col}" does not exist in ${modelName}.`,
+                vscode.DiagnosticSeverity.Error
+              )
+            );
+          }
+          continue;
+        }
+        // ② variable or property lookup → accept dynamically
+        if (isVariable(v) || isPropLookup(v)) {
+          continue;
+        }
+        // otherwise it’s invalid
+        diagnostics.push(
+          new vscode.Diagnostic(
+            rangeOf(doc, ent.loc!),
+            "`by` elements must be string literals or a PHP variable/property.",
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      }
+    } else if (isVariable(byValue) || isPropLookup(byValue)) {
+      // bare variable/property → ok
+    } else {
+      // neither array nor var/prop → error
+      diagnostics.push(
+        new vscode.Diagnostic(
+          rangeOf(doc, byValue.loc!),
+          "`by` must be either an array of column names (or PHP vars) or a PHP variable/property.",
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    }
+    // ------------------------------------------------------------
+
+    // schema lookup once
+    if (!fields.size) {
+      return;
+    }
+
+    // optional 'where'
+    const whereEntry = items.find(
+      (e) => e.key?.kind === "string" && (e.key as any).value === "where"
     );
+    if (whereEntry) {
+      if (!isArray(whereEntry.value)) {
+        diagnostics.push(
+          new vscode.Diagnostic(
+            rangeOf(doc, whereEntry.key!.loc!),
+            "`where` must be an array literal.",
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      } else {
+        validateWhereArray(
+          doc,
+          whereEntry.value,
+          fields,
+          modelName,
+          diagnostics
+        );
+      }
+    }
+
+    // **custom orderBy validation**
+    const orderEntry = items.find(
+      (e) => e.key?.kind === "string" && (e.key as any).value === "orderBy"
+    );
+    if (orderEntry) {
+      if (!isArray(orderEntry.value)) {
+        diagnostics.push(
+          new vscode.Diagnostic(
+            rangeOf(doc, orderEntry.key!.loc!),
+            "`orderBy` must be an array literal.",
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      } else {
+        const arr = orderEntry.value as PhpArray;
+        for (const cell of arr.items as Entry[]) {
+          if (!cell.key || cell.key.kind !== "string") {
+            continue;
+          }
+          const col = (cell.key as any).value as string;
+          const keyRange = rangeOf(doc, cell.key.loc!);
+          if (!fields.has(col)) {
+            diagnostics.push(
+              new vscode.Diagnostic(
+                keyRange,
+                `The column "${col}" does not exist in ${modelName}.`,
+                vscode.DiagnosticSeverity.Error
+              )
+            );
+            continue;
+          }
+          // value must be 'asc' or 'desc'
+          const raw = doc
+            .getText(rangeOf(doc, cell.value.loc!))
+            .trim()
+            .replace(/^['"]|['"]$/g, "");
+          if (raw !== "asc" && raw !== "desc") {
+            diagnostics.push(
+              new vscode.Diagnostic(
+                rangeOf(doc, cell.value.loc!),
+                `Invalid sort direction "${raw}" for "${col}". Allowed: "asc", "desc".`,
+                vscode.DiagnosticSeverity.Error
+              )
+            );
+          }
+        }
+      }
+    }
+
+    // aggregations (_count, _max, …)
+    const validateAgg = (keyName: string) => {
+      const entry = items.find(
+        (e) => e.key?.kind === "string" && (e.key as any).value === keyName
+      ) as Entry | undefined;
+      if (!entry) {
+        return;
+      }
+      if (!isArray(entry.value)) {
+        diagnostics.push(
+          new vscode.Diagnostic(
+            rangeOf(doc, entry.key!.loc!),
+            `\`${keyName}\` must be an array literal.`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+        return;
+      }
+      const arr = entry.value as PhpArray;
+      for (const cell of arr.items as Entry[]) {
+        if (!cell.key || cell.key.kind !== "string") {
+          continue;
+        }
+        const col = (cell.key as any).value as string;
+        const keyRange = rangeOf(doc, cell.key.loc!);
+        if (!fields.has(col)) {
+          diagnostics.push(
+            new vscode.Diagnostic(
+              keyRange,
+              `The column "${col}" does not exist in ${modelName}.`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+          continue;
+        }
+        const raw = doc.getText(rangeOf(doc, cell.value.loc!)).trim();
+        if (!/^(true|false)$/i.test(raw)) {
+          diagnostics.push(
+            new vscode.Diagnostic(
+              rangeOf(doc, cell.value.loc!),
+              `\`${keyName}.${col}\` expects a boolean, but got "${raw}".`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+        }
+      }
+    };
+    for (const agg of ["_count", "_max", "_min", "_avg", "_sum"] as const) {
+      validateAgg(agg);
+    }
+
+    // final select/include check
+    validateSelectIncludeEntries(doc, arg0, fields, modelName, diagnostics);
+  });
+
+  collection.set(doc.uri, diagnostics);
+}
+
+export async function validateAggregateCall(
+  doc: vscode.TextDocument,
+  collection: vscode.DiagnosticCollection
+): Promise<void> {
+  const diagnostics: vscode.Diagnostic[] = [];
+  const modelMap = await getModelMap();
+  const ast = php.parseCode(doc.getText(), doc.fileName);
+
+  walk(ast, (node) => {
+    if (node.kind !== "call") {
+      return;
+    }
+    const call = node as Call;
+    if (!isPropLookup(call.what)) {
+      return;
+    }
+
+    // only $prisma->Model->aggregate()
+    const opName = nodeName(call.what.offset);
+    if (opName !== "aggregate") {
+      return;
+    }
+
+    // …->Model
+    const mdlChain = call.what.what;
+    if (!isPropLookup(mdlChain)) {
+      return;
+    }
+    const modelName = nodeName(mdlChain.offset);
+    if (typeof modelName !== "string") {
+      return;
+    }
+
+    // must be prisma
+    const base = mdlChain.what;
+    if (!(isVariable(base) && base.name === "prisma")) {
+      return;
+    }
+
+    // first arg must be an array literal
+    const arg0 = call.arguments?.[0];
+    if (!isArray(arg0)) {
+      return;
+    }
+    const items = arg0.items as Entry[];
+
+    // lookup schema fields
+    const fields =
+      modelMap.get(modelName.toLowerCase()) ?? new Map<string, FieldInfo>();
+    if (!fields.size) {
+      return;
+    }
+
+    // keys we support
+    const AGG_KEYS = ["_avg", "_count", "_min", "_max", "_sum"] as const;
+
+    for (const agg of AGG_KEYS) {
+      const entry = items.find(
+        (e) => e.key?.kind === "string" && (e.key as any).value === agg
+      ) as Entry | undefined;
+      if (!entry) {
+        continue;
+      }
+
+      // must be array literal
+      if (!isArray(entry.value)) {
+        diagnostics.push(
+          new vscode.Diagnostic(
+            rangeOf(doc, entry.key!.loc!),
+            `\`${agg}\` must be an array literal.`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+        continue;
+      }
+
+      // validate each column => boolean
+      const arr = entry.value as PhpArray;
+      for (const cell of arr.items as Entry[]) {
+        if (!cell.key || cell.key.kind !== "string") {
+          continue;
+        }
+        const col = (cell.key as any).value as string;
+        const keyRange = rangeOf(doc, cell.key.loc!);
+
+        // unknown column?
+        if (!fields.has(col)) {
+          diagnostics.push(
+            new vscode.Diagnostic(
+              keyRange,
+              `The column "${col}" does not exist in ${modelName}.`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+          continue;
+        }
+
+        // value must be true|false
+        const raw = doc.getText(rangeOf(doc, cell.value.loc!)).trim();
+        if (!/^(true|false)$/i.test(raw)) {
+          diagnostics.push(
+            new vscode.Diagnostic(
+              rangeOf(doc, cell.value.loc!),
+              `\`${agg}.${col}\` expects a boolean, but got "${raw}".`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+        }
+      }
+    }
   });
 
   collection.set(doc.uri, diagnostics);
