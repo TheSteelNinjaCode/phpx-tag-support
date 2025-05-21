@@ -1049,6 +1049,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // ❶ ▶︎ Declare once at the top:
   const ROOT_KEYS_MAP = {
     create: ["data", "include", "omit", "select"] as const,
+    createMany: ["data", "skipDuplicates"] as const,
     findMany: [
       "where",
       "select",
@@ -1072,7 +1073,36 @@ export async function activate(context: vscode.ExtensionContext) {
     ] as const,
     findUnique: ["where", "include", "omit", "select"] as const,
     update: ["data", "where", "include", "omit", "select"] as const,
+    updateMany: ["data", "where"],
     delete: ["where", "include", "omit", "select"] as const,
+    deleteMany: ["where"],
+    upsert: ["where", "update", "create"] as const,
+    groupBy: [
+      "by",
+      "where",
+      "orderBy",
+      "having",
+      "take",
+      "skip",
+      "_count",
+      "_max",
+      "_min",
+      "_avg",
+      "_sum",
+    ],
+    aggregate: [
+      "_count",
+      "_min",
+      "_max",
+      "_avg",
+      "_sum",
+      "where",
+      "orderBy",
+      "cursor",
+      "take",
+      "skip",
+      "distinct",
+    ] as const,
   };
   type PrismaOp = keyof typeof ROOT_KEYS_MAP;
   type RootKey = (typeof ROOT_KEYS_MAP)[PrismaOp][number];
@@ -1338,6 +1368,15 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
           }
 
+          // find the immediate entry-key whose value is your hostArray
+          const nestedRoot = hostArray
+            ? findParentKey(argsArr as PhpArray, hostArray)
+            : null;
+
+          // use nestedRoot if present, otherwise fall back to the top-level key
+          const activeRoot = nestedRoot ?? currentRoot;
+          const modelNames = new Set((await getModelMap()).keys());
+
           // ── special: handle both key & value for orderBy ────────────
           if (currentRoot === "orderBy") {
             const orderByEntry = (argsArr as PhpArray).items.find(
@@ -1370,23 +1409,53 @@ export async function activate(context: vscode.ExtensionContext) {
             }
           }
 
+          // special‐case boolean roots:
+          if (activeRoot === "skipDuplicates" && entrySide === "value") {
+            return ["true", "false"].map((v) => {
+              const it = new vscode.CompletionItem(
+                v,
+                vscode.CompletionItemKind.Value
+              );
+              it.insertText = new vscode.SnippetString(`${v}`);
+              it.range = makeReplaceRange(doc, pos, already.length);
+              return it;
+            });
+          }
+
           // ── all other roots only on the *key* side ───────────────────
           if (!currentRoot || !nestedArrLoc || entrySide !== "key") {
             return;
           }
 
+          if (currentRoot === "by") {
+            return [...fieldMap.keys()].map((fld) => {
+              const it = new vscode.CompletionItem(
+                fld,
+                vscode.CompletionItemKind.Keyword
+              );
+              it.insertText = new vscode.SnippetString(`${fld}', $0`);
+              it.range = makeReplaceRange(doc, pos, already.length);
+              return it;
+            });
+          }
+
+          if (
+            ["_count", "_max", "_min", "_avg", "_sum"].includes(currentRoot)
+          ) {
+            return [...fieldMap.keys()].map((fld) => {
+              const it = new vscode.CompletionItem(
+                fld,
+                vscode.CompletionItemKind.Value
+              );
+              it.insertText = new vscode.SnippetString(`${fld}' => true, $0`);
+              it.range = makeReplaceRange(doc, pos, already.length);
+              return it;
+            });
+          }
+
           // ── we’re inside a nested array for one of the rootKeys ───────
           const allFields = [...fieldMap.entries()];
           let suggestions: [string, FieldInfo][] = [];
-
-          // find the immediate entry-key whose value is your hostArray
-          const nestedRoot = hostArray
-            ? findParentKey(argsArr as PhpArray, hostArray)
-            : null;
-
-          // use nestedRoot if present, otherwise fall back to the top-level key
-          const activeRoot = nestedRoot ?? currentRoot;
-          const modelNames = new Set((await getModelMap()).keys());
 
           if (activeRoot === "_count") {
             // inside the _count => [ … ] block → only offer `select`
@@ -1432,6 +1501,15 @@ export async function activate(context: vscode.ExtensionContext) {
             "orderBy",
             "distinct",
             "omit",
+            "update",
+            "create",
+            "having",
+            "by",
+            "_count",
+            "_max",
+            "_min",
+            "_avg",
+            "_sum",
           ];
           if (!fieldsRoots.includes(currentRoot)) {
             return;
@@ -1579,6 +1657,7 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.languages.createDiagnosticCollection("prisma-update");
   const deleteDiags =
     vscode.languages.createDiagnosticCollection("prisma-delete");
+    const upsertDiags   = vscode.languages.createDiagnosticCollection("prisma-upsert");
 
   const pendingTimers = new Map<string, NodeJS.Timeout>();
   function scheduleValidation(doc: vscode.TextDocument) {
@@ -1609,7 +1688,7 @@ export async function activate(context: vscode.ExtensionContext) {
     await validateReadCall(document, readDiags);
     await validateUpdateCall(document, updateDiags);
     await validateDeleteCall(document, deleteDiags);
-    await validateUpsertCall(document, updateDiags);
+    await validateUpsertCall(document, upsertDiags);
     await validateGroupByCall(document, readDiags);
     await validateAggregateCall(document, readDiags);
 
@@ -2703,19 +2782,18 @@ export async function validateUpdateCall(
     if (node.kind !== "call") {
       return;
     }
-
     const call = node as Call;
     if (!isPropLookup(call.what)) {
       return;
     }
 
-    // ── identify $prisma->Model->update() or updateMany() ──
+    // only update() or updateMany()
     const opName = nodeName(call.what.offset);
     if (opName !== "update" && opName !== "updateMany") {
       return;
     }
 
-    // ── get the model name ──
+    // extract model
     const mdlChain = call.what.what;
     if (!isPropLookup(mdlChain)) {
       return;
@@ -2725,27 +2803,24 @@ export async function validateUpdateCall(
       return;
     }
 
-    // ── must be $prisma->… ──
-    const base = mdlChain.what;
-    if (!(isVariable(base) && base.name === "prisma")) {
+    // must be $prisma
+    if (!(isVariable(mdlChain.what) && mdlChain.what.name === "prisma")) {
       return;
     }
 
-    // ── first (and only) argument must be an array literal ──
+    // single argument must be an array literal
     const arg0 = call.arguments?.[0];
     if (!isArray(arg0)) {
       return;
     }
 
-    // ── you may not mix select/include at the top level ──
+    // no mixing select/include
     if (validateSelectIncludeExclusivity(arg0, doc, diagnostics)) {
       collection.set(doc.uri, diagnostics);
       return;
     }
 
     const items = arg0.items as Entry[];
-
-    // ── find 'where' and 'data' entries ──
     const whereEntry = items.find(
       (e) => e.key?.kind === "string" && (e.key as any).value === "where"
     ) as Entry | undefined;
@@ -2753,7 +2828,7 @@ export async function validateUpdateCall(
       (e) => e.key?.kind === "string" && (e.key as any).value === "data"
     ) as Entry | undefined;
 
-    // ── both blocks are required for update* ──
+    // require both blocks
     if (!whereEntry || !dataEntry) {
       const missing = [
         !whereEntry ? "'where'" : null,
@@ -2772,14 +2847,14 @@ export async function validateUpdateCall(
       return;
     }
 
-    // ── schema lookup ──
+    // lookup schema
     const fields =
       modelMap.get(modelName.toLowerCase()) ?? new Map<string, FieldInfo>();
     if (!fields.size) {
       return;
     }
 
-    // ── validate the WHERE block ──
+    // ── validate WHERE
     if (!isArray(whereEntry.value)) {
       diagnostics.push(
         new vscode.Diagnostic(
@@ -2792,7 +2867,7 @@ export async function validateUpdateCall(
       validateWhereArray(doc, whereEntry.value, fields, modelName, diagnostics);
     }
 
-    // ── validate the DATA block ──
+    // ── validate DATA
     if (!isArray(dataEntry.value)) {
       diagnostics.push(
         new vscode.Diagnostic(
@@ -2802,19 +2877,41 @@ export async function validateUpdateCall(
         )
       );
     } else {
-      for (const item of (dataEntry.value as PhpArray).items as Entry[]) {
+      const entries = (dataEntry.value as PhpArray).items as Entry[];
+
+      // ① make sure they’re actually updating at least one *column*
+      const realUpdates = entries
+        .filter(
+          (e) =>
+            e.key?.kind === "string" &&
+            !PRISMA_OPERATORS.has((e.key as any).value)
+        )
+        .map((e) => (e.key as any).value as string);
+
+      if (realUpdates.length === 0) {
+        diagnostics.push(
+          new vscode.Diagnostic(
+            rangeOf(doc, dataEntry.key!.loc!),
+            `${opName}() requires at least one real column to be updated in 'data'.`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      }
+
+      // ② then exactly the same per‐column checks you had before
+      for (const item of entries) {
         if (!item.key || item.key.kind !== "string") {
           continue;
         }
         const key = (item.key as any).value as string;
         const value = item.value;
 
-        // Prisma operators like _count, AND, etc. are always allowed
+        // top-level Prisma operators (AND/OR/etc.) are always allowed
         if (PRISMA_OPERATORS.has(key)) {
           continue;
         }
 
-        // nested object: e.g. { push: [...], set: [...], ... }
+        // nested object updates (e.g. push/set on list fields)
         if (isArray(value)) {
           validateFieldAssignments(
             doc,
@@ -2827,7 +2924,7 @@ export async function validateUpdateCall(
           continue;
         }
 
-        // scalar column update
+        // scalar column
         const info = fields.get(key);
         const keyRange = rangeOf(doc, item.key.loc!);
         if (!info) {
@@ -2855,12 +2952,12 @@ export async function validateUpdateCall(
       }
     }
 
-    // ── finally, validate select/include in the same call ──
+    // ── finally, select/include sanity
+    validateWhereArray(doc, whereEntry.value, fields, modelName, diagnostics);
     validateSelectIncludeEntries(doc, arg0, fields, modelName, diagnostics);
-
-    collection.set(doc.uri, diagnostics);
   });
 
+  // ensure we always set—clears out old results when you type
   collection.set(doc.uri, diagnostics);
 }
 
