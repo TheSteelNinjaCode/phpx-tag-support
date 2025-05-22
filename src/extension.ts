@@ -689,8 +689,16 @@ export async function activate(context: vscode.ExtensionContext) {
               })
             : [];
 
-          /* ⑦ return both lists (static first keeps their ordering) ------ */
-          return [...staticItems, ...dynamicItems];
+          /* ⑦ return both lists – COMPONENT props first, pp- attributes later */
+          dynamicItems.forEach((it) => {
+            // "0_" makes them sort *before* everything that starts with "1_"
+            it.sortText = `0_${it.label}`;
+          });
+          staticItems.forEach((it) => {
+            it.sortText = `1_${it.label}`;
+          });
+
+          return [...dynamicItems, ...staticItems]; // ← changed line
         },
       },
       " ",
@@ -1657,7 +1665,8 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.languages.createDiagnosticCollection("prisma-update");
   const deleteDiags =
     vscode.languages.createDiagnosticCollection("prisma-delete");
-    const upsertDiags   = vscode.languages.createDiagnosticCollection("prisma-upsert");
+  const upsertDiags =
+    vscode.languages.createDiagnosticCollection("prisma-upsert");
 
   const pendingTimers = new Map<string, NodeJS.Timeout>();
   function scheduleValidation(doc: vscode.TextDocument) {
@@ -1746,41 +1755,59 @@ function validateComponentPropValues(
   const text = doc.getText();
   const diags: vscode.Diagnostic[] = [];
 
-  //   <Tag  foo="bar"  other="…" >
-  const tagRe = /<\s*([A-Z][A-Za-z0-9_]*)\b([^>]*?)\/?>/g; // ① whole tag
-  const attrRe = /([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"/g; // ② every attr="val"
+  /*           <Tag  foo="bar"  other="…">                            */
+  const tagRe = /<\s*([A-Z][A-Za-z0-9_]*)\b([^>]*?)\/?>/g; // entire opening tag
+  const attrRe = /([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"/g; // every attr="val"
 
-  let m: RegExpExecArray | null;
-  while ((m = tagRe.exec(text))) {
-    const [, tag, attrPart] = m;
-    const props = propsProvider.getProps(tag); // meta for this tag
+  let tagMatch: RegExpExecArray | null;
+  while ((tagMatch = tagRe.exec(text))) {
+    const [, tag, attrPart] = tagMatch;
+    const props = propsProvider.getProps(tag);
     if (!props.length) {
       continue;
     }
 
-    let a: RegExpExecArray | null;
-    while ((a = attrRe.exec(attrPart))) {
-      const [, attrName, value] = a;
+    /* record which attrs we actually saw in this tag */
+    const present = new Set<string>();
+
+    /* ── 1️⃣  validate values that ARE present ─────────────────── */
+    let attrMatch: RegExpExecArray | null;
+    while ((attrMatch = attrRe.exec(attrPart))) {
+      const [, attrName, value] = attrMatch;
+      present.add(attrName);
+
       const meta = props.find((p) => p.name === attrName);
       if (!meta?.default) {
-        continue;
-      } // nothing to validate
+        continue; // nothing to validate for this attr
+      }
 
-      /* build the allowed list – either pipe or literal array */
       const allowed = String(meta.default).split("|").filter(Boolean);
-
       if (allowed.length && !allowed.includes(value)) {
-        // map the attr name to its location in the real document
-        const tagStart = m.index; // where "<Tag" is
-        const attrIndexInTag = m[0].indexOf(a[0]); // offset inside tag
-        const absStart = tagStart + attrIndexInTag + a[0].indexOf(value); // «v» in foo="v"
+        const tagStart = tagMatch.index; // where "<Tag" is
+        const attrRelOffset = tagMatch[0].indexOf(attrMatch[0]);
+        const absStart = tagStart + attrRelOffset + attrMatch[0].indexOf(value);
         const absEnd = absStart + value.length;
 
         diags.push(
           new vscode.Diagnostic(
             new vscode.Range(doc.positionAt(absStart), doc.positionAt(absEnd)),
-            `Invalid value "${value}". Allowed: ${allowed.join(", ")}`,
+            `Invalid value "${value}". Allowed: ${allowed.join(", ")}`,
             vscode.DiagnosticSeverity.Warning
+          )
+        );
+      }
+    }
+
+    /* ── 2️⃣  flag *missing* required props ─────────────────────── */
+    for (const p of props) {
+      if (!p.optional && !present.has(p.name)) {
+        // highlight the tag name itself for visibility
+        const tagNamePos = doc.positionAt(tagMatch.index + 1); // skip '<'
+        diags.push(
+          new vscode.Diagnostic(
+            new vscode.Range(tagNamePos, tagNamePos.translate(0, tag.length)),
+            `Missing required attribute "${p.name}".`,
+            vscode.DiagnosticSeverity.Error
           )
         );
       }

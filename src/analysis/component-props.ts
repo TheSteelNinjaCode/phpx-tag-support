@@ -24,6 +24,7 @@ interface PropMeta {
   type: string; //  string|int|null …
   default?: string; //  already‑formatted literal
   doc?: string; //  first line of PHP‑Doc
+  optional: boolean; // true ↔ nullable (…|null)
 }
 
 type Cached = { mtime: number; props: PropMeta[] };
@@ -158,29 +159,39 @@ export class ComponentPropsProvider {
       /* A) ‑‑‑ properties & promoted‑properties ‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑ */
       if (node.kind !== "classconstant") {
         for (const p of stmt.properties ?? []) {
-          handleMember(p.name, p.value);
+          handleMember(p, p.name, p.value);
         }
       } else {
         /* B) ‑‑‑ class constants ‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑ */
         for (const c of stmt.constants ?? []) {
-          handleMember(c.name, c.value);
+          handleMember(c, c.name, c.value);
         }
       }
       /* ───────────────────────────────────────────────────────────── */
 
-      function handleMember(nameNode: any, valueNode: any | undefined): void {
+      function handleMember(
+        propNode: any,
+        nameNode: any,
+        valueNode: any | undefined
+      ): void {
         const name =
           typeof nameNode === "string" ? nameNode : (nameNode?.name as string);
         if (!name) {
           return;
         }
 
-        // 1) @var PHP‑Doc siempre manda
-        let finalType: string | undefined;
+        /* 1️⃣  ── figure out the “raw” type that is written in code ───────── */
+        let codeTypeStr: string | undefined;
+        if (stmt.type) {
+          codeTypeStr = typeToString(stmt.type); // e.g. "array|null"
+        }
+
+        /* 2️⃣  ── PHP-Doc always wins for the *display* type … ────────────── */
+        let finalType: string | undefined = codeTypeStr;
         if (docRaw) {
           const m = /@var\s+([^\s]+)/.exec(docRaw);
           if (m) {
-            finalType = m[1];
+            finalType = m[1]; // may or may not contain “null”
           }
         }
 
@@ -188,13 +199,17 @@ export class ComponentPropsProvider {
         if (!finalType && stmt.type) {
           finalType = typeToString(stmt.type);
         }
-
-        // 3) nada aún → intenta deducir del valor literal
+        /* 3️⃣  ── still nothing? → infer from default literal ────────────── */
         if (!finalType || finalType === "mixed") {
           finalType = inferTypeFromValue(valueNode);
         }
 
-        /* ← default value (usa la lógica nueva array‑keys) */
+        /* ── optional? ───────────────────────────────────────────── */
+        const optional =
+          propNode.nullable === true || // ← ⭐ key change
+          /\bnull\b/.test(finalType); // unions & php-doc
+
+        /* 5️⃣  ── default-value extraction unchanged ─────────────────────── */
         let def: string | string[] | undefined;
         if (valueNode) {
           switch (valueNode.kind) {
@@ -230,6 +245,7 @@ export class ComponentPropsProvider {
           type: finalType,
           default: Array.isArray(def) ? def.join("|") : def,
           doc: docRaw?.split(/\r?\n/)[0],
+          optional, // ✅ now correct
         });
       }
     });
@@ -273,7 +289,7 @@ export function buildDynamicAttrItems(
   return provider
     .getProps(tag)
     .filter(({ name }) => !written.has(name) && name.startsWith(partial))
-    .map(({ name, type, default: def, doc }) => {
+    .map(({ name, type, default: def, doc, optional }) => {
       const item = new vscode.CompletionItem(
         name,
         vscode.CompletionItemKind.Field
@@ -282,14 +298,24 @@ export function buildDynamicAttrItems(
       /* insert   variant="$0"   as before */
       item.insertText = new vscode.SnippetString(`${name}="$0"`);
 
-      /* list label  →  ": string = \"default\""  */
-      item.detail = def ? `: ${type} = ${def}` : `: ${type}`;
+      /* list detail  – add (optional) / (required) marker */
+      const reqFlag = optional ? "(optional)" : "(required)";
+      item.detail = def
+        ? `${reqFlag}  : ${type} = ${def}`
+        : `${reqFlag}  : ${type}`;
 
       /* docs / hover */
       const md = new vscode.MarkdownString();
       md.appendCodeblock(
         def ? `${name}: ${type} = ${def}` : `${name}: ${type}`,
         "php"
+      );
+      md.appendMarkdown(
+        `\n\n${
+          optional
+            ? "_This prop can be omitted (nullable)_"
+            : "_This prop is required_"
+        }`
       );
       if (doc) {
         md.appendMarkdown("\n\n" + doc);
