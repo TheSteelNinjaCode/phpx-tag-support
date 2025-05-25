@@ -439,29 +439,6 @@ function validatePphpCalls(
   diagCollection.set(document.uri, diags);
 }
 
-let classLogMap: Record<string, { filePath: string }> = {};
-
-// call this once on activate, and again whenever class-log.json changes
-async function loadClassLog() {
-  classLogMap = {};
-  const ws = vscode.workspace.workspaceFolders?.[0];
-  if (!ws) {
-    return;
-  }
-
-  const jsonUri = vscode.Uri.joinPath(ws.uri, "settings", "class-log.json");
-  try {
-    const data = await vscode.workspace.fs.readFile(jsonUri);
-    const mapping = JSON.parse(Buffer.from(data).toString("utf8")) as Record<
-      string,
-      { filePath: string }
-    >;
-    classLogMap = mapping;
-  } catch (e) {
-    console.error("couldn't load class-log.json", e);
-  }
-}
-
 /* ────────────────────────────────────────────────────────────── *
  *                       EXTENSION ACTIVATION                       *
  * ────────────────────────────────────────────────────────────── */
@@ -1674,138 +1651,6 @@ export async function activate(context: vscode.ExtensionContext) {
     );
   }
 
-  loadClassLog();
-  const ClassLogWatcher = vscode.workspace.createFileSystemWatcher(
-    new vscode.RelativePattern(
-      vscode.workspace.workspaceFolders![0],
-      "settings/class-log.json"
-    )
-  );
-  ClassLogWatcher.onDidChange(loadClassLog);
-  ClassLogWatcher.onDidCreate(loadClassLog);
-  ClassLogWatcher.onDidDelete(loadClassLog);
-  context.subscriptions.push(ClassLogWatcher);
-
-  async function validateBrokenUseImports(
-    document: vscode.TextDocument,
-    diagCollection: vscode.DiagnosticCollection
-  ) {
-    const text = document.getText();
-    const useMap = parsePhpUseStatements(text);
-    const ws = vscode.workspace.workspaceFolders![0].uri.fsPath;
-    const sourceRoot = vscode.workspace
-      .getConfiguration("phpx-tag-support")
-      .get<string>("sourceRoot", "src");
-    const diags: vscode.Diagnostic[] = [];
-
-    for (const [, fullClass] of useMap.entries()) {
-      // split “Lib\PHPX\{Alert}” → prefix="Lib\PHPX", alias="Alert"
-      const parts = fullClass.split("\\");
-      const alias = parts.pop()!;
-      const prefix = parts.join("\\");
-
-      // 1️⃣ do we have an exact entry for prefix\alias?
-      const exactEntry = classLogMap[fullClass];
-
-      // 2️⃣ if not, does alias live somewhere else in your class-log?
-      let entry = exactEntry;
-      let correctFqcn: string | undefined;
-      if (!entry) {
-        correctFqcn = getComponentsFromClassLog().get(alias);
-        if (correctFqcn) {
-          entry = classLogMap[correctFqcn];
-        }
-      }
-
-      if (!entry) {
-        // alias truly unknown
-        reportMissing(fullClass, alias);
-        continue;
-      }
-
-      // 3️⃣ if it existed only by alias, that means the prefix was wrong
-      if (!exactEntry && correctFqcn) {
-        const expectedPrefix = correctFqcn.split("\\").slice(0, -1).join("\\");
-        reportWrongPrefix(prefix, expectedPrefix, alias);
-        continue;
-      }
-
-      // 4️⃣ exactEntry found – now check the file actually exists on disk
-      const fileOnDisk = path.join(
-        ws,
-        sourceRoot,
-        entry.filePath.replace(/\\/g, "/")
-      );
-      try {
-        await vscode.workspace.fs.stat(vscode.Uri.file(fileOnDisk));
-      } catch {
-        reportMissing(fullClass, alias);
-      }
-    }
-
-    // merge in any other diagnostics
-    diagCollection.set(
-      document.uri,
-      (diagCollection.get(document.uri) || []).concat(diags)
-    );
-
-    // ─── helpers ─────────────────────────────────────
-
-    function reportMissing(fqcn: string, alias: string) {
-      const stmtRe = new RegExp(
-        `use\\s+[^;]*\\b${escapeRegex(alias)}\\b[^;]*;`
-      );
-      const m = stmtRe.exec(text);
-      if (!m || m.index === null) {
-        return;
-      }
-      const start = document.positionAt(m.index + m[0].indexOf(alias));
-      const end = start.translate(0, alias.length);
-      diags.push(
-        new vscode.Diagnostic(
-          new vscode.Range(start, end),
-          `File for import \`${fqcn}\` not found.`,
-          vscode.DiagnosticSeverity.Error
-        )
-      );
-    }
-
-    function reportWrongPrefix(
-      usedPrefix: string,
-      expectedPrefix: string,
-      alias: string
-    ) {
-      // highlight just the alias again
-      const stmtRe = new RegExp(
-        `use\\s+${escapeRegex(usedPrefix)}\\\\\\{[^}]*\\b${escapeRegex(
-          alias
-        )}\\b[^}]*\\};`
-      );
-      const m = stmtRe.exec(text);
-      if (!m || m.index === null) {
-        return;
-      }
-      // find alias inside that group
-      const relIdx = m[0].indexOf(alias);
-      const start = document.positionAt(m.index + relIdx);
-      const end = start.translate(0, alias.length);
-      diags.push(
-        new vscode.Diagnostic(
-          new vscode.Range(start, end),
-          `Component \`${alias}\` lives under \`${expectedPrefix}\`, not \`${usedPrefix}\`.`,
-          vscode.DiagnosticSeverity.Error
-        )
-      );
-    }
-  }
-
-  context.subscriptions.push(
-    stringDecorationType,
-    numberDecorationType,
-    templateLiteralDecorationType,
-    registerPrismaFieldProvider()
-  );
-
   const createDiags =
     vscode.languages.createDiagnosticCollection("prisma-create");
   const readDiags = vscode.languages.createDiagnosticCollection("prisma-read");
@@ -1858,8 +1703,6 @@ export async function activate(context: vscode.ExtensionContext) {
     );
     updateJsVariableDecorations(document, braceDecorationType);
     validateMissingImports(document, diagnosticCollection);
-
-    await validateBrokenUseImports(document, diagnosticCollection);
   };
 
   context.subscriptions.push(objectPropertyDecorationType);
