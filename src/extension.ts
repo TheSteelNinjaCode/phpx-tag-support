@@ -439,6 +439,11 @@ function validatePphpCalls(
   diagCollection.set(document.uri, diags);
 }
 
+const phpEngine = new Engine({
+  parser: { php8: true, suppressErrors: true },
+  ast: { withPositions: true },
+});
+
 /* ────────────────────────────────────────────────────────────── *
  *                       EXTENSION ACTIVATION                       *
  * ────────────────────────────────────────────────────────────── */
@@ -1245,7 +1250,7 @@ export async function activate(context: vscode.ExtensionContext) {
           const tail = before.slice(lastPrisma);
           let ast: Node;
           try {
-            ast = php.parseEval(tail);
+            ast = phpEngine.parseEval(tail);
           } catch {
             return;
           }
@@ -2205,11 +2210,6 @@ function isValidPhpType(expr: string, info: FieldInfo): boolean {
   });
 }
 
-const php = new Engine({
-  parser: { php8: true, suppressErrors: true },
-  ast: { withPositions: true },
-});
-
 /* ---------- type‑guards ----------------------------------- */
 const isPropLookup = (n: Node): n is PropertyLookup =>
   n.kind === "propertylookup";
@@ -2411,7 +2411,7 @@ export async function validateCreateCall(
 ): Promise<void> {
   const diagnostics: vscode.Diagnostic[] = [];
   const modelMap = await getModelMap();
-  const ast = php.parseCode(doc.getText(), doc.fileName);
+  const ast = phpEngine.parseCode(doc.getText(), doc.fileName);
 
   /* ─── busca todas las llamadas $prisma->Model->create[…] ─── */
   walk(ast, (node) => {
@@ -2796,7 +2796,7 @@ export async function validateUpdateCall(
 ): Promise<void> {
   const diagnostics: vscode.Diagnostic[] = [];
   const modelMap = await getModelMap();
-  const ast = php.parseCode(doc.getText(), doc.fileName);
+  const ast = phpEngine.parseCode(doc.getText(), doc.fileName);
 
   walk(ast, (node) => {
     if (node.kind !== "call") {
@@ -2987,7 +2987,7 @@ export async function validateDeleteCall(
 ): Promise<void> {
   const diagnostics: vscode.Diagnostic[] = [];
   const modelMap = await getModelMap();
-  const ast = php.parseCode(doc.getText(), doc.fileName);
+  const ast = phpEngine.parseCode(doc.getText(), doc.fileName);
 
   walk(ast, (node) => {
     if (node.kind !== "call") {
@@ -3086,7 +3086,7 @@ export async function validateUpsertCall(
 ): Promise<void> {
   const diagnostics: vscode.Diagnostic[] = [];
   const modelMap = await getModelMap();
-  const ast = php.parseCode(doc.getText(), doc.fileName);
+  const ast = phpEngine.parseCode(doc.getText(), doc.fileName);
 
   walk(ast, (node) => {
     if (node.kind !== "call") {
@@ -3318,7 +3318,7 @@ export async function validateGroupByCall(
 ): Promise<void> {
   const diagnostics: vscode.Diagnostic[] = [];
   const modelMap = await getModelMap();
-  const ast = php.parseCode(doc.getText(), doc.fileName);
+  const ast = phpEngine.parseCode(doc.getText(), doc.fileName);
 
   walk(ast, (node) => {
     if (node.kind !== "call") {
@@ -3574,7 +3574,7 @@ export async function validateAggregateCall(
 ): Promise<void> {
   const diagnostics: vscode.Diagnostic[] = [];
   const modelMap = await getModelMap();
-  const ast = php.parseCode(doc.getText(), doc.fileName);
+  const ast = phpEngine.parseCode(doc.getText(), doc.fileName);
 
   walk(ast, (node) => {
     if (node.kind !== "call") {
@@ -4730,6 +4730,23 @@ export function containsJsAssignment(expr: string): boolean {
   return found;
 }
 
+/**
+ * Turn PHP-style variables into JS identifiers:
+ *   {$foo} → foo
+ *   $bar   → bar
+ */
+function preNormalizePhpVars(text: string): string {
+  return text.replace(
+    /{{([\s\S]*?)}}/g,
+    (_, inside) =>
+      "{{" +
+      inside
+        .replace(/\{\s*\$([A-Za-z_]\w*)\s*\}/g, "$1")
+        .replace(/\$([A-Za-z_]\w*)/g, "$1") +
+      "}}"
+  );
+}
+
 const validateJsVariablesInCurlyBraces = (
   document: vscode.TextDocument,
   diagnosticCollection: vscode.DiagnosticCollection
@@ -4740,7 +4757,11 @@ const validateJsVariablesInCurlyBraces = (
 
   const originalText = document.getText();
   // 1️⃣ blank out *all* PHP literals/comments/regex so we don't pick up "{{…}}" inside them
-  const sanitizedText = sanitizeForDiagnostics(originalText);
+
+  // ① normalize away PHP vars
+  const normalized = preNormalizePhpVars(originalText);
+
+  const sanitizedText = sanitizeForDiagnostics(normalized);
 
   const diagnostics: vscode.Diagnostic[] = [];
   let match: RegExpExecArray | null;
@@ -4753,11 +4774,10 @@ const validateJsVariablesInCurlyBraces = (
       diagnostics.push(
         new vscode.Diagnostic(
           new vscode.Range(
-            document.positionAt(match.index + 2), // «{{
-            document.positionAt(match.index + match[0].length - 2) // «}}»
+        document.positionAt(match.index + 2), // «{{»
+        document.positionAt(match.index + match[0].length - 2) // «}}»
           ),
-          "⚠️  No está permitido realizar asignaciones dentro de {{ … }}. " +
-            "Use valores u operaciones puras.",
+          "⚠️  Assignments are not allowed inside {{ … }}. Use values or pure expressions.",
           vscode.DiagnosticSeverity.Warning
         )
       );
