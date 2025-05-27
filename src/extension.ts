@@ -4597,8 +4597,6 @@ function getComponentsFromClassLog(): Map<string, string> {
 /* ────────────────────────────────────────────────────────────── *
  *                     DECORATION AND VALIDATION                     *
  * ────────────────────────────────────────────────────────────── */
-const PLACEHOLDER_REGEX = /\$\{([\s\S]*?)\}/g;
-
 // Update curly brace decorations within JS expressions.
 function updateJsVariableDecorations(
   document: vscode.TextDocument,
@@ -4636,25 +4634,20 @@ function updateJsVariableDecorations(
     });
 
     // 2️⃣ *inside* that same mustache text, look for `${…}`
-    let ph: RegExpExecArray | null;
-    while ((ph = PLACEHOLDER_REGEX.exec(wholeMatch)) !== null) {
-      const phRelStart = ph.index;
-      const phLen = ph[0].length;
-      const phAbsStart = blockStart + phRelStart;
-
-      // highlight "${"
+    for (const ph of findPlaceholders(wholeMatch)) {
+      // opening “${”
       decorations.push({
         range: new vscode.Range(
-          document.positionAt(phAbsStart),
-          document.positionAt(phAbsStart + 2)
+          document.positionAt(blockStart + ph.start),
+          document.positionAt(blockStart + ph.start + 2)
         ),
       });
 
-      // highlight the closing "}"
+      // matching “}”
       decorations.push({
         range: new vscode.Range(
-          document.positionAt(phAbsStart + phLen - 1),
-          document.positionAt(phAbsStart + phLen)
+          document.positionAt(blockStart + ph.end - 1),
+          document.positionAt(blockStart + ph.end)
         ),
       });
     }
@@ -4774,8 +4767,8 @@ const validateJsVariablesInCurlyBraces = (
       diagnostics.push(
         new vscode.Diagnostic(
           new vscode.Range(
-        document.positionAt(match.index + 2), // «{{»
-        document.positionAt(match.index + match[0].length - 2) // «}}»
+            document.positionAt(match.index + 2), // «{{»
+            document.positionAt(match.index + match[0].length - 2) // «}}»
           ),
           "⚠️  Assignments are not allowed inside {{ … }}. Use values or pure expressions.",
           vscode.DiagnosticSeverity.Warning
@@ -4842,15 +4835,27 @@ const numberDecorationType = vscode.window.createTextEditorDecorationType({
 
 // catch anything between back-ticks, including escaped ones
 const templateLiteralRegex = /`(?:\\[\s\S]|[^\\`])*`/g;
-const placeholderRegex = /\$\{[^}]*\}/g;
 
-// decoration for template literals inside {{ … }}
-const templateLiteralDecorationType =
-  vscode.window.createTextEditorDecorationType({
-    color: STRING_COLOR,
-  });
-
-// ── the updated function ────────────────────────────────────────────
+export function* findPlaceholders(src: string) {
+  for (let i = 0; i < src.length - 1; i++) {
+    if (src[i] === "$" && src[i + 1] === "{") {
+      let depth = 1;
+      let j = i + 2; // jump *after* the opening “{”
+      while (j < src.length && depth) {
+        const ch = src[j++];
+        if (ch === "{") {
+          depth++;
+        } else if (ch === "}") {
+          depth--;
+        }
+      }
+      if (depth === 0) {
+        yield { start: i, end: j }; // j is already past the “}”
+        i = j - 1; // resume scanning *after* it
+      }
+    }
+  }
+}
 
 function updateNativeTokenDecorations(
   document: vscode.TextDocument,
@@ -4929,12 +4934,10 @@ function updateNativeTokenDecorations(
     }
 
     for (const tl of jsExpr.matchAll(templateLiteralRegex)) {
-      const tplBase = baseIndex + tl.index!; //  ← NEW
+      const tplBase = baseIndex + tl.index!;
       const raw = tl[0];
-      const inner = raw.slice(1, -1); // strip the back‑ticks
-      let last = 0;
+      const inner = raw.slice(1, -1);
 
-      // at the top of the loop, just after tplBase is defined
       stringSpans.push({
         range: new vscode.Range(
           document.positionAt(tplBase),
@@ -4948,11 +4951,10 @@ function updateNativeTokenDecorations(
         ),
       });
 
-      let ph: RegExpExecArray | null;
-      while ((ph = placeholderRegex.exec(inner))) {
-        // literal chunk **before** this placeholder
-        const litStart = tplBase + 1 + last; // tplBase, not baseIndex
-        const litEnd = tplBase + 1 + ph.index;
+      let last = 0;
+      for (const ph of findPlaceholders(inner)) {
+        const litStart = tplBase + 1 + last;
+        const litEnd = tplBase + 1 + ph.start;
         if (litEnd > litStart) {
           stringSpans.push({
             range: new vscode.Range(
@@ -4961,10 +4963,9 @@ function updateNativeTokenDecorations(
             ),
           });
         }
-        last = ph.index + ph[0].length;
+        last = ph.end;
       }
 
-      // trailing literal **after** the last placeholder
       if (last < inner.length) {
         const litStart = tplBase + 1 + last;
         const litEnd = tplBase + 1 + inner.length;
