@@ -8,7 +8,6 @@ import {
   PropertyLookup,
   Variable,
 } from "php-parser";
-import ts, { CallExpression } from "typescript";
 import { phpEngine } from "../util/php-engine";
 import { Diagnostic, TextDocument, Range } from "vscode";
 import { findPrismaCalls } from "../analysis/php-ast";
@@ -418,6 +417,30 @@ export function registerPrismaFieldProvider(): vscode.Disposable {
           });
         }
 
+        // ─── 1) If we’re in a `select` block on a _relation_ field …
+        if (
+          currentRoot === "select" &&
+          nestedRoot &&
+          entrySide === "key" &&
+          fieldMap.has(nestedRoot) // it's a real field
+        ) {
+          const relInfo = fieldMap.get(nestedRoot)!;
+          // only if that field’s type is another model
+          if (modelNames.has(relInfo.type.toLowerCase())) {
+            const nestedOps = ["select", "include", "omit", "where"] as const;
+            return nestedOps.map((op) => {
+              const it = new vscode.CompletionItem(
+                op,
+                vscode.CompletionItemKind.Keyword
+              );
+              // we want `'select' => [ 'user' => [ 'select' => ` ready to go
+              it.insertText = new vscode.SnippetString(`${op}' => `);
+              it.range = makeReplaceRange(doc, pos, already.length);
+              return it;
+            });
+          }
+        }
+
         // ── we’re inside a nested array for one of the rootKeys ───────
         const allFields = [...fieldMap.entries()];
         let suggestions: [string, FieldInfo][] = [];
@@ -435,9 +458,7 @@ export function registerPrismaFieldProvider(): vscode.Disposable {
           selectItem.range = makeReplaceRange(doc, pos, already.length);
           return [selectItem];
         } else if (activeRoot === "select") {
-          suggestions = allFields.filter(([, info]) =>
-            modelNames.has(info.type.toLowerCase())
-          );
+          suggestions = allFields;
         } else if (activeRoot === "include") {
           // back up to include → offer relations + _count
           suggestions = allFields.filter(([, info]) =>
