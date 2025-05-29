@@ -844,6 +844,7 @@ export function validateSelectBlock(
     const startPos = doc.positionAt(offset + m.index);
     const range = new vscode.Range(startPos, startPos.translate(0, key.length));
 
+    // unknown column
     if (!info) {
       diags.push(
         new vscode.Diagnostic(
@@ -854,6 +855,13 @@ export function validateSelectBlock(
       );
       continue;
     }
+
+    // if it's an array literal, that's a nested‐select; skip here
+    if (raw.startsWith("[") && raw.endsWith("]")) {
+      continue;
+    }
+
+    // boolean check as before
     if (!/^(true|false)$/i.test(raw)) {
       diags.push(
         new vscode.Diagnostic(
@@ -1001,25 +1009,77 @@ export function validateSelectIncludeEntries(
   arr: PhpArray,
   fields: Map<string, FieldInfo>,
   modelName: string,
-  diags: Diagnostic[]
+  diags: Diagnostic[],
+  modelMap: ModelMap
 ) {
-  for (const prop of ["select", "include"] as const) {
-    const entry = (arr.items as Entry[]).find(
-      (e) => e.key?.kind === "string" && (e.key as any).value === prop
-    );
-    if (!entry?.value?.loc || !isArray(entry.value)) {
-      continue;
-    }
-    const { start, end } = entry.value.loc;
-    const literal = doc.getText(
-      new Range(doc.positionAt(start.offset), doc.positionAt(end.offset))
-    );
+  // look for the top‐level `select => [ … ]`
+  const selectEntry = (arr.items as Entry[]).find(
+    (e) => e.key?.kind === "string" && (e.key as any).value === "select"
+  );
+  if (selectEntry && isArray(selectEntry.value) && selectEntry.value.loc) {
+    const selectArr = selectEntry.value as PhpArray;
 
-    if (prop === "select") {
-      validateSelectBlock(doc, literal, start.offset, fields, modelName, diags);
-    } else if (prop === "include") {
-      validateIncludeBlock(doc, entry, fields, modelName, diags);
+    // ─── NEW: complain about any unknown field _before_ you recurse ───
+    for (const ent of selectArr.items as Entry[]) {
+      if (ent.key?.kind === "string") {
+        const name = (ent.key as any).value as string;
+        if (!fields.has(name)) {
+          const { start, end } = ent.key.loc!;
+          diags.push(
+            new vscode.Diagnostic(
+              new Range(
+                doc.positionAt(start.offset),
+                doc.positionAt(end.offset)
+              ),
+              `The column "${name}" does not exist in ${modelName}.`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+        }
+      }
     }
+
+    // ─── now recurse into any legit relation blocks ───
+    for (const relEntry of selectArr.items as Entry[]) {
+      if (
+        relEntry.key?.kind === "string" &&
+        isArray(relEntry.value) &&
+        relEntry.value.loc
+      ) {
+        const relName = (relEntry.key as any).value as string;
+        const relInfo = fields.get(relName);
+        if (relInfo && modelMap.has(relInfo.type.toLowerCase())) {
+          validateSelectIncludeEntries(
+            doc,
+            relEntry.value as PhpArray,
+            modelMap.get(relInfo.type.toLowerCase())!,
+            relInfo.type,
+            diags,
+            modelMap
+          );
+        }
+      }
+    }
+
+    // ─── finally, only if this block has no nested arrays do we boolean‐check it ───
+    const hasNested = (selectArr.items as Entry[]).some((e) =>
+      isArray(e.value)
+    );
+    if (!hasNested) {
+      const { start, end } = selectEntry.value.loc!;
+      const literal = doc.getText(
+        new Range(doc.positionAt(start.offset), doc.positionAt(end.offset))
+      );
+      validateSelectBlock(doc, literal, start.offset, fields, modelName, diags);
+    }
+  }
+
+  // …then do exactly what you already had for `include`
+  const includeEntry = (arr.items as Entry[]).find(
+    (e) => e.key?.kind === "string" && (e.key as any).value === "include"
+  );
+  if (includeEntry) {
+    validateIncludeBlock(doc, includeEntry, fields, modelName, diags);
   }
 }
 
@@ -1411,7 +1471,14 @@ export async function validateCreateCall(
         }
       }
 
-      validateSelectIncludeEntries(doc, args, fields, modelName, diagnostics);
+      validateSelectIncludeEntries(
+        doc,
+        args,
+        fields,
+        modelName,
+        diagnostics,
+        modelMap
+      );
     }
 
     /* ⑥ para createMany(): múltiples filas */
@@ -1534,7 +1601,8 @@ export async function validateReadCall(
         arr as PhpArray,
         fields,
         call.model,
-        diags
+        diags,
+        modelMap
       );
 
       validateOrderByEntries(doc, arr as PhpArray, fields, call.model, diags);
@@ -1556,7 +1624,8 @@ export async function validateReadCall(
       arr as PhpArray,
       fields,
       call.model,
-      diags
+      diags,
+      modelMap
     );
 
     validateOrderByEntries(doc, arr as PhpArray, fields, call.model, diags);
@@ -1855,7 +1924,14 @@ export async function validateUpdateCall(
 
     // ── finally, select/include sanity
     validateWhereArray(doc, whereEntry.value, fields, modelName, diagnostics);
-    validateSelectIncludeEntries(doc, arg0, fields, modelName, diagnostics);
+    validateSelectIncludeEntries(
+      doc,
+      arg0,
+      fields,
+      modelName,
+      diagnostics,
+      modelMap
+    );
   });
 
   // ensure we always set—clears out old results when you type
@@ -1955,7 +2031,14 @@ export async function validateDeleteCall(
     validateWhereArray(doc, whereEntry.value, fields, modelName, diagnostics);
 
     // still forbid mixing select/include
-    validateSelectIncludeEntries(doc, arrayArg, fields, modelName, diagnostics);
+    validateSelectIncludeEntries(
+      doc,
+      arrayArg,
+      fields,
+      modelName,
+      diagnostics,
+      modelMap
+    );
   });
 
   collection.set(doc.uri, diagnostics);
@@ -2187,7 +2270,14 @@ export async function validateUpsertCall(
     }
 
     // ── validate select/include at top level ──
-    validateSelectIncludeEntries(doc, arg0, fields, modelName, diagnostics);
+    validateSelectIncludeEntries(
+      doc,
+      arg0,
+      fields,
+      modelName,
+      diagnostics,
+      modelMap
+    );
   });
 
   collection.set(doc.uri, diagnostics);
@@ -2443,7 +2533,14 @@ export async function validateGroupByCall(
     }
 
     // final select/include check
-    validateSelectIncludeEntries(doc, arg0, fields, modelName, diagnostics);
+    validateSelectIncludeEntries(
+      doc,
+      arg0,
+      fields,
+      modelName,
+      diagnostics,
+      modelMap
+    );
   });
 
   collection.set(doc.uri, diagnostics);
