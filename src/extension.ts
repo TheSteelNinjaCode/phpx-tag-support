@@ -1656,6 +1656,12 @@ export async function activate(context: vscode.ExtensionContext) {
     );
   }
 
+  context.subscriptions.push(
+    stringDecorationType,
+    numberDecorationType,
+    registerPrismaFieldProvider()
+  );
+
   const createDiags =
     vscode.languages.createDiagnosticCollection("prisma-create");
   const readDiags = vscode.languages.createDiagnosticCollection("prisma-read");
