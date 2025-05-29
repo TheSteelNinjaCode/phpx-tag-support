@@ -334,14 +334,30 @@ export function registerPrismaFieldProvider(): vscode.Disposable {
           return;
         }
 
-        // find the immediate entry-key whose value is your hostArray
-        const nestedRoot = hostArray
-          ? findParentKey(argsArr as PhpArray, hostArray)
-          : null;
+        // → instead, look *inside* the top-level `select` block:
+        const nestedRoot = (() => {
+          if (!currentRoot || !isArray(argsArr)) {
+            return null;
+          }
+          // find the entry for our root key (e.g. 'select' => [...] )
+          const rootEntry = (argsArr.items as Entry[]).find(
+            (e) =>
+              e.key?.kind === "string" &&
+              (e.key as any).value === currentRoot &&
+              isArray(e.value)
+          );
+          if (!rootEntry) {
+            return null;
+          }
+          // now find which key *inside* that block holds your hostArray
+          return findParentKey(rootEntry.value as PhpArray, hostArray!);
+        })();
 
         // use nestedRoot if present, otherwise fall back to the top-level key
-        const activeRoot = nestedRoot ?? currentRoot;
-        const modelNames = new Set((await getModelMap()).keys());
+        const modelMap = await getModelMap();
+        const modelNames = new Set(modelMap.keys());
+        const rootMap = modelMap.get(modelName)!;
+        const activeRoot = currentRoot;
 
         // ── special: handle both key & value for orderBy ────────────
         if (currentRoot === "orderBy") {
@@ -442,7 +458,48 @@ export function registerPrismaFieldProvider(): vscode.Disposable {
         }
 
         // ── we’re inside a nested array for one of the rootKeys ───────
-        const allFields = [...fieldMap.entries()];
+        // — detect the relation name when we're in a nested `select` ——
+        let nestedRelation: string | undefined;
+        if (currentRoot === "select" && isArray(argsArr)) {
+          // find the first‐level `'select' => [ … ]` entry
+          const selectEntry = (argsArr.items as Entry[]).find(
+            (e) =>
+              e.key?.kind === "string" &&
+              (e.key as any).value === "select" &&
+              isArray(e.value)
+          );
+
+          if (selectEntry) {
+            const relArray = selectEntry.value as PhpArray;
+            // scan each `'<relation>' => […]` inside that array…
+            for (const ent of relArray.items.filter(isEntry) as Entry[]) {
+              if (ent.key?.kind === "string" && ent.value?.loc) {
+                const start = lastPrisma + ent.value.loc.start.offset;
+                const end = lastPrisma + ent.value.loc.end.offset;
+                // if my cursor is somewhere in that relation’s block…
+                if (curOffset >= start && curOffset <= end) {
+                  nestedRelation = (ent.key as any).value as string;
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        // pick which fieldMap to use for suggestions:
+        let suggestMap = rootMap;
+
+        // if we’re in a `select` block and the key is a relation → swap in its map
+        if (activeRoot === "select" && nestedRoot && rootMap.has(nestedRoot)) {
+          const relInfo = rootMap.get(nestedRoot)!;
+          const relMap = modelMap.get(relInfo.type.toLowerCase());
+          if (relMap) {
+            suggestMap = relMap;
+          }
+        }
+
+        // now use `suggestMap` everywhere:
+        const allFields = [...suggestMap.entries()];
         let suggestions: [string, FieldInfo][] = [];
 
         if (activeRoot === "_count") {
@@ -458,7 +515,17 @@ export function registerPrismaFieldProvider(): vscode.Disposable {
           selectItem.range = makeReplaceRange(doc, pos, already.length);
           return [selectItem];
         } else if (activeRoot === "select") {
-          suggestions = allFields;
+          if (nestedRelation && fieldMap.has(nestedRelation)) {
+            // it’s a relation → grab *that* model’s map
+            const relInfo = fieldMap.get(nestedRelation)!;
+            const relMap = modelMap.get(relInfo.type.toLowerCase());
+            if (relMap) {
+              suggestions = [...relMap.entries()];
+            }
+          } else {
+            // top-level select → root model’s fields
+            suggestions = allFields;
+          }
         } else if (activeRoot === "include") {
           // back up to include → offer relations + _count
           suggestions = allFields.filter(([, info]) =>
@@ -1412,7 +1479,7 @@ export async function validateCreateCall(
   collection.set(doc.uri, diagnostics);
 }
 
-async function validateReadCall(
+export async function validateReadCall(
   doc: vscode.TextDocument,
   collection: vscode.DiagnosticCollection
 ) {

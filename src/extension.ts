@@ -29,6 +29,7 @@ import {
   validateCreateCall,
   validateDeleteCall,
   validateGroupByCall,
+  validateReadCall,
   validateUpdateCall,
   validateUpsertCall,
 } from "./settings/prisma-provider";
@@ -1068,6 +1069,10 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.languages.createDiagnosticCollection("prisma-delete");
   const upsertDiags =
     vscode.languages.createDiagnosticCollection("prisma-upsert");
+  const groupByDiags =
+    vscode.languages.createDiagnosticCollection("prisma-groupBy");
+  const aggregateDiags =
+    vscode.languages.createDiagnosticCollection("prisma-aggregate");
 
   const pendingTimers = new Map<string, NodeJS.Timeout>();
   function scheduleValidation(doc: vscode.TextDocument) {
@@ -1095,12 +1100,12 @@ export async function activate(context: vscode.ExtensionContext) {
     scheduleValidation(document);
 
     await validateCreateCall(document, createDiags);
-    await validateCreateCall(document, readDiags);
+    await validateReadCall(document, readDiags);
     await validateUpdateCall(document, updateDiags);
     await validateDeleteCall(document, deleteDiags);
     await validateUpsertCall(document, upsertDiags);
-    await validateGroupByCall(document, readDiags);
-    await validateAggregateCall(document, readDiags);
+    await validateGroupByCall(document, groupByDiags);
+    await validateAggregateCall(document, aggregateDiags);
 
     updateStringDecorations(document);
     validateJsVariablesInCurlyBraces(document, jsVarDiagnostics);
