@@ -1,16 +1,5 @@
-import {
-  Engine,
-  Node,
-  Call,
-  PropertyLookup,
-  Identifier,
-  Variable,
-} from "php-parser";
-
-const php = new Engine({
-  parser: { php8: true, suppressErrors: true },
-  ast: { withPositions: true },
-});
+import { Node, Call, PropertyLookup, Identifier, Variable } from "php-parser";
+import { phpEngine } from "../util/php-engine";
 
 /* ---------- type‑guards ------------------------------------ */
 
@@ -44,7 +33,7 @@ export interface PrismaCall {
 }
 
 export function findPrismaCalls(code: string): PrismaCall[] {
-  const ast = php.parseCode(code, "unknown.php"); // OK
+  const ast = phpEngine.parseCode(code, "unknown.php"); // OK
   const results: PrismaCall[] = [];
 
   traverse(ast, (node) => {
