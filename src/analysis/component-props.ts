@@ -1,11 +1,7 @@
-import { Engine, Node } from "php-parser";
+import { Node } from "php-parser";
 import * as fs from "fs";
 import * as vscode from "vscode";
-
-/**
- * Single shared php‑parser instance (cheap to reuse).
- */
-const php = new Engine({ parser: { php8: true, suppressErrors: true } });
+import { phpEngine } from "../util/php-engine";
 
 /**
  * php‑parser uses bit‑flags for visibility.  Public = 4.
@@ -128,7 +124,7 @@ export class ComponentPropsProvider {
     } // still fresh
 
     /* 3️⃣  parse + extract  -------------------------------------- */
-    const ast = php.parseCode(fs.readFileSync(file, "utf8"), file);
+    const ast = phpEngine.parseCode(fs.readFileSync(file, "utf8"), file);
     const props: PropMeta[] = [];
 
     this.walk(ast, (node) => {

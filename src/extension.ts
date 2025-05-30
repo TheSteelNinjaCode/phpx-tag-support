@@ -33,6 +33,7 @@ import {
   validateUpdateCall,
   validateUpsertCall,
 } from "./settings/prisma-provider";
+import { validateStateTupleUsage } from "./analysis/state";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                    *
@@ -1088,6 +1089,7 @@ export async function activate(context: vscode.ExtensionContext) {
       key,
       setTimeout(() => {
         validatePphpCalls(doc, pphpSigDiags);
+        validateStateTupleUsage(doc, pphpSigDiags);
         rebuildMustacheStub(doc);
         validateComponentPropValues(doc, propsProvider);
         pendingTimers.delete(key);
@@ -1431,9 +1433,12 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
     /(?:pphp\.)?state(?:<[^>]*>)?\(\s*['"]([A-Za-z_$][\w$]*)['"]\s*,/g;
 
   // ③ Object-literal state scan: state('key', { … })
-  //    group1 = key, group2 = the {...} text
   const objStateRe =
     /(?:pphp\.)?state(?:<[^>]*>)?\(\s*['"]([A-Za-z_$][\w$]*)['"]\s*,\s*({[\s\S]*?})\s*\)/g;
+
+  // ④ Destructuring state via literal: object, array, or scalar (const|let|var)
+  const destructuredRe =
+    /\b(?:const|let|var)\s*\[\s*([A-Za-z_$][\w$]*)\s*,\s*[A-Za-z_$][\w$]*\s*\]\s*=\s*(?:pphp\.)?state(?:<[^>]*>)?\(\s*(\{[\s\S]*?\}|\[[\s\S]*?\]|['"][\s\S]*?['"])\s*\)/g;
 
   const map = new Map<string, Set<string>>();
   let m: RegExpExecArray | null;
@@ -1461,22 +1466,20 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
   while ((m = objStateRe.exec(text))) {
     const key = m[1];
     const objLiteral = m[2];
-    // ensure map entry
     if (!map.has(key)) {
       map.set(key, new Set());
     }
     const props = map.get(key)!;
 
-    // wrap in a dummy TS file so we can walk the AST
+    // parse object literal via TS AST
     const fake = `const __o = ${objLiteral};`;
     const sf = ts.createSourceFile(
       "stub.ts",
       fake,
       ts.ScriptTarget.Latest,
-      /*setParentNodes*/ true,
+      true,
       ts.ScriptKind.TS
     );
-
     sf.forEachChild((stmt) => {
       if (
         ts.isVariableStatement(stmt) &&
@@ -1486,7 +1489,6 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
           const init = decl.initializer;
           if (init && ts.isObjectLiteralExpression(init)) {
             for (const propNode of init.properties) {
-              // both “foo: …” and shorthand “foo,”
               if (
                 ts.isPropertyAssignment(propNode) &&
                 ts.isIdentifier(propNode.name)
@@ -1505,7 +1507,53 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
     });
   }
 
-  // ── 4) Build the .d.ts lines ────────────────────────────────
+  // ── 4) Destructured state via literal → ensure key, parse only objects
+  while ((m = destructuredRe.exec(text))) {
+    const key = m[1];
+    const literal = m[2];
+    if (!map.has(key)) {
+      map.set(key, new Set());
+    }
+    const props = map.get(key)!;
+    // only extract props when it's an object literal
+    if (literal.startsWith("{")) {
+      const fake = `const __o = ${literal};`;
+      const sf = ts.createSourceFile(
+        "stub.ts",
+        fake,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.TS
+      );
+      sf.forEachChild((stmt) => {
+        if (
+          ts.isVariableStatement(stmt) &&
+          stmt.declarationList.declarations.length
+        ) {
+          for (const decl of stmt.declarationList.declarations) {
+            const init = decl.initializer;
+            if (init && ts.isObjectLiteralExpression(init)) {
+              for (const propNode of init.properties) {
+                if (
+                  ts.isPropertyAssignment(propNode) &&
+                  ts.isIdentifier(propNode.name)
+                ) {
+                  props.add(propNode.name.text);
+                } else if (
+                  ts.isShorthandPropertyAssignment(propNode) &&
+                  ts.isIdentifier(propNode.name)
+                ) {
+                  props.add(propNode.name.text);
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+  }
+
+  // ── 5) Build the .d.ts lines ────────────────────────────────
   const lines: string[] = [];
   for (const [root, props] of map) {
     if (props.size === 0) {
@@ -1526,7 +1574,7 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
   }
   lastStubText = newText;
 
-  // ── 5) Write it back & notify TS ────────────────────────────
+  // ── 6) Write it back & notify TS ────────────────────────────
   const stubUri = vscode.Uri.joinPath(
     vscode.workspace.workspaceFolders![0].uri,
     ".pphp",
