@@ -1507,40 +1507,80 @@ const reservedWords = new Set([
   "Set",
 ]);
 
-// at top-level of your extension module:
-let lastStubText = "";
+// ─────────────────────────────────────────────────────────────────────────────
+//  Regexes (single source of truth)
+// ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Scan the document for {{…}} roots, build a .d.ts stub,
- * and only write + restart TS if it actually changed.
- */
+// ① Mustache expressions: {{ foo.bar }} (captures “foo.bar”)
+const MUSTACHE_RE =
+  /{{\s*([A-Za-z_$][\w$]*(?:(?:\?\.)|\.)[A-Za-z_$][\w$]*(?:(?:\?\.)|\.)[A-Za-z_$][\w$]*|\b[A-Za-z_$][\w$]*)[\s\S]*?}}/g;
+
+// ② Generic state scan: state('key', …)
+const GENERIC_STATE_RE =
+  /(?:pphp\.)?state(?:<[^>]*>)?\(\s*['"]([A-Za-z_$][\w$]*)['"]\s*,/g;
+
+// ③ Object‐literal state scan: state('key', { … })
+const OBJ_LITERAL_RE =
+  /(?:pphp\.)?state(?:<[^>]*>)?\(\s*['"]([A-Za-z_$][\w$]*)['"]\s*,\s*({[\s\S]*?})\s*\)/g;
+
+// ④ Destructuring state via literal: const [key, …] = state({...})
+const DESTRUCTURED_RE =
+  /\b(?:const|let|var)\s*\[\s*([A-Za-z_$][\w$]*)\s*,\s*[A-Za-z_$][\w$]*\s*\]\s*=\s*(?:pphp\.)?state(?:<[^>]*>)?\(\s*(\{[\s\S]*?\}|\[[\s\S]*?\]|['"][\s\S]*?['"]|true|false|null|\d+(?:\.\d+)?)\s*\)/g;
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Main “orchestrator”
+// ─────────────────────────────────────────────────────────────────────────────
+
+let lastStubText = ""; // cache to avoid unnecessary writes
+
 export async function rebuildMustacheStub(document: vscode.TextDocument) {
   const text = document.getText();
+  const propMap = new Map<string, Set<string>>();
 
-  // ① Mustache expressions {{ foo.bar }}
-  const mustacheRe =
-    /{{\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)[\s\S]*?}}/g;
+  // 1) Mustache “roots” + “props”
+  collectMustacheRootsAndProps(text, propMap);
 
-  // ② Generic state scan: state('key', …)
-  const genericStateRe =
-    /(?:pphp\.)?state(?:<[^>]*>)?\(\s*['"]([A-Za-z_$][\w$]*)['"]\s*,/g;
+  // 2) Any state('key', …) → ensure the key exists
+  collectGenericStateKeys(text, propMap);
 
-  // ③ Object‐literal state scan: state('key', { … })
-  const objStateRe =
-    /(?:pphp\.)?state(?:<[^>]*>)?\(\s*['"]([A-Za-z_$][\w$]*)['"]\s*,\s*({[\s\S]*?})\s*\)/g;
+  // 3) state('key', { … }) → parse that object for its keys
+  await collectObjectLiteralProps(text, propMap);
 
-  // ④ Destructuring state via literal:  object, array, string, boolean, null, or number
-  const destructuredRe =
-    /\b(?:const|let|var)\s*\[\s*([A-Za-z_$][\w$]*)\s*,\s*[A-Za-z_$][\w$]*\s*\]\s*=\s*(?:pphp\.)?state(?:<[^>]*>)?\(\s*(\{[\s\S]*?\}|\[[\s\S]*?\]|['"][\s\S]*?['"]|true|false|null|\d+(?:\.\d+)?)\s*\)/g;
+  // 4) Destructured state via literal → parse objects for their keys
+  await collectDestructuredLiteralProps(text, propMap);
 
-  const map = new Map<string, Set<string>>();
+  // 5) Build the .d.ts lines out of the map
+  const newText = buildStubLines(propMap);
+
+  // 6) If nothing changed, skip writing; otherwise, write & notify TS
+  if (newText !== lastStubText) {
+    lastStubText = newText;
+    await writeStubFile(newText);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  1) collectMustacheRootsAndProps
+//     Now splits on both “.” and “?.”, so an expression like “foo?.bar?.baz”
+//     yields root = “foo” and firstProp = “bar”.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function collectMustacheRootsAndProps(
+  text: string,
+  map: Map<string, Set<string>>
+) {
   let m: RegExpExecArray | null;
 
-  // ── 1) Mustache “roots” + “props” ─────────────────────────────
-  while ((m = mustacheRe.exec(text))) {
-    const [root, prop] = m[1].split(".", 2);
+  while ((m = MUSTACHE_RE.exec(text))) {
+    // m[1] might be "myVarNested", "myVarNested.foo.bar", or "myVarNested?.foo?.bar"
+    const expr = m[1];
 
-    // Skip if it’s a reserved word or built‐in
+    // Split on either “.” or “?.”.  e.g. "myVarNested?.foo?.bar" → ["myVarNested", "foo", "bar"]
+    const parts = expr.split(/\?\.\s*|\.\s*/);
+    const root = parts[0]; // "myVarNested"
+    const firstProp = parts[1]; // "foo" (if exists)
+
+    // Skip if root is reserved or built-in
     if (reservedWords.has(root) || isBuiltIn(root)) {
       continue;
     }
@@ -1549,14 +1589,21 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
       map.set(root, new Set());
     }
 
-    // Only add non‐built‐in, non‐reserved props
-    if (prop && !isBuiltIn(prop) && !reservedWords.has(prop)) {
-      map.get(root)!.add(prop);
+    // If there is a first‐level prop, add it (unless it's reserved or built‐in)
+    if (firstProp && !isBuiltIn(firstProp) && !reservedWords.has(firstProp)) {
+      map.get(root)!.add(firstProp);
     }
   }
+}
 
-  // ── 2) Any state('key', …) → ensure key exists ────────────────
-  while ((m = genericStateRe.exec(text))) {
+// ─────────────────────────────────────────────────────────────────────────────
+//  2) collectGenericStateKeys
+//     Finds any pphp.state('key', …) usage and ensures we have a Set for “key”
+// ─────────────────────────────────────────────────────────────────────────────
+
+function collectGenericStateKeys(text: string, map: Map<string, Set<string>>) {
+  let m: RegExpExecArray | null;
+  while ((m = GENERIC_STATE_RE.exec(text))) {
     const key = m[1];
     if (reservedWords.has(key) || isBuiltIn(key)) {
       continue;
@@ -1565,11 +1612,22 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
       map.set(key, new Set());
     }
   }
+}
 
-  // ── 3) state('key', { … }) → parse that object for its own props ─
-  while ((m = objStateRe.exec(text))) {
+// ─────────────────────────────────────────────────────────────────────────────
+//  3) collectObjectLiteralProps
+//     For each state('key', { … }), parse the object literal with TS AST
+//     and pull out every property name that is not in reservedWords.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function collectObjectLiteralProps(
+  text: string,
+  map: Map<string, Set<string>>
+) {
+  let m: RegExpExecArray | null;
+  while ((m = OBJ_LITERAL_RE.exec(text))) {
     const key = m[1];
-    const objLiteral = m[2];
+    const objLiteral = m[2]; // something like "{ name: 'John', age: 30 }"
 
     if (reservedWords.has(key) || isBuiltIn(key)) {
       continue;
@@ -1580,7 +1638,7 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
     }
     const props = map.get(key)!;
 
-    // Parse the object literal via TS AST to pull out keys
+    // Build a fake TS source file: “const __o = { … };”
     const fake = `const __o = ${objLiteral};`;
     const sf = ts.createSourceFile(
       "stub.ts",
@@ -1589,43 +1647,60 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
       true,
       ts.ScriptKind.TS
     );
+
+    // Walk the AST: we only care about the object-literal’s PropertyAssignments
     sf.forEachChild((stmt) => {
       if (
         ts.isVariableStatement(stmt) &&
-        stmt.declarationList.declarations.length
+        stmt.declarationList.declarations.length > 0
       ) {
         for (const decl of stmt.declarationList.declarations) {
           const init = decl.initializer;
           if (init && ts.isObjectLiteralExpression(init)) {
-            for (const propNode of init.properties) {
+            init.properties.forEach((propNode) => {
+              // Case 1: normal property assignment “foo: …”
               if (
                 ts.isPropertyAssignment(propNode) &&
                 ts.isIdentifier(propNode.name)
               ) {
                 const name = propNode.name.text;
-                if (!isBuiltIn(name) && !reservedWords.has(name)) {
+                // Only skip reservedWords; allow “name” even though it’s built-in
+                if (!reservedWords.has(name)) {
                   props.add(name);
                 }
-              } else if (
+              }
+              // Case 2: shorthand property “foo” (where value is a variable)
+              else if (
                 ts.isShorthandPropertyAssignment(propNode) &&
                 ts.isIdentifier(propNode.name)
               ) {
                 const name = propNode.name.text;
-                if (!isBuiltIn(name) && !reservedWords.has(name)) {
+                if (!reservedWords.has(name)) {
                   props.add(name);
                 }
               }
-            }
+            });
           }
         }
       }
     });
   }
+}
 
-  // ── 4) Destructured state via literal → only parse objects ───────
-  while ((m = destructuredRe.exec(text))) {
+// ─────────────────────────────────────────────────────────────────────────────
+//  4) collectDestructuredLiteralProps
+//     For each “const [key, …] = pphp.state({ … })” scenario, parse the object
+//     literal similarly and pull out its keys.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function collectDestructuredLiteralProps(
+  text: string,
+  map: Map<string, Set<string>>
+) {
+  let m: RegExpExecArray | null;
+  while ((m = DESTRUCTURED_RE.exec(text))) {
     const key = m[1];
-    const literal = m[2];
+    const literal = m[2]; // could be “{ name: 'John' }”, or "[…]" or a string, etc.
 
     if (reservedWords.has(key) || isBuiltIn(key)) {
       continue;
@@ -1636,7 +1711,7 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
     }
     const props = map.get(key)!;
 
-    // If it’s an object literal, walk its props
+    // Only if it’s an object literal (starts with “{”)
     if (literal.startsWith("{")) {
       const fake = `const __o = ${literal};`;
       const sf = ts.createSourceFile(
@@ -1649,18 +1724,18 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
       sf.forEachChild((stmt) => {
         if (
           ts.isVariableStatement(stmt) &&
-          stmt.declarationList.declarations.length
+          stmt.declarationList.declarations.length > 0
         ) {
           for (const decl of stmt.declarationList.declarations) {
             const init = decl.initializer;
             if (init && ts.isObjectLiteralExpression(init)) {
-              for (const propNode of init.properties) {
+              init.properties.forEach((propNode) => {
                 if (
                   ts.isPropertyAssignment(propNode) &&
                   ts.isIdentifier(propNode.name)
                 ) {
                   const name = propNode.name.text;
-                  if (!isBuiltIn(name) && !reservedWords.has(name)) {
+                  if (!reservedWords.has(name)) {
                     props.add(name);
                   }
                 } else if (
@@ -1668,27 +1743,34 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
                   ts.isIdentifier(propNode.name)
                 ) {
                   const name = propNode.name.text;
-                  if (!isBuiltIn(name) && !reservedWords.has(name)) {
+                  if (!reservedWords.has(name)) {
                     props.add(name);
                   }
                 }
-              }
+              });
             }
           }
         }
       });
     }
-    // If it’s an array/string/boolean/null/number, props stays empty → “any”
+    // If it’s an array/string/boolean/null/number, we leave props empty → “any”
   }
+}
 
-  // ── 5) Build the .d.ts lines ───────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  5) buildStubLines
+//     Given a Map<root, Set<prop>>, produce the final text of the stub.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildStubLines(map: Map<string, Set<string>>): string {
   const lines: string[] = [];
+
   for (const [root, props] of map) {
     if (props.size === 0) {
-      // No object‐literal props → just any
+      // If no object-literal props, we default to “any”
       lines.push(`declare var ${root}: any;`);
     } else {
-      // Emit each property + an index signature
+      // Otherwise, list each prop plus an index signature
       const entries = Array.from(props)
         .map((p) => `${p}: any`)
         .join(";\n  ");
@@ -1698,13 +1780,16 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
     }
   }
 
-  const newText = lines.join("\n\n") + "\n";
-  if (newText === lastStubText) {
-    return; // no changes, skip rewriting
-  }
-  lastStubText = newText;
+  // Join with blank lines between each declaration, and end with a newline
+  return lines.join("\n\n") + "\n";
+}
 
-  // ── 6) Write it back & notify TS ─────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  6) writeStubFile
+//     Writes “.pphp/phpx-mustache.d.ts” and then re-parse with TS.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function writeStubFile(newText: string) {
   const stubUri = vscode.Uri.joinPath(
     vscode.workspace.workspaceFolders![0].uri,
     ".pphp",
@@ -1712,7 +1797,7 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
   );
   await vscode.workspace.fs.writeFile(stubUri, Buffer.from(newText, "utf8"));
   parseGlobalsWithTS(newText);
-};
+}
 
 const updateEditorConfiguration = (): void => {
   const editorConfig = vscode.workspace.getConfiguration("editor");
