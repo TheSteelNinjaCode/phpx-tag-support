@@ -1414,6 +1414,99 @@ function updateStringDecorations(document: vscode.TextDocument) {
   editor.setDecorations(stringDecorationType, decos);
 }
 
+const isBuiltIn: (name: string) => boolean = (() => {
+  const cache = new Map<string, boolean>();
+  const prototypes = [
+    Object.prototype,
+    Function.prototype,
+    Array.prototype,
+    String.prototype,
+    Number.prototype,
+    Boolean.prototype,
+    Date.prototype,
+    RegExp.prototype,
+    Map.prototype,
+    Set.prototype,
+    WeakMap.prototype,
+    WeakSet.prototype,
+    Error.prototype,
+    Promise.prototype,
+  ];
+  return (name: string): boolean => {
+    const hit = cache.get(name);
+    if (hit !== undefined) {
+      return hit;
+    }
+
+    const found = name in globalThis || prototypes.some((p) => name in p);
+
+    cache.set(name, found);
+    return found;
+  };
+})();
+
+const reservedWords = new Set([
+  "null",
+  "undefined",
+  "true",
+  "false",
+  "await",
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "debugger",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "export",
+  "extends",
+  "finally",
+  "for",
+  "function",
+  "if",
+  "import",
+  "in",
+  "instanceof",
+  "let",
+  "new",
+  "return",
+  "super",
+  "switch",
+  "this",
+  "throw",
+  "try",
+  "typeof",
+  "var",
+  "void",
+  "while",
+  "with",
+  "yield",
+  "async",
+  "await",
+  "implements",
+  "interface",
+  "event",
+  "NaN",
+  "Infinity",
+  "Number",
+  "String",
+  "Boolean",
+  "Object",
+  "Array",
+  "Function",
+  "Date",
+  "RegExp",
+  "Error",
+  "JSON",
+  "Math",
+  "Map",
+  "Set",
+]);
+
 // at top-level of your extension module:
 let lastStubText = "";
 
@@ -1432,46 +1525,62 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
   const genericStateRe =
     /(?:pphp\.)?state(?:<[^>]*>)?\(\s*['"]([A-Za-z_$][\w$]*)['"]\s*,/g;
 
-  // ③ Object-literal state scan: state('key', { … })
+  // ③ Object‐literal state scan: state('key', { … })
   const objStateRe =
     /(?:pphp\.)?state(?:<[^>]*>)?\(\s*['"]([A-Za-z_$][\w$]*)['"]\s*,\s*({[\s\S]*?})\s*\)/g;
 
-  // ④ Destructuring state via literal: object, array, or scalar (const|let|var)
+  // ④ Destructuring state via literal:  object, array, string, boolean, null, or number
   const destructuredRe =
-    /\b(?:const|let|var)\s*\[\s*([A-Za-z_$][\w$]*)\s*,\s*[A-Za-z_$][\w$]*\s*\]\s*=\s*(?:pphp\.)?state(?:<[^>]*>)?\(\s*(\{[\s\S]*?\}|\[[\s\S]*?\]|['"][\s\S]*?['"])\s*\)/g;
+    /\b(?:const|let|var)\s*\[\s*([A-Za-z_$][\w$]*)\s*,\s*[A-Za-z_$][\w$]*\s*\]\s*=\s*(?:pphp\.)?state(?:<[^>]*>)?\(\s*(\{[\s\S]*?\}|\[[\s\S]*?\]|['"][\s\S]*?['"]|true|false|null|\d+(?:\.\d+)?)\s*\)/g;
 
   const map = new Map<string, Set<string>>();
   let m: RegExpExecArray | null;
 
-  // ── 1) Mustache roots + props ───────────────────────────────
+  // ── 1) Mustache “roots” + “props” ─────────────────────────────
   while ((m = mustacheRe.exec(text))) {
     const [root, prop] = m[1].split(".", 2);
+
+    // Skip if it’s a reserved word or built‐in
+    if (reservedWords.has(root) || isBuiltIn(root)) {
+      continue;
+    }
+
     if (!map.has(root)) {
       map.set(root, new Set());
     }
-    if (prop) {
+
+    // Only add non‐built‐in, non‐reserved props
+    if (prop && !isBuiltIn(prop) && !reservedWords.has(prop)) {
       map.get(root)!.add(prop);
     }
   }
 
-  // ── 2) Any state('key', …) → ensure key exists
+  // ── 2) Any state('key', …) → ensure key exists ────────────────
   while ((m = genericStateRe.exec(text))) {
     const key = m[1];
+    if (reservedWords.has(key) || isBuiltIn(key)) {
+      continue;
+    }
     if (!map.has(key)) {
       map.set(key, new Set());
     }
   }
 
-  // ── 3) state('key', { … }) → parse that object for its own props
+  // ── 3) state('key', { … }) → parse that object for its own props ─
   while ((m = objStateRe.exec(text))) {
     const key = m[1];
     const objLiteral = m[2];
+
+    if (reservedWords.has(key) || isBuiltIn(key)) {
+      continue;
+    }
+
     if (!map.has(key)) {
       map.set(key, new Set());
     }
     const props = map.get(key)!;
 
-    // parse object literal via TS AST
+    // Parse the object literal via TS AST to pull out keys
     const fake = `const __o = ${objLiteral};`;
     const sf = ts.createSourceFile(
       "stub.ts",
@@ -1493,12 +1602,18 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
                 ts.isPropertyAssignment(propNode) &&
                 ts.isIdentifier(propNode.name)
               ) {
-                props.add(propNode.name.text);
+                const name = propNode.name.text;
+                if (!isBuiltIn(name) && !reservedWords.has(name)) {
+                  props.add(name);
+                }
               } else if (
                 ts.isShorthandPropertyAssignment(propNode) &&
                 ts.isIdentifier(propNode.name)
               ) {
-                props.add(propNode.name.text);
+                const name = propNode.name.text;
+                if (!isBuiltIn(name) && !reservedWords.has(name)) {
+                  props.add(name);
+                }
               }
             }
           }
@@ -1507,15 +1622,21 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
     });
   }
 
-  // ── 4) Destructured state via literal → ensure key, parse only objects
+  // ── 4) Destructured state via literal → only parse objects ───────
   while ((m = destructuredRe.exec(text))) {
     const key = m[1];
     const literal = m[2];
+
+    if (reservedWords.has(key) || isBuiltIn(key)) {
+      continue;
+    }
+
     if (!map.has(key)) {
       map.set(key, new Set());
     }
     const props = map.get(key)!;
-    // only extract props when it's an object literal
+
+    // If it’s an object literal, walk its props
     if (literal.startsWith("{")) {
       const fake = `const __o = ${literal};`;
       const sf = ts.createSourceFile(
@@ -1538,12 +1659,18 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
                   ts.isPropertyAssignment(propNode) &&
                   ts.isIdentifier(propNode.name)
                 ) {
-                  props.add(propNode.name.text);
+                  const name = propNode.name.text;
+                  if (!isBuiltIn(name) && !reservedWords.has(name)) {
+                    props.add(name);
+                  }
                 } else if (
                   ts.isShorthandPropertyAssignment(propNode) &&
                   ts.isIdentifier(propNode.name)
                 ) {
-                  props.add(propNode.name.text);
+                  const name = propNode.name.text;
+                  if (!isBuiltIn(name) && !reservedWords.has(name)) {
+                    props.add(name);
+                  }
                 }
               }
             }
@@ -1551,14 +1678,17 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
         }
       });
     }
+    // If it’s an array/string/boolean/null/number, props stays empty → “any”
   }
 
-  // ── 5) Build the .d.ts lines ────────────────────────────────
+  // ── 5) Build the .d.ts lines ───────────────────────────────────
   const lines: string[] = [];
   for (const [root, props] of map) {
     if (props.size === 0) {
+      // No object‐literal props → just any
       lines.push(`declare var ${root}: any;`);
     } else {
+      // Emit each property + an index signature
       const entries = Array.from(props)
         .map((p) => `${p}: any`)
         .join(";\n  ");
@@ -1570,11 +1700,11 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
 
   const newText = lines.join("\n\n") + "\n";
   if (newText === lastStubText) {
-    return;
+    return; // no changes, skip rewriting
   }
   lastStubText = newText;
 
-  // ── 6) Write it back & notify TS ────────────────────────────
+  // ── 6) Write it back & notify TS ─────────────────────────────
   const stubUri = vscode.Uri.joinPath(
     vscode.workspace.workspaceFolders![0].uri,
     ".pphp",
@@ -1582,7 +1712,7 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
   );
   await vscode.workspace.fs.writeFile(stubUri, Buffer.from(newText, "utf8"));
   parseGlobalsWithTS(newText);
-}
+};
 
 const updateEditorConfiguration = (): void => {
   const editorConfig = vscode.workspace.getConfiguration("editor");
