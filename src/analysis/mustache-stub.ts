@@ -1,6 +1,12 @@
+// analysis/mustache‐stub.ts
 import * as vscode from "vscode";
 import ts from "typescript";
 import { parseGlobalsWithTS } from "../extension";
+
+// ──────────────────────────────────────────────────────────────────────────────
+//   0) Helpers: reservedWords + isBuiltIn
+// ──────────────────────────────────────────────────────────────────────────────
+//
 
 const isBuiltIn: (name: string) => boolean = (() => {
   const cache = new Map<string, boolean>();
@@ -20,14 +26,14 @@ const isBuiltIn: (name: string) => boolean = (() => {
     Error.prototype,
     Promise.prototype,
   ];
+
   return (name: string): boolean => {
     const hit = cache.get(name);
     if (hit !== undefined) {
       return hit;
     }
-
+    // Check if `name` is in globalThis, or in any of the built‐in prototypes:
     const found = name in globalThis || prototypes.some((p) => name in p);
-
     cache.set(name, found);
     return found;
   };
@@ -95,85 +101,107 @@ const reservedWords = new Set([
   "Set",
 ]);
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Regex Definitions (single source of truth)
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ① Mustache expressions: {{ foo?.bar?.baz }}
-//    Capture group allows both “.” and “?.” between identifiers.
+/**
+ * This regex now matches ANY of:
+ *    {{ myVar }}
+ *    {{ user.profile }}
+ *    {{ user?.profile?.address.street }}
+ *
+ * Capture group #1 will be exactly the “chain” (e.g. “myVar”, “user.profile”,
+ * or “user?.profile?.address.street”).
+ */
 const MUSTACHE_RE =
-  /{{\s*([A-Za-z_$][\w$]*(?:(?:\?\.)|\.)[A-Za-z_$][\w$]*)[\s\S]*?}}/g;
+  /{{\s*([A-Za-z_$][\w$]*(?:(?:(?:\?\.)|(?:\.))[A-Za-z_$][\w$]*)*)\s*}}/g;
 
-// ② Generic state scan: state('key', …)
+//
+// ──────────────────────────────────────────────────────────────────────────────
+//   2) GENERIC_STATE_RE: pick up any pphp.state('key', …) calls
+// ──────────────────────────────────────────────────────────────────────────────
+//
+
 const GENERIC_STATE_RE =
   /(?:pphp\.)?state(?:<[^>]*>)?\(\s*['"]([A-Za-z_$][\w$]*)['"]\s*,/g;
 
-// ③ Object‐literal state scan: state('key', { … })
+//
+// ──────────────────────────────────────────────────────────────────────────────
+//   3) OBJ_LITERAL_RE: pick up pphp.state('key', { … })
+// ──────────────────────────────────────────────────────────────────────────────
+//
+
 const OBJ_LITERAL_RE =
   /(?:pphp\.)?state(?:<[^>]*>)?\(\s*['"]([A-Za-z_$][\w$]*)['"]\s*,\s*({[\s\S]*?})\s*\)/g;
 
-// ④ Destructuring state via literal: const [key, …] = pphp.state({...})
+//
+// ──────────────────────────────────────────────────────────────────────────────
+//   4) DESTRUCTURED_RE: “const [key, …] = pphp.state({ … })”
+// ──────────────────────────────────────────────────────────────────────────────
+//
+
 const DESTRUCTURED_RE =
   /\b(?:const|let|var)\s*\[\s*([A-Za-z_$][\w$]*)\s*,\s*[A-Za-z_$][\w$]*\s*\]\s*=\s*(?:pphp\.)?state(?:<[^>]*>)?\(\s*(\{[\s\S]*?\}|\[[\s\S]*?\]|['"][\s\S]*?['"]|true|false|null|\d+(?:\.\d+)?)\s*\)/g;
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  PropNode (nested) Structure
-// ─────────────────────────────────────────────────────────────────────────────
+//
+// ──────────────────────────────────────────────────────────────────────────────
+//   5) PropNode: holds a nested map of children
+// ──────────────────────────────────────────────────────────────────────────────
+//
 
-/**
- * A PropNode represents a node in the nested property tree.
- * `children` maps each property name → a nested PropNode.
- */
 interface PropNode {
   children: Map<string, PropNode>;
 }
 
-/**
- * Create a fresh PropNode (with no children).
- */
+/** Create a fresh PropNode with no children. */
 function createPropNode(): PropNode {
   return { children: new Map() };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Main “orchestrator”
-// ─────────────────────────────────────────────────────────────────────────────
+//
+// ──────────────────────────────────────────────────────────────────────────────
+//   6) Main entry: rebuildMustacheStub(document)
+// ──────────────────────────────────────────────────────────────────────────────
+//
 
 let lastStubText = ""; // to avoid rewriting if nothing changed
 
+/**
+ * Runs on every document‐change or save. It will:
+ *   1) scan all {{…}} expressions,
+ *   2) pick up any pphp.state('key', …) calls (to ensure those keys exist),
+ *   3) parse object‐literal states for deeply nested props,
+ *   4) parse destructured‐literal states ([k, …] = state({...})),
+ *   5) build a new .d.ts string, and if it changed, write it into .pphp/phpx-mustache.d.ts.
+ */
 export async function rebuildMustacheStub(document: vscode.TextDocument) {
   const text = document.getText();
-
-  // Use Map<rootKey, PropNode> to build nested chains
   const propMap = new Map<string, PropNode>();
 
-  // 1) Mustache “roots” + “props”
+  // 6.1) Gather every mustache‐root + nested props from {{ … }}:
   collectMustacheRootsAndProps(text, propMap);
 
-  // 2) Any state('key', …) → ensure the key exists
+  // 6.2) Ensure that any “state('key', …)” also creates a root:
   collectGenericStateKeys(text, propMap);
 
-  // 3) state('key', { … }) → parse that object for its nested keys
+  // 6.3) If state('key', { … }) has an object literal, parse its nested keys:
   await collectObjectLiteralProps(text, propMap);
 
-  // 4) Destructured state via literal → parse objects for nested keys
+  // 6.4) If there’s “const [key, …] = state({ … })”, parse that object as well:
   await collectDestructuredLiteralProps(text, propMap);
 
-  // 5) Build the .d.ts lines out of the nested propMap
+  // 6.5) Build the new `.d.ts` content from our propMap:
   const newText = buildStubLines(propMap);
 
-  // 6) If nothing changed, skip writing; otherwise, write & notify TS
+  // 6.6) If it’s changed from last time, write it and re‐parse:
   if (newText !== lastStubText) {
     lastStubText = newText;
     await writeStubFile(newText);
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  1) collectMustacheRootsAndProps
-//     Splits on both “.” and “?.” so that “foo?.bar?.baz” yields
-//     ["foo","bar","baz"], building a nested PropNode tree.
-// ─────────────────────────────────────────────────────────────────────────────
+//
+// ──────────────────────────────────────────────────────────────────────────────
+//   6.1) collectMustacheRootsAndProps: scan every {{…}} and build a PropNode tree
+// ──────────────────────────────────────────────────────────────────────────────
+//
 
 function collectMustacheRootsAndProps(
   text: string,
@@ -182,30 +210,34 @@ function collectMustacheRootsAndProps(
   let m: RegExpExecArray | null;
 
   while ((m = MUSTACHE_RE.exec(text))) {
-    // m[1] might be "myVarNested", "myVarNested.foo.bar", or "myVarNested?.foo?.bar"
+    //
+    //  m[1] might be any of:
+    //    “myVar”
+    //    “user.profile”
+    //    “user?.profile?.address.street”
+    //
     const expr = m[1];
 
-    // Split on either “.” or “?.”. e.g. "myVarNested?.foo?.bar" → ["myVarNested", "foo", "bar"]
+    // Split on either “.” or “?.”. E.g. “user?.profile?.address” → ["user","profile","address"]
     const parts = expr.split(/\?\.\s*|\.\s*/);
     const root = parts[0];
     if (reservedWords.has(root) || isBuiltIn(root)) {
       continue;
     }
 
-    // Ensure a PropNode exists for this root
+    // If we don’t yet have a PropNode for `root`, create one:
     if (!map.has(root)) {
       map.set(root, createPropNode());
     }
     let node = map.get(root)!;
 
-    // Walk (or create) nested children for each subsequent segment
+    // Walk through each segment after the root (e.g. “profile”, then “address”, etc.)
     for (let i = 1; i < parts.length; i++) {
       const seg = parts[i];
       if (!seg) {
         continue;
       }
-      // Skip reserved or built-in at any level
-      if (reservedWords.has(seg) || isBuiltIn(seg)) {
+      if (reservedWords.has(seg)) {
         break;
       }
       if (!node.children.has(seg)) {
@@ -216,10 +248,11 @@ function collectMustacheRootsAndProps(
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  2) collectGenericStateKeys
-//     Finds any pphp.state('key', …) usage and ensures a PropNode for “key”
-// ─────────────────────────────────────────────────────────────────────────────
+//
+// ──────────────────────────────────────────────────────────────────────────────
+//   6.2) collectGenericStateKeys: pick up every pphp.state('key', …) so “key” becomes a root
+// ──────────────────────────────────────────────────────────────────────────────
+//
 
 function collectGenericStateKeys(text: string, map: Map<string, PropNode>) {
   let m: RegExpExecArray | null;
@@ -234,11 +267,11 @@ function collectGenericStateKeys(text: string, map: Map<string, PropNode>) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  3) collectObjectLiteralProps
-//     For each state('key', { … }), parse the object literal with TS AST
-//     and pull out its nested property names into children of the root.
-// ─────────────────────────────────────────────────────────────────────────────
+//
+// ──────────────────────────────────────────────────────────────────────────────
+//   6.3) collectObjectLiteralProps: for state('key', { … }), parse nested keys
+// ──────────────────────────────────────────────────────────────────────────────
+//
 
 async function collectObjectLiteralProps(
   text: string,
@@ -247,18 +280,17 @@ async function collectObjectLiteralProps(
   let m: RegExpExecArray | null;
   while ((m = OBJ_LITERAL_RE.exec(text))) {
     const key = m[1];
-    const objLiteral = m[2];
+    const objLiteral = m[2]; // e.g. "{ foo: { bar: … }, baz: 123 }"
 
     if (reservedWords.has(key) || isBuiltIn(key)) {
       continue;
     }
-
     if (!map.has(key)) {
       map.set(key, createPropNode());
     }
     const rootNode = map.get(key)!;
 
-    // Build a fake TS source file: “const __o = { … };”
+    // Create a small TS “stub.ts” so we can walk its AST via TypeScript’s parser:
     const fake = `const __o = ${objLiteral};`;
     const sf = ts.createSourceFile(
       "stub.ts",
@@ -268,7 +300,6 @@ async function collectObjectLiteralProps(
       ts.ScriptKind.TS
     );
 
-    // Walk the AST and recurse into nested object literals
     sf.forEachChild((stmt) => {
       if (
         ts.isVariableStatement(stmt) &&
@@ -277,7 +308,6 @@ async function collectObjectLiteralProps(
         for (const decl of stmt.declarationList.declarations) {
           const init = decl.initializer;
           if (init && ts.isObjectLiteralExpression(init)) {
-            // Recursively process each property
             processObjectLiteral(init, rootNode);
           }
         }
@@ -287,36 +317,37 @@ async function collectObjectLiteralProps(
 }
 
 /**
- * Recursively process an ObjectLiteralExpression and populate the given PropNode.
- *
- * @param expr    TS ObjectLiteralExpression (e.g. "{ foo: { bar: '…' } }")
- * @param node    PropNode under which to add child nodes
+ * Recursively process an ObjectLiteralExpression, adding each property name
+ * as a child PropNode. If that property’s value is itself another object
+ * literal, recurse further.
  */
 function processObjectLiteral(
   expr: ts.ObjectLiteralExpression,
   node: PropNode
 ) {
   for (const propNode of expr.properties) {
+    // Only handle “foo: …” (PropertyAssignment) where the name is a plain identifier
     if (ts.isPropertyAssignment(propNode) && ts.isIdentifier(propNode.name)) {
       const name = propNode.name.text;
       if (reservedWords.has(name)) {
         continue;
       }
 
-      // Ensure a child PropNode exists for this property
       if (!node.children.has(name)) {
         node.children.set(name, createPropNode());
       }
       const childNode = node.children.get(name)!;
 
-      // If the initializer is another object literal, recurse
+      // If that property’s value is another object literal, recurse:
       if (
         propNode.initializer &&
         ts.isObjectLiteralExpression(propNode.initializer)
       ) {
         processObjectLiteral(propNode.initializer, childNode);
       }
-    } else if (
+    }
+    // Also support shorthand “{ foo }” inside an object literal:
+    else if (
       ts.isShorthandPropertyAssignment(propNode) &&
       ts.isIdentifier(propNode.name)
     ) {
@@ -324,21 +355,20 @@ function processObjectLiteral(
       if (reservedWords.has(name)) {
         continue;
       }
-
       if (!node.children.has(name)) {
         node.children.set(name, createPropNode());
       }
-      // Shorthand assignment has no nested object, so no recursion needed
+      // (No further recursion—shorthand means “foo: foo” but not nested.)
     }
-    // (Skip other kinds: SpreadAssignment, MethodDeclaration, etc.)
+    // Skip any spreads, methods, computed properties, etc.
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  4) collectDestructuredLiteralProps
-//     For each “const [key, …] = pphp.state({ … })” scenario, parse the object
-//     literal similarly and pull out nested keys.
-// ─────────────────────────────────────────────────────────────────────────────
+//
+// ──────────────────────────────────────────────────────────────────────────────
+//   6.4) collectDestructuredLiteralProps: “const [ key, … ] = pphp.state({ … })”
+// ──────────────────────────────────────────────────────────────────────────────
+//
 
 async function collectDestructuredLiteralProps(
   text: string,
@@ -347,18 +377,17 @@ async function collectDestructuredLiteralProps(
   let m: RegExpExecArray | null;
   while ((m = DESTRUCTURED_RE.exec(text))) {
     const key = m[1];
-    const literal = m[2];
+    const literal = m[2]; // Could be “{…}” or “[…]” or a primitive, etc.
 
     if (reservedWords.has(key) || isBuiltIn(key)) {
       continue;
     }
-
     if (!map.has(key)) {
       map.set(key, createPropNode());
     }
     const rootNode = map.get(key)!;
 
-    // Only if it’s an object literal (startswith “{”)
+    // Only parse further if it really is an object literal (“{…}”):
     if (literal.startsWith("{")) {
       const fake = `const __o = ${literal};`;
       const sf = ts.createSourceFile(
@@ -385,63 +414,75 @@ async function collectDestructuredLiteralProps(
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  5) buildStubLines
-//     Given a Map<root, PropNode>, produce the final text of the stub.
-// ─────────────────────────────────────────────────────────────────────────────
+//
+// ──────────────────────────────────────────────────────────────────────────────
+//   6.5) buildStubLines: serialize each PropNode into a TypeScript “declare var”
+// ──────────────────────────────────────────────────────────────────────────────
+//
 
 function buildStubLines(map: Map<string, PropNode>): string {
   const lines: string[] = [];
 
   for (const [root, node] of map) {
+    // If there are no children, just declare “any”
     if (node.children.size === 0) {
-      // No children → just “any”
       lines.push(`declare var ${root}: any;`);
     } else {
-      // Build a nested object‐literal via recursion
-      const typeLiteral = printNode(node, 1);
+      // Otherwise, build a nested object‐literal type
+      const typeLiteral = printNode(node, /*indentLevel=*/ 1);
       lines.push(`declare var ${root}: ${typeLiteral};`);
     }
   }
 
+  // Join with a blank line between each block, and one final newline:
   return lines.join("\n\n") + "\n";
 }
 
 /**
- * Recursively prints a PropNode as a TypeScript object‐literal string.
+ * Recursively prints a PropNode as a TypeScript object‐literal type, for example:
  *
- * @param node         The PropNode whose children we should serialize
- * @param indentLevel  How many indent levels deep we are
- * @returns             Something like:
- *   "{\n    foo: { bar: any; [key:string]: any; };\n    baz: any;\n    [key:string]: any;\n  }"
+ *   {
+ *     name: any;
+ *     age: any;
+ *     child: {
+ *       foo: any;
+ *       [key: string]: any;
+ *     };
+ *     [key: string]: any;
+ *   }
+ *
+ * @param node         The PropNode you want to serialize
+ * @param indentLevel  How many “  ” indent‐units to apply to this level
  */
 function printNode(node: PropNode, indentLevel: number): string {
   const indent = "  ".repeat(indentLevel);
   const parts: string[] = [];
 
-  // 1) Print each child property
+  // 1) Print each child property in sorted order (optional: you may sort if you want)
   for (const [propKey, childNode] of node.children) {
     if (childNode.children.size === 0) {
-      // Leaf node: “propKey: any;”
+      // Leaf property → “propKey: any;”
       parts.push(`${indent}${propKey}: any;`);
     } else {
-      // Nested children → recurse
+      // Nested children → recurse and indent
       const nestedLiteral = printNode(childNode, indentLevel + 1);
       parts.push(`${indent}${propKey}: ${nestedLiteral};`);
     }
   }
 
-  // 2) Add index signature at this level
+  // 2) Always add a “[key: string]: any;” index signature at this level
   parts.push(`${indent}[key: string]: any;`);
 
-  // 3) Wrap with braces
-  return `{\n${parts.join("\n")}\n${"  ".repeat(indentLevel - 1)}}`;
+  // 3) Wrap with braces. For the closing “}”, back out one indent level:
+  const closingIndent = "  ".repeat(indentLevel - 1);
+  return `{\n${parts.join("\n")}\n${closingIndent}}`;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  6) writeStubFile
-//     Writes “.pphp/phpx-mustache.d.ts” and then re-parse with TS.
-// ─────────────────────────────────────────────────────────────────────────────
+//
+// ──────────────────────────────────────────────────────────────────────────────
+//   6.6) writeStubFile: write out “.pphp/phpx-mustache.d.ts” and re‐parse
+// ──────────────────────────────────────────────────────────────────────────────
+//
 
 async function writeStubFile(newText: string) {
   const stubUri = vscode.Uri.joinPath(
@@ -450,5 +491,7 @@ async function writeStubFile(newText: string) {
     "phpx-mustache.d.ts"
   );
   await vscode.workspace.fs.writeFile(stubUri, Buffer.from(newText, "utf8"));
+
+  // Once it’s saved, also update our in‐memory TS stub so that globalStubs + globalStubTypes stay fresh
   parseGlobalsWithTS(newText);
 }

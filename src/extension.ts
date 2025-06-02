@@ -91,6 +91,7 @@ let classStubs: Record<
   SearchParamsManager: [],
 };
 let globalStubs: Record<string, string[]> = {};
+let globalStubTypes: Record<string, ts.TypeLiteralNode> = {};
 
 // Regex patterns
 const PHP_TAG_REGEX = /<\/?[A-Z][A-Za-z0-9]*/;
@@ -224,7 +225,9 @@ export function parseGlobalsWithTS(source: string) {
     ts.ScriptTarget.Latest,
     true
   );
+
   globalStubs = {};
+  globalStubTypes = {}; // ← clear it too
 
   sf.forEachChild((node) => {
     if (
@@ -238,10 +241,13 @@ export function parseGlobalsWithTS(source: string) {
         const name = decl.name.text;
         const type = decl.type;
         if (type && ts.isTypeLiteralNode(type)) {
-          // collect all the property names
+          // 1) keep a list of immediate property NAMES
           globalStubs[name] = type.members
             .filter(ts.isPropertySignature)
             .map((ps) => (ps.name as ts.Identifier).text);
+
+          // 2) ALSO remember the TypeLiteralNode itself
+          globalStubTypes[name] = type;
         } else {
           globalStubs[name] = [];
         }
@@ -953,29 +959,81 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.languages.registerCompletionItemProvider(
       selector,
       {
-        provideCompletionItems(doc, pos) {
-          /* ① grab `root` + current `partial` --------------------------- */
+        provideCompletionItems(
+          doc: vscode.TextDocument,
+          pos: vscode.Position
+        ): vscode.CompletionItem[] | undefined {
+          // ① Grab the entire “root” chain (e.g. "user.profile.address") and the partial after the last dot.
           const line = doc.lineAt(pos.line).text;
           const uptoCursor = line.slice(0, pos.character);
           const lastOpen = uptoCursor.lastIndexOf("{{");
-          const exprPrefix = uptoCursor.slice(lastOpen + 2); // «user.na»
+          const exprPrefix = uptoCursor.slice(lastOpen + 2); // e.g. "user.profile.address.st"
 
-          const m = /([A-Za-z_$][\w$]*)\.\s*(\w*)$/.exec(exprPrefix);
+          // Notice the regex: we allow ANY number of “.foo” segments, then a dot, then capture the partial.
+          const m = /([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.\s*(\w*)$/.exec(
+            exprPrefix
+          );
           if (!m) {
             return;
           }
 
-          const [, root, partial] = m; // root = "user"
+          const [, root, partial] = m;
+          // e.g. root = "user.profile.address", partial = "st"
 
+          // ② If the root is one of the special names, bail out and let those providers handle it.
           const special = new Set(["pphp", "store", "searchParams"]);
           if (special.has(root)) {
-            // let your dedicated pphp/store/searchParams provider handle it
             return;
           }
 
-          const stubProps = globalStubs[root] ?? [];
+          // ③ Split the root chain on “.” and descend into globalStubTypes.
+          //    globalStubTypes was populated in parseGlobalsWithTS(…) so that
+          //    globalStubTypes["user"] is a ts.TypeLiteralNode of “user”’s shape.
+          const parts = root.split(".");
+          let typeNode = globalStubTypes[parts[0]];
+          if (!typeNode) {
+            // No top‐level stub for “parts[0]”
+            return;
+          }
 
-          /* ② build the list – project props first ---------------------- */
+          // Descend for each segment after the first:
+          //   e.g. if parts = ["user","profile","address"], first we had typeNode = globalStubTypes["user"].
+          //   Now find a PropertySignature named “profile” inside that TypeLiteralNode,
+          //   whose type is itself a TypeLiteralNode, then continue into “address.”
+          for (let i = 1; i < parts.length; i++) {
+            const propName = parts[i];
+            // Find the PropertySignature whose name text === propName:
+            const memberSig = typeNode.members.find(
+              (member) =>
+                ts.isPropertySignature(member) &&
+                (member.name as ts.Identifier).text === propName
+            ) as ts.PropertySignature | undefined;
+
+            if (
+              !memberSig ||
+              !memberSig.type ||
+              !ts.isTypeLiteralNode(memberSig.type)
+            ) {
+              // Either the property doesn’t exist, or it isn’t an object literal type,
+              // so we can’t descend further.
+              typeNode = null!;
+              break;
+            }
+
+            // Now step into the nested TypeLiteralNode:
+            typeNode = memberSig.type;
+          }
+
+          // ④ After descending, “typeNode” is either the final nested TypeLiteralNode or null/undefined.
+          //    If we ended up with a valid node, extract its immediate property names.
+          let stubProps: string[] = [];
+          if (typeNode) {
+            stubProps = typeNode.members
+              .filter(ts.isPropertySignature)
+              .map((ps) => (ps.name as ts.Identifier).text);
+          }
+
+          // ⑤ Build completion items out of stubProps that match the “partial.”
           const out: vscode.CompletionItem[] = [];
           const seen = new Set<string>();
 
@@ -984,14 +1042,13 @@ export async function activate(context: vscode.ExtensionContext) {
               p,
               vscode.CompletionItemKind.Property
             );
-            it.sortText = "0_" + p; // before natives
+            it.sortText = "0_" + p; // “0_” so that real‐project props sort before JS natives
             out.push(it);
             seen.add(p);
           }
 
-          /* ③ add JS native members *only* for “scalar” stubs ----------- */
-          const treatAsScalar = stubProps.length <= 1; // length │ 0 props
-
+          // ⑥ If there are zero or one “project” props, treat the value as a “scalar” and add JS native members:
+          const treatAsScalar = stubProps.length <= 1;
           if (treatAsScalar) {
             for (const k of JS_NATIVE_MEMBERS) {
               if (!k.startsWith(partial) || seen.has(k)) {
@@ -1005,9 +1062,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
               const it = new vscode.CompletionItem(k, kind);
               if (kind === vscode.CompletionItemKind.Method) {
+                // Insert parentheses if it’s a function
                 it.insertText = new vscode.SnippetString(`${k}()$0`);
               }
-              it.sortText = "1_" + k; // after project members
+              it.sortText = "1_" + k; // “1_” so JS natives come after project props
               out.push(it);
             }
           }
@@ -1015,7 +1073,7 @@ export async function activate(context: vscode.ExtensionContext) {
           return out;
         },
       },
-      "." // trigger character
+      "." // Trigger on “.”
     )
   );
 
@@ -1093,6 +1151,9 @@ export async function activate(context: vscode.ExtensionContext) {
         validateStateTupleUsage(doc, pphpSigDiags);
         rebuildMustacheStub(doc);
         validateComponentPropValues(doc, propsProvider);
+
+        validateJsVariablesInCurlyBraces(doc, jsVarDiagnostics);
+        updateJsVariableDecorations(doc, braceDecorationType);
         pendingTimers.delete(key);
       }, 500)
     );
@@ -1111,13 +1172,11 @@ export async function activate(context: vscode.ExtensionContext) {
     await validateAggregateCall(document, aggregateDiags);
 
     updateStringDecorations(document);
-    validateJsVariablesInCurlyBraces(document, jsVarDiagnostics);
     updateNativeTokenDecorations(
       document,
       nativeFunctionDecorationType,
       nativePropertyDecorationType
     );
-    updateJsVariableDecorations(document, braceDecorationType);
     validateMissingImports(document, diagnosticCollection);
   };
 
@@ -2162,6 +2221,35 @@ function preNormalizePhpVars(text: string): string {
   );
 }
 
+// A cache to remember the last set of diagnostics per document URI
+const prevMustacheDiags = new Map<string, vscode.Diagnostic[]>();
+
+/**
+ * Compare two arrays of Diagnostic objects for equality.
+ * Returns true if both arrays have the same length, and each Diagnostic
+ * at the same index has identical range, message, and severity.
+ */
+function diagnosticsEqual(
+  a: vscode.Diagnostic[],
+  b: vscode.Diagnostic[]
+): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i++) {
+    const da = a[i];
+    const db = b[i];
+    if (
+      da.message !== db.message ||
+      da.severity !== db.severity ||
+      !da.range.isEqual(db.range)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 const validateJsVariablesInCurlyBraces = (
   document: vscode.TextDocument,
   diagnosticCollection: vscode.DiagnosticCollection
@@ -2171,37 +2259,37 @@ const validateJsVariablesInCurlyBraces = (
   }
 
   const originalText = document.getText();
-  // 1️⃣ blank out *all* PHP literals/comments/regex so we don't pick up "{{…}}" inside them
 
-  // ① normalize away PHP vars
+  // 1️⃣ Normalize away PHP-style variables inside mustaches: {$foo} → foo, $bar → bar
   const normalized = preNormalizePhpVars(originalText);
 
+  // 2️⃣ Blank out all PHP literals/comments/regex so we don't pick up "{{…}}" in those
   const sanitizedText = sanitizeForDiagnostics(normalized);
 
   const diagnostics: vscode.Diagnostic[] = [];
   let match: RegExpExecArray | null;
-  // 2️⃣ run your existing JS_EXPR_REGEX *against* the sanitized text
+
+  // 3️⃣ Run the JS_EXPR_REGEX against the sanitized text
   while ((match = JS_EXPR_REGEX.exec(sanitizedText)) !== null) {
     const expr = match[1].trim();
 
-    // 🚩 1)  Asignaciones prohibidas
+    // 🚩 1) Disallow any assignment operator inside {{ … }}
     if (containsJsAssignment(expr)) {
+      const start = document.positionAt(match.index + 2); // after "{{"
+      const end = document.positionAt(match.index + match[0].length - 2); // before "}}"
       diagnostics.push(
         new vscode.Diagnostic(
-          new vscode.Range(
-            document.positionAt(match.index + 2), // «{{»
-            document.positionAt(match.index + match[0].length - 2) // «}}»
-          ),
+          new vscode.Range(start, end),
           "⚠️  Assignments are not allowed inside {{ … }}. Use values or pure expressions.",
           vscode.DiagnosticSeverity.Warning
         )
       );
-      // No sigas con las demás comprobaciones para esta expresión
       continue;
     }
 
+    // 🚩 2) Check if expression is valid JS syntax
     if (!isValidJsExpression(expr)) {
-      // calculate positions *in* the original text (indexes line up thanks to blanking)
+      // Calculate positions in the original text (indexes line up because sanitizeForDiagnostics only blanks, not shifts)
       const startIndex = match.index + match[0].indexOf(expr);
       const endIndex = startIndex + expr.length;
       const startPos = document.positionAt(startIndex);
@@ -2209,14 +2297,21 @@ const validateJsVariablesInCurlyBraces = (
       diagnostics.push(
         new vscode.Diagnostic(
           new vscode.Range(startPos, endPos),
-          `⚠️ Invalid JavaScript expression in {{ ... }}.`,
+          `⚠️ Invalid JavaScript expression in {{ … }}.`,
           vscode.DiagnosticSeverity.Warning
         )
       );
     }
   }
 
-  diagnosticCollection.set(document.uri, diagnostics);
+  // 4️⃣ Only update the DiagnosticCollection if the new array differs from the last cached one
+  const uriKey = document.uri.toString();
+  const oldDiags = prevMustacheDiags.get(uriKey) || [];
+
+  if (!diagnosticsEqual(oldDiags, diagnostics)) {
+    prevMustacheDiags.set(uriKey, diagnostics);
+    diagnosticCollection.set(document.uri, diagnostics);
+  }
 };
 
 // ── at module‐scope ────────────────────────────────────────────────
@@ -2234,13 +2329,11 @@ const nativePropRegex = new RegExp(
 // a generic “object.property” regex to catch anything else
 const objectPropRegex = /(?<=\.)[A-Za-z_$][\w$]*/g;
 
-// ── in your activate (or wherever) ─────────────────────────────────
 const objectPropertyDecorationType =
   vscode.window.createTextEditorDecorationType({
     color: "#9CDCFE", // pick whatever color you like
   });
 
-// 1️⃣ at the top of activate()
 const STRING_COLOR = "#CE9178"; // or whatever your theme’s string color is
 const stringDecorationType = vscode.window.createTextEditorDecorationType({
   color: STRING_COLOR,
