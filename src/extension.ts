@@ -1856,8 +1856,17 @@ export const getFxpDiagnostics = (
 ): vscode.Diagnostic[] => {
   const raw = doc.getText();
 
+  if (doc.languageId === "php" && !hasRealClosingTagOrHeredocHtml(raw)) {
+    return []; // ← ni cierre real ni HTML en heredoc ⇒ salir
+  }
+
   // 0️⃣ build a sanitized copy for both XML‐validation and our own searches
   const sanitized = sanitizeForDiagnosticsXML(raw);
+
+  /* ⬅️  EARLY EXIT: ¿queda algún tag   <Nombre … >   que validar?      */
+  if (!/[<][A-Za-z][A-Za-z0-9-]*(\s|>)/.test(sanitized)) {
+    return []; // ← fichero sin HTML → sin diagnósticos
+  }
 
   // 1️⃣ wrap & void void‐tags for the XML validator
   const voided = sanitized.replace(
@@ -1889,13 +1898,39 @@ export const getFxpDiagnostics = (
   let errorOffset = xmlOffset - wrapIndex;
   errorOffset = Math.max(0, Math.min(errorOffset, raw.length - 1));
 
-  // 4️⃣ special‐case attribute‐needs‐value
+  // 4️⃣ special-case attribute-needs-value
   const attrMatch = /^Attribute (\w+)/.exec(pretty);
   if (attrMatch) {
     const badAttr = attrMatch[1];
+
+    /* ── NEW ───────────────────────────────────────────────────── */
+    // 1. Encuentra <tag ... > que contiene la columna del error
+    const tagStart = sanitized.lastIndexOf("<", errorOffset);
+    const tagEnd = sanitized.indexOf(">", errorOffset);
+    if (tagStart !== -1 && tagEnd !== -1 && tagEnd > tagStart) {
+      const tagSlice = sanitized.slice(tagStart, tagEnd);
+
+      // 2. Busca el atributo dentro de ese mismo tag
+      const localIdx = tagSlice.search(new RegExp("\\b" + badAttr + "\\b"));
+      if (localIdx !== -1) {
+        const absIdx = tagStart + localIdx; // posición absoluta
+        const start = doc.positionAt(absIdx);
+        const end = start.translate(0, badAttr.length);
+
+        return [
+          new vscode.Diagnostic(
+            new vscode.Range(start, end),
+            pretty,
+            vscode.DiagnosticSeverity.Error
+          ),
+        ];
+      }
+    }
+    /* ──────────────────────────────────────────────────────────── */
+
+    /* fallback (tu lógica antigua) por si no encontramos el tag */
     const attrRe = new RegExp(`\\b${badAttr}\\b\\s*=`, "g");
     let bestIdx = -1;
-    // search **sanitized** so we catch heredoc and other dynamic places
     for (const m of sanitized.matchAll(attrRe)) {
       const idx = m.index!;
       if (idx <= errorOffset && idx > bestIdx) {
@@ -1906,7 +1941,6 @@ export const getFxpDiagnostics = (
       bestIdx = sanitized.search(attrRe);
     }
     if (bestIdx >= 0) {
-      // use the same offset in the real document
       const start = doc.positionAt(bestIdx);
       const end = start.translate(0, badAttr.length);
       return [
@@ -1961,6 +1995,64 @@ export const getFxpDiagnostics = (
     new vscode.Diagnostic(range, pretty, vscode.DiagnosticSeverity.Error),
   ];
 };
+
+function hasRealClosingTagOrHeredocHtml(src: string): boolean {
+  // 1) Si existe `?>` FUERA de strings → necesitamos validar
+  if (hasRealClosingTag(src)) {
+    return true;
+  }
+  // 2) Si no, pero hay heredoc con HTML → también validar
+  return hasHtmlInHeredoc(src);
+}
+
+function hasRealClosingTag(src: string): boolean {
+  let inS = "",
+    esc = false;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+
+    /* dentro de string → solo salgo cuando veo la misma comilla sin escape */
+    if (inS) {
+      if (esc) {
+        esc = false;
+        continue;
+      }
+      if (ch === "\\") {
+        esc = true;
+        continue;
+      }
+      if (ch === inS) {
+        inS = "";
+      }
+      continue;
+    }
+
+    /* inicio de string */
+    if (ch === "'" || ch === '"') {
+      inS = ch;
+      continue;
+    }
+
+    /* encontramos `?>` estando FUERA de comillas */
+    if (ch === "?" && src[i + 1] === ">") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasHtmlInHeredoc(src: string): boolean {
+  const heredocRE =
+    /<<<['"]?([A-Za-z_]\w*)['"]?\r?\n([\s\S]*?)\r?\n\s*\1\s*;?/g;
+  let m: RegExpExecArray | null;
+  while ((m = heredocRE.exec(src))) {
+    const body = m[2];
+    if (/[<][A-Za-z]/.test(body)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /* ------------------------------------------------------------- */
 /*  sanitizeForDiagnostics  ——  ejemplo mínimo con el helper     */
