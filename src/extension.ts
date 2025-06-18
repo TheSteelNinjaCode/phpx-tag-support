@@ -1576,10 +1576,16 @@ const registerPhpDefinitionProvider = () => {
   });
 };
 
+const PHP_SELECTOR: vscode.DocumentSelector = [
+  { language: PHP_LANGUAGE, scheme: "file" }, // saved *.php
+  { language: PHP_LANGUAGE, scheme: "untitled" }, // unsaved but already PHP
+  { language: "plaintext", scheme: "untitled" }, // brand-new Untitled-x
+];
+
 // Completion provider for PHP tags and custom snippet insertion.
 const registerPhpCompletionProvider = () => {
   return vscode.languages.registerCompletionItemProvider(
-    PHP_LANGUAGE,
+    PHP_SELECTOR,
     {
       async provideCompletionItems(document, position) {
         const fullBefore = document.getText(
