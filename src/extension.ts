@@ -636,9 +636,21 @@ export async function activate(context: vscode.ExtensionContext) {
 
           /* ① must be inside an open tag -------------------------------- */
           const lt = uptoCursor.lastIndexOf("<");
-          if (lt === -1 || uptoCursor[lt + 1] === "/") {
+          if (lt === -1) {
             return;
           }
+
+          // Skip PHP open tags
+          if (/^<\?(php|=)?/.test(uptoCursor.slice(lt))) {
+            return;
+          }
+
+          // Ensure not inside closing tag
+          if (uptoCursor[lt + 1] === "/") {
+            return;
+          }
+
+          // Ensure not already closed
           if (uptoCursor.slice(lt).includes(">")) {
             return;
           }
