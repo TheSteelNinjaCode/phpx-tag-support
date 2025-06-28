@@ -25,6 +25,57 @@ interface PropMeta {
 
 type Cached = { mtime: number; props: PropMeta[] };
 
+type Primitive =
+  | "string"
+  | "bool"
+  | "boolean"
+  | "int"
+  | "float"
+  | "array"
+  | "null"
+  | "mixed";
+
+function splitTypes(typeStr: string): Primitive[] {
+  return typeStr.split("|").map((t) => t.trim().toLowerCase()) as Primitive[];
+}
+
+function classify(raw: string): Primitive {
+  const v = raw.trim().toLowerCase();
+
+  if (v === "" || v === "null") {
+    return "null";
+  }
+  if (v === "true" || v === "false" || v === "1" || v === "0") {
+    return "bool";
+  }
+  if (/^-?\d+$/.test(v)) {
+    return "int";
+  }
+  if (/^-?\d+\.\d+$/.test(v)) {
+    return "float";
+  }
+  if (v.startsWith("[") && v.endsWith("]")) {
+    return "array";
+  }
+
+  return "string"; // fallback – every HTML attr is a string anyway
+}
+
+export function isAllowed(prop: PropMeta, raw: string): boolean {
+  const allowed = splitTypes(prop.type);
+  if (allowed.includes("mixed")) {
+    return true;
+  }
+
+  const kind = classify(raw);
+  return (
+    allowed.includes(kind) || // primitive match
+    (kind === "bool" && allowed.includes("boolean")) ||
+    (kind === "int" && allowed.includes("float")) || // int ⊂ float
+    (kind === "string" && allowed.includes("array"))
+  ); // JSON-like
+}
+
 function typeToString(t: any | undefined): string {
   if (!t) {
     return "mixed";
@@ -45,8 +96,15 @@ function typeToString(t: any | undefined): string {
       return `${typeToString(t.what ?? t.type)}|null`;
 
     /* Foo|Bar */
-    case "uniontype":
-      return t.types.map(typeToString).join("|");
+    case "uniontype": {
+      const uniq: string[] = [];
+      for (const part of t.types.map(typeToString)) {
+        if (!uniq.includes(part)) {
+          uniq.push(part);
+        }
+      }
+      return uniq.join("|");
+    }
 
     /* Foo&Bar */
     case "intersectiontype":
@@ -177,10 +235,10 @@ export class ComponentPropsProvider {
         }
 
         /* 1️⃣  ── figure out the “raw” type that is written in code ───────── */
-        let codeTypeStr: string | undefined;
-        if (stmt.type) {
-          codeTypeStr = typeToString(stmt.type); // e.g. "array|null"
-        }
+        // use the member’s own type first, fall back to the statement’s
+        const rawTypeNode = propNode.type ?? stmt.type;
+        let codeTypeStr: string | undefined =
+          rawTypeNode && typeToString(rawTypeNode);
 
         /* 2️⃣  ── PHP-Doc always wins for the *display* type … ────────────── */
         let finalType: string | undefined = codeTypeStr;
@@ -201,9 +259,12 @@ export class ComponentPropsProvider {
         }
 
         /* ── optional? ───────────────────────────────────────────── */
+        const defaultIsNull = valueNode && valueNode.kind === "nullkeyword";
+
         const optional =
-          propNode.nullable === true || // ← ⭐ key change
-          /\bnull\b/.test(finalType); // unions & php-doc
+          defaultIsNull || //   = null
+          propNode.nullable === true || //   ?Type
+          /\bnull\b/.test(finalType); //   Type|…|null
 
         /* 5️⃣  ── default-value extraction unchanged ─────────────────────── */
         let def: string | string[] | undefined;

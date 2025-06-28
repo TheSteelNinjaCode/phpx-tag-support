@@ -13,120 +13,196 @@ declare class PPHP {
     private _activeAbortController;
     private _reservedWords;
     private _declaredStateRoots;
-    private _scopedKeys;
+    private _arrayMethodCache;
     private _updateScheduled;
     private _pendingBindings;
     private _effects;
     private _pendingEffects;
-    private _processedPhpSections;
     private _processedPhpScripts;
     private _bindings;
     private _templateStore;
     private _inlineDepth;
-    private _activeSection;
-    private _inlineModuleFns;
     private _proxyCache;
     private _rawProps;
     private _refs;
     private _wheelHandlersStashed;
     private _evaluatorCache;
     private _depsCache;
+    private _dirtyDeps;
+    private _handlerCache;
+    private _handlerProxyCache;
+    private _sharedStateMap;
+    private _processedLoops;
+    private _hydrated;
+    private _currentProcessingHierarchy;
+    private _stateHierarchy;
+    private _currentTemplateHierarchy;
+    private _inlineModuleFns;
+    private _currentExecutionScope;
     private readonly _eventHandlers;
     private readonly _redirectRegex;
     private readonly _assignmentRe;
     private readonly _mustacheRe;
-    private readonly _htmlEntitiesRe;
     private readonly _mutators;
     private readonly _boolAttrs;
     private static _instance;
     private static _effectCleanups;
-    private static debounceTimers;
+    private static _debounceTimers;
+    private static _shared;
+    private static _cryptoKey;
     private static readonly _cancelableEvents;
     private static readonly _mustacheTest;
     private static readonly _mustachePattern;
     private static readonly _passiveEvents;
     private constructor();
     static get instance(): PPHP;
+    debugProps(): void;
     private scheduleInitialHydration;
+    private initCryptoKey;
+    private encryptCallbackName;
+    private decryptCallbackName;
+    private qsa;
+    private _inferHierarchyFromEvent;
+    callParent<T = any>(functionNameOrFn: string | Function, ...args: any[]): T | null;
+    private callParentByName;
+    private executeInParentContext;
+    private createParentScopeContext;
+    private executeWithContext;
+    private executeArrowFunctionWithContext;
+    private detectComponentHierarchy;
+    private detectElementHierarchy;
+    private generateScopedKey;
     ref(key: string, index?: number): HTMLElement | HTMLElement[];
     effect(fn: () => void | (() => void), deps?: (string | (() => any))[]): () => void;
-    private getProxiedProps;
+    private resolveDependencyPath;
+    private getResolvedValue;
+    private hasValueChanged;
     private resetProps;
-    private initMakeReactive;
+    private initReactiveOn;
     private initLoopBindings;
     private registerLoop;
-    private _sectionRefs;
+    private extractComprehensiveLoopDependencies;
+    private extractItemPropertiesFromTemplate;
+    private parseForExpression;
+    private setupLoopMarker;
+    private initializeLoopState;
+    private createItemNodes;
+    private processTextNodesInFragment;
+    private createTextNodeUpdaterWithItemKey;
+    private findItemByKey;
+    private processElementBindingsInFragment;
+    private processElementBindings;
+    private createElementBindingWithItemKey;
+    private createElementBindingUpdaterWithItemKey;
+    private getItemKey;
+    private renderTextNode;
+    private renderMustacheText;
+    private updateElementBinding;
+    private renderElementBinding;
+    private applyAttributeBinding;
+    private processEventHandlersInFragment;
+    private updateItemNodes;
+    private updateNodesContent;
+    private updateElementContent;
+    private updateElementBindingsContent;
+    private createLoopUpdater;
+    private captureFocusState;
+    private restoreFocusState;
+    private calculateLoopDiff;
+    private applyLoopChanges;
+    private applyLoopUpdates;
+    private applyLoopInsertions;
+    private performLoopUpdate;
+    private applyLoopDeletions;
     private initRefs;
     private scheduleBindingUpdate;
     private makeReactive;
+    private getBindingType;
     private makeAttrTemplateUpdater;
-    private makePrimitiveUpdater;
     private formatValue;
     private registerBinding;
-    private safeTag;
-    private guardInterpolations;
     private makeSafeEvaluator;
-    private initBindings;
+    private makeScopedEvaluator;
+    private _createScopedPropsContext;
+    private extractScopedDependencies;
+    private processIfChains;
+    private manageAttributeBindings;
     private callInlineModule;
+    private getScopedFunction;
     private processInlineModuleScripts;
+    private injectScopedVariables;
+    private extractDeclaredVariables;
+    private findScopedKeyForVariable;
+    private extractVariableReferences;
+    private hasInScopedContext;
+    private _registerScopedFunction;
+    private extractSetters;
+    private markShared;
+    private transformStateDeclarations;
+    private stripComments;
     private flushBindings;
+    private static readonly ARRAY_INTRINSICS;
+    private static headMatch;
+    private dependencyMatches;
+    private matchEffectDependency;
+    private matchLoopDependency;
+    private isArrayPath;
+    private isArrayItemPath;
+    private matchBindingDependency;
+    private matchesWildcardPattern;
+    private matchesArrayIndexPattern;
     private scheduleFlush;
-    private scopeKey;
-    private _currentSectionId;
     private getNested;
     private setNested;
     private hasNested;
-    /**
-     * Creates a persistent, section-scoped state variable with a getter and setter, similar to React's `useState`.
-     *
-     * @template T The type of the state value.
-     * @param {string} key - A unique key identifying the state variable. Must be a non-empty string and not a reserved word.
-     * @param {T} initial - The initial value for the state variable.
-     * @returns {[(() => T) & T, (value: T | ((prev: T) => T)) => void]}
-     *   A tuple containing:
-     *   - A getter function (also coercible to the value) for accessing the current state.
-     *   - A setter function for updating the state, which can accept either a new value or an updater function.
-     * @throws {Error} If the key is missing, invalid, or reserved, or if the initial value is not provided.
-     *
-     * @remarks
-     * - The state is scoped to the current section, ensuring isolation between different sections.
-     * - The getter function can be called as a function, or used directly as a value (via coercion).
-     * - The setter triggers a scheduled flush to propagate state changes.
-     * - Intended for use with build-time code injection to ensure unique and valid keys.
-     */
-    state<T>(key?: string, initial?: T): [(() => T) & T, (value: T | ((prev: T) => T)) => void];
+    share<T>(key: string, initial?: T): [(() => T) & {
+        value: T;
+    }, (v: T | ((p: T) => T)) => void];
+    clearShare: (key?: string) => void;
+    state<T>(key?: string, initial?: T): [(() => T) & {
+        value: T;
+    }, (value: T | ((prev: T) => T)) => void];
+    private markNestedPropertiesDirty;
     private static readonly _isBuiltIn;
     private extractDependencies;
+    private isPlainText;
     private initializeAllReferencedProps;
-    /**
-     * Updates a nested property given a dot-separated path.
-     *
-     * @param obj - The object to update.
-     * @param path - Dot-separated property path (e.g., 'userModal.open').
-     * @param value - The value to assign.
-     */
     setNestedProperty(obj: any, path: string, value: any): void;
-    private handlePopState;
-    private alreadyScoped;
-    private prefixFunctionCalls;
-    private prefixIds;
     private attachWireFunctionEvents;
+    private decodeEntities;
+    private unwrapArrowBody;
+    private buildHandlerFromRawBody;
+    private replaceThisReferences;
+    private normalizeToArrow;
+    private renameEventParam;
+    private escapeRegex;
     private handleDebounce;
-    /**
-     * Debounces a function to limit the rate at which it is called.
-     *
-     * The debounced function will postpone its execution until after the specified wait time
-     * has elapsed since the last time it was invoked. If `immediate` is `true`, the function
-     * will be called at the beginning of the wait period instead of at the end.
-     *
-     * @param {Function} func - The function to debounce.
-     * @param {number} [wait=300] - The number of milliseconds to wait before invoking the function.
-     * @param {boolean} [immediate=false] - If `true`, the function is invoked immediately on the leading edge.
-     * @returns {Function} - Returns the debounced version of the original function.
-     */
     debounce<T extends (...args: any[]) => void>(func: T, wait?: number, immediate?: boolean): (...args: Parameters<T>) => void;
     private handlerAutofocusAttribute;
     private invokeHandler;
+    private parseHandler;
+    private isArrowFunction;
+    private parseArrowFunction;
+    private findArrowIndex;
+    private executeArrowHandler;
+    private executeComplexHandler;
+    private parseStatements;
+    private executeInlineModule;
+    private executeSingleStatement;
+    private executeCallHandler;
+    private resolveFunctionName;
+    private executeSimpleHandler;
+    private executeHandler;
+    private executeGlobalFunction;
+    private executeDynamic;
+    private static AsyncFunction;
+    private getOrCreateEvaluator;
+    private getOrCreateProxy;
+    private createHandlerProxy;
+    private isAsyncFunction;
+    private containsAwait;
+    private handleInvokeError;
+    private clearHandlerCaches;
     private handleParsedCallback;
     private handleUndefinedFunction;
     private handleAfterRequest;
@@ -151,8 +227,8 @@ declare class PPHP {
     private getUrlParams;
     private createFetchOptions;
     private parseCallback;
+    private evaluateJavaScriptObject;
     private handleInputElement;
-    private resolveContext;
     private setCursorPosition;
     private handleInputAppendParams;
     private handleHiddenAttribute;
@@ -161,36 +237,22 @@ declare class PPHP {
     private handleElementDisplay;
     private handleElementChange;
     private handleAnchorTag;
+    private handlePopState;
     private handleNavigation;
-    /**
-     * Tries to find the best-matching <div pp-loading-url="..."> for the current path,
-     * walking “up” the URL hierarchy until it finds a match or hits root `/`.
-     */
     private findLoadingElement;
-    /**
-     * Fades out the main content, swaps in the “loadingElement” HTML,
-     * then fades back in—based on optional [pp-loading-transition] settings.
-     */
     private updateContentWithTransition;
-    /**
-     * Looks for a child element with [pp-loading-transition], parses it as JSON,
-     * and returns {fadeIn, fadeOut} in milliseconds.
-     */
     private parseTransition;
     private fadeOut;
     private fadeIn;
     private updateDocumentContent;
+    private rerunInlineScripts;
+    private scrubTemplateValueAttributes;
     private restoreScrollPositions;
     private PRESERVE_HANDLERS;
     private populateDocumentBody;
-    private updateDocumentBody;
-    private manageScriptTags;
     private saveScrollPositions;
     private getElementKey;
     redirect(url: string): Promise<void>;
-    /**
-     * Helper method to cancel the currently active request.
-     */
     abortActiveRequest(): void;
     fetch(url: string, options?: RequestInit, abortPrevious?: boolean): Promise<Response>;
     private isJsonLike;
@@ -198,44 +260,13 @@ declare class PPHP {
     private parseTime;
     private scheduleChange;
     fetchFunction<T = any>(functionName: string, data?: Record<string, any>, abortPrevious?: boolean): Promise<T | string>;
-    private processSyncScripts;
     sync(...prefixes: string[]): Promise<void>;
     fetchAndUpdateBodyContent(): Promise<void>;
-    private reRunScripts;
-    /**
-     * Copies the text content from a specified code block to the clipboard and updates an icon element
-     * to indicate success. The icon's attributes can be dynamically changed based on the copy operation.
-     *
-     * @param {HTMLElement} btnElement - The button element that triggers the copy action.
-     * @param {string} containerClass - The class name of the container element that holds the code block.
-     * @param {Object} initialIconAttr - An object holding the initial attributes for the icon element.
-     * @param {Object} successIconAttr - An object holding the attributes to apply to the icon on successful copy.
-     * @param {string} [iconSelector="img"] - A CSS selector to target the icon element within the button (default is "img").
-     * @param {number} [timeout=2000] - The duration (in milliseconds) to display the success icon before reverting back to the initial state (default is 2000ms).
-     *
-     * @returns {void} This function does not return a value.
-     *
-     * @example
-     * // Usage example:
-     * copyCode(this, 'mockup-code',
-     *   {'src': '/src/app/assets/images/content-copy.svg', 'alt': 'Copy'},
-     *   {'src': '/src/app/assets/images/content-copied.svg', 'alt': 'Copied'},
-     *   'img');
-     */
     copyCode(btnElement: HTMLElement, containerClass: string, initialIconAttr: {
         [key: string]: string;
-    }, // Object to hold initial icon attributes
-    successIconAttr: {
+    }, successIconAttr: {
         [key: string]: string;
-    }, // Object to hold success icon attributes
-    iconSelector?: string, // Default to img for the icon
-    timeout?: number): void;
-    /**
-     * Reads a cookie value by name.
-     *
-     * @param {string} name - The name of the cookie to retrieve.
-     * @returns {string | null} - The cookie value or null if not found.
-     */
+    }, iconSelector?: string, timeout?: number): void;
     getCookie(name: string): string | null;
 }
 export declare class PPHPLocalStore {
@@ -244,40 +275,12 @@ export declare class PPHPLocalStore {
     private listeners;
     private pphp;
     private STORAGE_KEY;
-    /**
-     * Creates a new PPHPLocalStore instance.
-     *
-     * @param {LocalStoreState} [initialState={}] - The initial state.
-     */
+    private lastSyncedState;
     private constructor();
-    /**
-     * Gets the singleton instance of PPHPLocalStore.
-     *
-     * @param {LocalStoreState} [initialState={}] - The initial state.
-     * @returns {PPHPLocalStore} - The PPHPLocalStore instance.
-     */
     static getInstance(initialState?: LocalStoreState): PPHPLocalStore;
-    /**
-     * Sets the state.
-     *
-     * @param {Partial<LocalStoreState>} update - The state update.
-     * @param {boolean} [syncWithBackend=false] - Whether to sync the update with the backend.
-     */
     setState(update: Partial<LocalStoreState>, syncWithBackend?: boolean): void;
-    /**
-     * Saves the state to localStorage.
-     */
     private saveState;
-    /**
-     * Loads the state from localStorage.
-     */
     private loadState;
-    /**
-     * Resets the state to its initial value.
-     *
-     * @param {string} [id] - The id of the state to reset.
-     * @param {boolean} [syncWithBackend=false] - Whether to sync the reset with the backend.
-     */
     resetState(id?: string, syncWithBackend?: boolean): void;
 }
 export declare class SearchParamsManager {

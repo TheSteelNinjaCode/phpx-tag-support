@@ -20,6 +20,7 @@ import type { FqcnToFile } from "./analysis/component-props";
 import {
   ComponentPropsProvider,
   buildDynamicAttrItems,
+  isAllowed,
 } from "./analysis/component-props";
 import { buildAttrCompletions } from "./settings/pp-attributes";
 import {
@@ -1245,13 +1246,12 @@ function validateComponentPropValues(
       present.add(attrName);
 
       const meta = props.find((p) => p.name === attrName);
-      if (!meta?.default) {
-        continue; // nothing to validate for this attr
+      if (!meta) {
+        continue; // we don't know this prop
       }
 
-      const allowed = String(meta.default).split("|").filter(Boolean);
-      if (allowed.length && !allowed.includes(value)) {
-        const tagStart = tagMatch.index; // where "<Tag" is
+      if (!isAllowed(meta, value)) {
+        const tagStart = tagMatch.index;
         const attrRelOffset = tagMatch[0].indexOf(attrMatch[0]);
         const absStart = tagStart + attrRelOffset + attrMatch[0].indexOf(value);
         const absEnd = absStart + value.length;
@@ -1259,7 +1259,7 @@ function validateComponentPropValues(
         diags.push(
           new vscode.Diagnostic(
             new vscode.Range(doc.positionAt(absStart), doc.positionAt(absEnd)),
-            `Invalid value "${value}". Allowed: ${allowed.join(", ")}`,
+            `Invalid value "${value}". Allowed types: ${meta.type}`,
             vscode.DiagnosticSeverity.Warning
           )
         );
@@ -1770,6 +1770,8 @@ const registerPhpCompletionProvider = () => {
           // snippet body
           const snippet = new vscode.SnippetString(
             `<?php
+
+declare(strict_types=1);
 
 namespace ${namespacePlaceholder};
 
