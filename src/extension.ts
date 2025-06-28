@@ -1591,185 +1591,181 @@ const registerPhpCompletionProvider = () => {
         const fullBefore = document.getText(
           new vscode.Range(new vscode.Position(0, 0), position)
         );
-
-        // ── EARLY EXIT if cursor is inside a $prisma->…( … ) block ───────
-        const prismaIndex = fullBefore.lastIndexOf("$prisma->");
-        if (prismaIndex !== -1) {
-          // find the first "(" after that
-          const parenIndex = fullBefore.indexOf("(", prismaIndex);
-          if (parenIndex !== -1) {
-            // slice from that "(" to the cursor and count parens
-            const between = fullBefore.slice(parenIndex);
-            const opens = (between.match(/\(/g) || []).length;
-            const closes = (between.match(/\)/g) || []).length;
-            if (opens > closes) {
-              // still inside the call
-              return [];
-            }
-          }
+        if (isInsidePrismaCall(fullBefore)) {
+          return [];
         }
 
         const line = document.lineAt(position.line).text;
         const uptoCursor = line.slice(0, position.character);
-
-        /* ⬅️  EARLY EXIT while user is still typing "<?php" or "<?="  */
         if (/^\s*<\?[A-Za-z=]*$/i.test(uptoCursor)) {
           return [];
         }
-
-        // 0️⃣ Top-level variable suggestions ("pphp", "store", "searchParams")
-        const varNames = ["pphp", "store", "searchParams"] as const;
-        const prefixLine = line.match(/([A-Za-z_]*)$/)![1];
-        if (prefixLine.length > 0) {
-          const matches = varNames.filter((v) => v.startsWith(prefixLine));
-          if (matches.length) {
-            return matches.map((v) => {
-              const item = new vscode.CompletionItem(
-                v,
-                vscode.CompletionItemKind.Variable
-              );
-              item.insertText = v;
-              return item;
-            });
-          }
+        if (
+          isInsideScriptTag(document.getText(), document.offsetAt(position))
+        ) {
+          return [];
         }
-
-        // 1️⃣ pphp|store|searchParams member completions
-        const memberMatch = line.match(/(pphp|store|searchParams)\.\w*$/);
-        if (memberMatch) {
-          const varName = memberMatch[1] as VarName;
-          const clsName = {
-            pphp: "PPHP",
-            store: "PPHPLocalStore",
-            searchParams: "SearchParamsManager",
-          }[varName] as keyof typeof classStubs;
-
-          return classStubs[clsName].map((m) => {
-            const kind = m.signature.includes("(")
-              ? vscode.CompletionItemKind.Method
-              : vscode.CompletionItemKind.Property;
-            const item = new vscode.CompletionItem(m.name, kind);
-            item.detail = m.signature;
-            return item;
-          });
-        }
-
-        // 2️⃣ Don’t fire inside "<?…"
-        const prefix = prefixLine.substring(0, position.character);
-        if (/^[ \t]*<\?[=a-z]*$/.test(prefix)) {
+        if (isInsideMustache(fullBefore)) {
           return [];
         }
 
-        // ────────── Bail out if inside a <script>…</script> block ──────────
-        const fullText = document.getText();
-        const offset = document.offsetAt(position);
-        const before = fullText.slice(0, offset);
-        const scriptOpens = (before.match(/<script\b/gi) || []).length;
-        const scriptCloses = (before.match(/<\/script>/gi) || []).length;
-        if (scriptOpens > scriptCloses) {
-          return [];
+        const memberCompletions = getMemberCompletions(line);
+        if (memberCompletions) {
+          return memberCompletions;
         }
 
-        // ────────── Bail out if inside a mustache {{ … }} expression ──────────
-        // (we just check whether the last "{{" before the cursor
-        // is unmatched by a "}}" before it)
-        const lastOpen = before.lastIndexOf("{{");
-        const lastClose = before.lastIndexOf("}}");
-        if (lastOpen > lastClose) {
-          return [];
-        }
+        const completions = await buildComponentCompletions(
+          document,
+          line,
+          position
+        );
 
-        // ────────── Bail out if inside a PHP tag <…> or </…> ───────────────
-        const lt = uptoCursor.lastIndexOf("<");
-        if (lt !== -1) {
-          const afterLt = uptoCursor.slice(lt + 1);
-          if (/\s/.test(afterLt)) {
-            return; // ← NEW EARLY EXIT
-          }
-        }
+        // Also add phpxclass snippet
+        completions.push(...maybeAddPhpXClassSnippet(document, line, position));
 
-        // 3️⃣ Load class-log and build component completions
-        await loadComponentsFromClassLog();
-        const completions: vscode.CompletionItem[] = [];
+        return completions;
+      },
+    },
+    ".",
+    "p",
+    "s",
+    "_" // now fires on those keys too
+  );
+};
 
-        // a) from explicit `use` statements
-        const useMap = parsePhpUseStatements(document.getText());
-        const lessThan = line.lastIndexOf("<", position.character);
-        let replaceRange: vscode.Range | undefined;
-        if (lessThan !== -1) {
-          replaceRange = new vscode.Range(
-            new vscode.Position(position.line, lessThan),
-            position
-          );
-        }
-        for (const [shortName, fullClass] of useMap.entries()) {
-          const item = new vscode.CompletionItem(
-            shortName,
-            vscode.CompletionItemKind.Class
-          );
-          item.detail = `Component from ${fullClass}`;
-          item.filterText = `<${shortName}`;
-          item.insertText = new vscode.SnippetString(`<${shortName}`);
-          item.range = replaceRange;
-          completions.push(item);
-        }
+function isInsidePrismaCall(fullBefore: string): boolean {
+  const prismaIndex = fullBefore.lastIndexOf("$prisma->");
+  if (prismaIndex !== -1) {
+    const parenIndex = fullBefore.indexOf("(", prismaIndex);
+    if (parenIndex !== -1) {
+      const between = fullBefore.slice(parenIndex);
+      const opens = (between.match(/\(/g) || []).length;
+      const closes = (between.match(/\)/g) || []).length;
+      return opens > closes;
+    }
+  }
+  return false;
+}
 
-        // b) from class-log.json
-        const componentsMap = getComponentsFromClassLog();
-        componentsMap.forEach((fullComponent, shortName) => {
-          const compItem = new vscode.CompletionItem(
-            shortName,
-            vscode.CompletionItemKind.Class
-          );
-          compItem.detail = `Component (from class-log)`;
-          compItem.command = {
-            title: "Add import",
-            command: ADD_IMPORT_COMMAND,
-            arguments: [document, fullComponent],
-          };
-          compItem.filterText = shortName;
-          compItem.insertText = new vscode.SnippetString(`<${shortName}`);
-          completions.push(compItem);
-        });
+function isInsideScriptTag(fullText: string, offset: number): boolean {
+  const before = fullText.slice(0, offset);
+  const scriptOpens = (before.match(/<script\b/gi) || []).length;
+  const scriptCloses = (before.match(/<\/script>/gi) || []).length;
+  return scriptOpens > scriptCloses;
+}
 
-        // 4️⃣ phpxclass snippet
-        if (/^\s*phpx?c?l?a?s?s?$/i.test(prefixLine)) {
-          // determine namespace placeholder
-          const wsFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-          const cfg = vscode.workspace.getConfiguration("phpx-tag-support");
-          const sourceRoot = cfg.get<string>("sourceRoot", "src");
-          let namespacePlaceholder: string;
-          if (
-            !document.isUntitled &&
-            wsFolder &&
-            document.uri.fsPath.endsWith(".php")
-          ) {
-            const fullFs = document.uri.fsPath;
-            const fileDir = path.dirname(fullFs);
-            const base = path.join(wsFolder.uri.fsPath, sourceRoot);
-            const rel = path.relative(base, fileDir);
-            const parts = rel
-              .split(path.sep)
-              .filter(Boolean)
-              .map((seg) => seg.replace(/[^A-Za-z0-9_]/g, ""));
-            namespacePlaceholder = parts.length
-              ? parts.join("\\\\")
-              : "${1:Lib\\\\PHPX\\\\Components}";
-          } else {
-            namespacePlaceholder = "${1:Lib\\\\PHPX\\\\Components}";
-          }
+function isInsideMustache(before: string): boolean {
+  const lastOpen = before.lastIndexOf("{{");
+  const lastClose = before.lastIndexOf("}}");
+  return lastOpen > lastClose;
+}
 
-          // determine class name placeholder
-          let classNamePlaceholder: string;
-          if (!document.isUntitled && document.uri.fsPath.endsWith(".php")) {
-            classNamePlaceholder = path.basename(document.uri.fsPath, ".php");
-          } else {
-            classNamePlaceholder = "${2:ClassName}";
-          }
+function getMemberCompletions(
+  line: string
+): vscode.CompletionItem[] | undefined {
+  const memberMatch = line.match(/(pphp|store|searchParams)\.\w*$/);
+  if (memberMatch) {
+    const varName = memberMatch[1] as VarName;
+    const clsName = classNameMap[varName];
+    return classStubs[clsName].map((m) => {
+      const kind = m.signature.includes("(")
+        ? vscode.CompletionItemKind.Method
+        : vscode.CompletionItemKind.Property;
+      const item = new vscode.CompletionItem(m.name, kind);
+      item.detail = m.signature;
+      return item;
+    });
+  }
+}
 
-          // snippet body
-          const snippet = new vscode.SnippetString(
-            `<?php
+async function buildComponentCompletions(
+  document: vscode.TextDocument,
+  line: string,
+  position: vscode.Position
+): Promise<vscode.CompletionItem[]> {
+  await loadComponentsFromClassLog();
+  const completions: vscode.CompletionItem[] = [];
+
+  const useMap: Map<string, string> = parsePhpUseStatements(document.getText());
+  const lessThan: number = line.lastIndexOf("<", position.character);
+  let replaceRange: vscode.Range | undefined;
+  if (lessThan !== -1) {
+    replaceRange = new vscode.Range(
+      new vscode.Position(position.line, lessThan),
+      position
+    );
+  }
+
+  for (const [shortName, fullClass] of useMap.entries()) {
+    const item: vscode.CompletionItem = new vscode.CompletionItem(
+      shortName,
+      vscode.CompletionItemKind.Class
+    );
+    item.detail = `Component from ${fullClass}`;
+    item.insertText = new vscode.SnippetString(`<${shortName}`);
+    item.filterText = `<${shortName}`;
+    item.range = replaceRange;
+    completions.push(item);
+  }
+
+  const componentsMap: Map<string, string> = getComponentsFromClassLog();
+  componentsMap.forEach((fullComponent: string, shortName: string) => {
+    const compItem: vscode.CompletionItem = new vscode.CompletionItem(
+      shortName,
+      vscode.CompletionItemKind.Class
+    );
+    compItem.detail = `Component (from class-log)`;
+    compItem.insertText = new vscode.SnippetString(`<${shortName}`);
+    compItem.command = {
+      title: "Add import",
+      command: ADD_IMPORT_COMMAND,
+      arguments: [document, fullComponent],
+    };
+    completions.push(compItem);
+  });
+
+  return completions;
+}
+
+function maybeAddPhpXClassSnippet(
+  document: vscode.TextDocument,
+  line: string,
+  position: vscode.Position
+): vscode.CompletionItem[] {
+  const prefixLine: string = line.match(/([A-Za-z_]*)$/)![1];
+  if (!/^\s*phpx?c?l?a?s?s?$/i.test(prefixLine)) {
+    return [];
+  }
+
+  const wsFolder: vscode.WorkspaceFolder | undefined =
+    vscode.workspace.getWorkspaceFolder(document.uri);
+  const cfg: vscode.WorkspaceConfiguration =
+    vscode.workspace.getConfiguration("phpx-tag-support");
+  const sourceRoot: string = cfg.get<string>("sourceRoot", "src");
+  let namespacePlaceholder: string = "${1:Lib\\\\PHPX\\\\Components}";
+  if (
+    !document.isUntitled &&
+    wsFolder &&
+    document.uri.fsPath.endsWith(".php")
+  ) {
+    const rel: string = path.relative(
+      path.join(wsFolder.uri.fsPath, sourceRoot),
+      path.dirname(document.uri.fsPath)
+    );
+    const parts: string[] = rel
+      .split(path.sep)
+      .filter(Boolean)
+      .map((s) => s.replace(/[^A-Za-z0-9_]/g, ""));
+    namespacePlaceholder = parts.length
+      ? parts.join("\\\\")
+      : namespacePlaceholder;
+  }
+  const classNamePlaceholder: string =
+    !document.isUntitled && document.uri.fsPath.endsWith(".php")
+      ? path.basename(document.uri.fsPath, ".php")
+      : "${2:ClassName}";
+
+  const snippet: vscode.SnippetString = new vscode.SnippetString(`<?php
 
 declare(strict_types=1);
 
@@ -1795,29 +1791,22 @@ class ${classNamePlaceholder} extends PHPX
         </div>
         HTML;
     }
-}`
-          );
+}`);
 
-          const start = position.translate(0, -prefixLine.trim().length);
-          const item = new vscode.CompletionItem(
-            "phpxclass",
-            vscode.CompletionItemKind.Snippet
-          );
-          item.detail = "PHPX Class Template";
-          item.insertText = snippet;
-          item.range = new vscode.Range(start, position);
-          completions.push(item);
-        }
-
-        return completions;
-      },
-    },
-    ".",
-    "p",
-    "s",
-    "_" // now fires on those keys too
+  const start: vscode.Position = position.translate(
+    0,
+    -prefixLine.trim().length
   );
-};
+  const item: vscode.CompletionItem = new vscode.CompletionItem(
+    "phpxclass",
+    vscode.CompletionItemKind.Snippet
+  );
+  item.detail = "PHPX Class Template";
+  item.insertText = snippet;
+  item.range = new vscode.Range(start, position);
+
+  return [item];
+}
 
 /* ────────────────────────────────────────────────────────────── *
  *                     HELPER: READ COMPONENTS FROM CLASS LOG       *
