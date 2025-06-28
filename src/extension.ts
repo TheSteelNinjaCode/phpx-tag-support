@@ -2010,8 +2010,24 @@ function hasRealClosingTagOrHeredocHtml(src: string): boolean {
   if (hasRealClosingTag(src)) {
     return true;
   }
-  // 2) Si no, pero hay heredoc con HTML → también validar
-  return hasHtmlInHeredoc(src);
+
+  // 2) Si hay heredoc con HTML → también validar
+  if (hasHtmlInHeredoc(src)) {
+    return true;
+  }
+
+  // 3) Check for HTML tags, but exclude regex patterns
+  const sanitized = sanitizeForDiagnosticsXML(src);
+  const hasHtmlTags = /[<][A-Za-z][A-Za-z0-9-]*(\s|>)/.test(sanitized);
+
+  if (hasHtmlTags) {
+    // Additional check: make sure we're not just seeing regex patterns
+    // Look for actual HTML-like structures
+    const htmlLikePattern = /<[A-Za-z][A-Za-z0-9-]*(?:\s+[^>]*)?>/;
+    return htmlLikePattern.test(sanitized);
+  }
+
+  return false;
 }
 
 function hasRealClosingTag(src: string): boolean {
@@ -2087,6 +2103,9 @@ const blankMustaches = (txt: string) =>
 function sanitizeForDiagnosticsXML(raw: string): string {
   let text = raw;
 
+  // ── 0️⃣ Remove PHP variable assignments with regex patterns first ──
+  text = sanitizePhpVariableAssignments(text);
+
   // ── 1️⃣ Preserve heredoc/nowdoc interior ─────────────────────────
   // Blank only the opening <<<… and closing …; lines; keep the real HTML intact.
   text = text.replace(
@@ -2134,6 +2153,15 @@ function sanitizeForDiagnosticsXML(raw: string): string {
   text = text.replace(/&&|&/g, (match) => " ".repeat(match.length));
   return text;
 }
+
+const sanitizePhpVariableAssignments = (text: string): string => {
+  // Match PHP variable assignments that contain regex patterns
+  // This catches: $variable = '/regex/flags';
+  return text.replace(
+    /\$[A-Za-z_]\w*\s*=\s*(['"])\/.*?\/[gimsuyx]*\1\s*;/gi,
+    (match) => " ".repeat(match.length)
+  );
+};
 
 // Global cache for components
 let componentsCache = new Map<string, string>();
@@ -2699,8 +2727,27 @@ const removePhpComments = (text: string): string => {
 };
 
 const removePhpRegexLiterals = (text: string): string => {
-  const pattern = /(['"])\/.*?\/[a-z]*\1/gi;
-  return text.replace(pattern, (match) => " ".repeat(match.length));
+  let result = text;
+
+  // Handle regex patterns in variable assignments like $pattern = '/.../'
+  result = result.replace(
+    /\$\w+\s*=\s*(['"])\/.*?\/[gimsuyx]*\1\s*;/gi,
+    (match) => " ".repeat(match.length)
+  );
+
+  // Handle regex patterns in preg_* function calls
+  result = result.replace(
+    /\b(preg_\w+)\s*\(\s*(['"])\/.*?\/[gimsuyx]*\2/gi,
+    (match) => " ".repeat(match.length)
+  );
+
+  // Handle standalone quoted regex patterns
+  result = result.replace(
+    /(['"])\/(?:\\.|[^\\\/\r\n])*?\/[gimsuyx]*\1/gi,
+    (match) => " ".repeat(match.length)
+  );
+
+  return result;
 };
 
 const removePhpInterpolations = (text: string): string =>
