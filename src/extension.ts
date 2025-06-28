@@ -63,8 +63,6 @@ interface PrismaFieldProviderConfig {
   triggerChars: string[];
 }
 
-type VarName = "pphp" | "store" | "searchParams";
-
 const classNameMap: Record<
   VarName,
   "PPHP" | "PPHPLocalStore" | "SearchParamsManager"
@@ -914,11 +912,11 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.languages.createDiagnosticCollection("js-vars");
   context.subscriptions.push(diagnosticCollection, jsVarDiagnostics);
 
-  // Register language features for PHP.
   context.subscriptions.push(
     registerPhpHoverProvider(),
     registerPhpDefinitionProvider(),
-    registerPhpCompletionProvider()
+    registerPhpMarkupCompletionProvider(), // outside <script>
+    registerPhpScriptCompletionProvider() // inside  <script>
   );
 
   // Register the command for auto-import.
@@ -1594,56 +1592,140 @@ const PHP_SELECTOR: vscode.DocumentSelector = [
   { language: "plaintext", scheme: "untitled" }, // brand-new Untitled-x
 ];
 
-// Completion provider for PHP tags and custom snippet insertion.
-const registerPhpCompletionProvider = () => {
-  return vscode.languages.registerCompletionItemProvider(
+const VAR_NAMES = ["pphp", "store", "searchParams"] as const;
+type VarName = (typeof VAR_NAMES)[number];
+
+const CLS_MAP: Record<VarName, keyof typeof classStubs> = {
+  pphp: "PPHP",
+  store: "PPHPLocalStore",
+  searchParams: "SearchParamsManager",
+};
+
+/* inside <script>? ------------------------------------------------------- */
+const insideScript = (doc: vscode.TextDocument, pos: vscode.Position) => {
+  const txt = doc.getText();
+  const offset = doc.offsetAt(pos);
+  const before = txt.slice(0, offset);
+  return (
+    (before.match(/<script\b/gi) || []).length >
+    (before.match(/<\/script>/gi) || []).length
+  );
+};
+
+/* top-level var completions --------------------------------------------- */
+const variableItems = (prefix: string) =>
+  VAR_NAMES.filter((v) => v.startsWith(prefix)).map(
+    (v) => new vscode.CompletionItem(v, vscode.CompletionItemKind.Variable)
+  );
+
+/* member completions  pphp.|store.|… ------------------------------------ */
+const memberItems = (line: string) => {
+  const m = /(pphp|store|searchParams)\.\w*$/.exec(line);
+  if (!m) {
+    return;
+  }
+  const cls = CLS_MAP[m[1] as VarName];
+  return classStubs[cls].map((stub) => {
+    const kind = stub.signature.includes("(")
+      ? vscode.CompletionItemKind.Method
+      : vscode.CompletionItemKind.Property;
+    const it = new vscode.CompletionItem(stub.name, kind);
+    it.detail = stub.signature;
+    return it;
+  });
+};
+
+/* ────────────────────────────────────────────────────────────── *
+ *  1️⃣  completions INSIDE <script> … </script>                  *
+ * ────────────────────────────────────────────────────────────── */
+
+const registerPhpScriptCompletionProvider = () =>
+  vscode.languages.registerCompletionItemProvider(
     PHP_SELECTOR,
     {
-      async provideCompletionItems(document, position) {
-        const fullBefore = document.getText(
-          new vscode.Range(new vscode.Position(0, 0), position)
+      provideCompletionItems(doc, pos) {
+        if (!insideScript(doc, pos)) {
+          return;
+        }
+
+        const line = doc.lineAt(pos.line).text;
+        const uptoCursor = line.slice(0, pos.character);
+
+        /* a) member list after the dot */
+        const mem = memberItems(uptoCursor);
+        if (mem?.length) {
+          return mem;
+        }
+
+        /* b) variable list while typing “pph…” etc. */
+        const prefix = uptoCursor.match(/([A-Za-z_]*)$/)?.[1] ?? "";
+        if (prefix.length) {
+          return variableItems(prefix);
+        }
+
+        return;
+      },
+    },
+    ".", // trigger for member list
+    ..."abcdefghijklmnopqrstuvwxyz".split("") // make vars appear on letters
+  );
+
+/* ────────────────────────────────────────────────────────────── *
+ *  2️⃣  completions OUTSIDE <script>  (existing behaviour)       *
+ * ────────────────────────────────────────────────────────────── */
+
+const registerPhpMarkupCompletionProvider = () =>
+  vscode.languages.registerCompletionItemProvider(
+    PHP_SELECTOR,
+    {
+      async provideCompletionItems(doc, pos) {
+        if (insideScript(doc, pos)) {
+          return;
+        }
+
+        const fullBefore = doc.getText(
+          new vscode.Range(new vscode.Position(0, 0), pos)
         );
+        const line = doc.lineAt(pos.line).text;
+        const uptoCursor = line.slice(0, pos.character);
+
+        /* ⓵ bail-outs that existed before ----------------------- */
         if (isInsidePrismaCall(fullBefore)) {
           return [];
         }
-
-        const line = document.lineAt(position.line).text;
-        const uptoCursor = line.slice(0, position.character);
         if (/^\s*<\?[A-Za-z=]*$/i.test(uptoCursor)) {
-          return [];
-        }
-        if (
-          isInsideScriptTag(document.getText(), document.offsetAt(position))
-        ) {
           return [];
         }
         if (isInsideMustache(fullBefore)) {
           return [];
         }
 
-        const memberCompletions = getMemberCompletions(line);
-        if (memberCompletions) {
-          return memberCompletions;
+        /* ⓶ member completions  (phpx.prop inside HTML attr JS?) */
+        const mem = memberItems(uptoCursor);
+        if (mem?.length) {
+          return mem;
         }
 
-        const completions = await buildComponentCompletions(
-          document,
-          line,
-          position
-        );
+        /* ⓷ top-level var names */
+        const prefix = uptoCursor.match(/([A-Za-z_]*)$/)?.[1] ?? "";
+        if (prefix.length) {
+          const vars = variableItems(prefix);
+          if (vars.length) {
+            return vars;
+          }
+        }
 
-        // Also add phpxclass snippet
-        completions.push(...maybeAddPhpXClassSnippet(document, line, position));
-
-        return completions;
+        /* ⓸ component + snippet completions (unchanged) -------- */
+        const items = await buildComponentCompletions(doc, line, pos);
+        items.push(...maybeAddPhpXClassSnippet(doc, line, pos));
+        return items;
       },
     },
     ".",
     "p",
     "s",
-    "_" // now fires on those keys too
+    "_" // triggers as before
   );
-};
 
 function isInsidePrismaCall(fullBefore: string): boolean {
   const prismaIndex = fullBefore.lastIndexOf("$prisma->");
@@ -1659,35 +1741,10 @@ function isInsidePrismaCall(fullBefore: string): boolean {
   return false;
 }
 
-function isInsideScriptTag(fullText: string, offset: number): boolean {
-  const before = fullText.slice(0, offset);
-  const scriptOpens = (before.match(/<script\b/gi) || []).length;
-  const scriptCloses = (before.match(/<\/script>/gi) || []).length;
-  return scriptOpens > scriptCloses;
-}
-
 function isInsideMustache(before: string): boolean {
   const lastOpen = before.lastIndexOf("{{");
   const lastClose = before.lastIndexOf("}}");
   return lastOpen > lastClose;
-}
-
-function getMemberCompletions(
-  line: string
-): vscode.CompletionItem[] | undefined {
-  const memberMatch = line.match(/(pphp|store|searchParams)\.\w*$/);
-  if (memberMatch) {
-    const varName = memberMatch[1] as VarName;
-    const clsName = classNameMap[varName];
-    return classStubs[clsName].map((m) => {
-      const kind = m.signature.includes("(")
-        ? vscode.CompletionItemKind.Method
-        : vscode.CompletionItemKind.Property;
-      const item = new vscode.CompletionItem(m.name, kind);
-      item.detail = m.signature;
-      return item;
-    });
-  }
 }
 
 async function buildComponentCompletions(
