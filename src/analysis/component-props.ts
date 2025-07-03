@@ -63,6 +63,17 @@ function classify(raw: string): Primitive {
 }
 
 export function isAllowed(prop: PropMeta, raw: string): boolean {
+  // 🚩 NEW: If there are specific allowed literals, check those first
+  if (prop.allowed) {
+    const allowedValues = prop.allowed.split("|").map((v) => v.trim());
+    if (allowedValues.includes(raw)) {
+      return true; // Value is explicitly in the allowed list
+    }
+    // If specific values are defined but this value isn't in them, it's not allowed
+    return false;
+  }
+
+  // Original type-based validation (fallback for when no specific values are defined)
   const allowed = splitTypes(prop.type);
   if (allowed.includes("mixed")) {
     return true;
@@ -159,10 +170,6 @@ function inferTypeFromValue(v: any | undefined): string {
 /* ------------------------------------------------------------- *
  * 1.  helper: extrae la primera doc-comment relevante
  * ------------------------------------------------------------- */
-/**
- * Devuelve la línea @property o @var que hace referencia a la
- * propiedad dada; si no existe, devuelve undefined.
- */
 function extractDocForProp(
   node: any,
   allComments: any[],
@@ -305,7 +312,14 @@ export class ComponentPropsProvider {
             const raw = mProp[1]; // ?int  ó  string[]
             optional = raw.startsWith("?");
             finalType = raw.replace(/^\?/, ""); // quita el "?"
-            allowedLiterals = mProp[2]; // 1|2|3|4|5|6
+
+            // 🚩 FIX: Only set allowedLiterals if it contains multiple values (|)
+            const defaultValuePart = mProp[2]; // 1|2|3|4|5|6 OR 'Your Idea'
+            if (defaultValuePart && defaultValuePart.includes("|")) {
+              allowedLiterals = defaultValuePart; // Multiple values = restrictions
+            }
+            // If it's a single value (like 'Your Idea'), don't set allowedLiterals
+            // This allows any value of the specified type
           } else {
             /* @var fallback ↓ */
             const mVar = /@var\s+([^\s]+)/i.exec(docRaw);
