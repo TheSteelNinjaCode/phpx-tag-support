@@ -45,23 +45,6 @@ interface HeredocBlock {
   content: string;
   startIndex: number;
 }
-interface PrismaFieldProviderConfig {
-  /**
-   * A regex to pick up all calls of this op and capture the model name in group 1.
-   * Should match up to ( but not include the final quote/[… trigger.
-   */
-  callRegex: RegExp;
-  /**
-   * The human-friendly label used in the Markdown docs:
-   * e.g. "*optional field*" vs "*required filter*"
-   */
-  optionalLabel: string;
-  requiredLabel: string;
-  /**
-   * Characters that should trigger this provider (e.g. "'" and '"')
-   */
-  triggerChars: string[];
-}
 
 const classNameMap: Record<
   VarName,
@@ -823,63 +806,6 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  /* ── attr="…" VALUE completion ─────────────────────────────── */
-  context.subscriptions.push(
-    vscode.languages.registerCompletionItemProvider(
-      "php",
-      {
-        provideCompletionItems(doc, pos) {
-          const line = doc.lineAt(pos.line).text;
-          const uptoCur = line.slice(0, pos.character);
-
-          /* ① we must be inside  … name="|" …  ------------------- */
-          const attrValRe =
-            /<\s*([A-Za-z0-9_]+)[^>]*\b([A-Za-z0-9_-]+)\s*=\s*"([^"]*)$/;
-          const m = attrValRe.exec(uptoCur);
-          if (!m) {
-            return;
-          }
-
-          const [, tag, attrName, partial] = m;
-
-          /* ② find the prop meta (has name, type, default, doc) -- */
-          const meta = propsProvider
-            .getProps(tag)
-            .find((p) => p.name === attrName);
-          if (!meta?.default) {
-            return;
-          }
-
-          /* ③ collect options ----------------------------------- */
-          let options: string[];
-          if (Array.isArray(meta.default)) {
-            // future‑proof: default stored as an array
-            options = meta.default;
-          } else {
-            // pipe‑separated string  'a|b|c'
-            options = String(meta.default).split("|");
-          }
-
-          return options
-            .filter((opt) => opt.startsWith(partial)) // honour prefix
-            .map((opt) => {
-              const it = new vscode.CompletionItem(
-                opt,
-                vscode.CompletionItemKind.EnumMember
-              );
-              it.insertText = opt; // just the value
-              it.range = new vscode.Range(
-                pos.translate(0, -partial.length),
-                pos
-              );
-              return it;
-            });
-        },
-      },
-      '"' // trigger when user types a quote inside attr value
-    )
-  );
-
   const fqcnToFile: FqcnToFile = (fqcn) => {
     const entry = getComponentsFromClassLog().get(getLastPart(fqcn));
     if (!entry) {
@@ -1317,59 +1243,112 @@ function registerAttributeValueCompletionProvider(
       ): vscode.CompletionItem[] {
         const line = document.lineAt(position.line).text;
         const cursorOffset = position.character;
-        
+
         // Check if cursor is inside attribute value quotes
         const valueContext = getAttributeValueContext(line, cursorOffset);
         if (!valueContext) {
           return [];
         }
-        
+
         const { tagName, attributeName, currentValue } = valueContext;
-        
+
         // Get props for this component
         const props = propsProvider.getProps(tagName);
-        const propMeta = props.find(p => p.name === attributeName);
-        
+        const propMeta = props.find((p) => p.name === attributeName);
+
         if (!propMeta || !propMeta.allowed) {
           return [];
         }
-        
-        // Create completion items for allowed values
-        const allowedValues = propMeta.allowed.split("|").map(v => v.trim());
-        
-        return allowedValues.map(value => {
+
+        /* ──────────────────────────────────────────────────────────────
+         * COMBINE AND DEDUPLICATE VALUES (same logic as buildDynamicAttrItems)
+         * ─────────────────────────────────────────────────────────── */
+        const combinedValues = new Set<string>();
+
+        // Add documentation values first
+        if (propMeta.allowed) {
+          if (propMeta.allowed.includes("|")) {
+            propMeta.allowed.split("|").forEach((val) => {
+              const trimmedVal = val.trim();
+              if (trimmedVal) {
+                // Only add non-empty values
+                combinedValues.add(trimmedVal);
+              }
+            });
+          } else {
+            const trimmedVal = propMeta.allowed.trim();
+            if (trimmedVal) {
+              combinedValues.add(trimmedVal);
+            }
+          }
+        }
+
+        // Add property default value (ensure no duplicates)
+        if (
+          propMeta.default &&
+          propMeta.default !== "null" &&
+          propMeta.default.trim()
+        ) {
+          combinedValues.add(propMeta.default.trim());
+        }
+
+        // Convert to array and prioritize default value
+        let finalValues: string[];
+        if (
+          propMeta.default &&
+          propMeta.default !== "null" &&
+          combinedValues.has(propMeta.default.trim())
+        ) {
+          const defaultVal = propMeta.default.trim();
+          const otherValues = Array.from(combinedValues).filter(
+            (v) => v !== defaultVal
+          );
+          finalValues = [defaultVal, ...otherValues.sort()];
+        } else {
+          finalValues = Array.from(combinedValues).sort();
+        }
+
+        // Create completion items for the combined values
+        return finalValues.map((value) => {
           const item = new vscode.CompletionItem(
             value,
             vscode.CompletionItemKind.Value
           );
-          
+
           // Replace the entire quoted value
           item.insertText = value;
           item.detail = `${propMeta.type} value`;
-          
+
           // Add documentation
           const md = new vscode.MarkdownString();
-          md.appendCodeblock(`${attributeName}="${value}"`, 'php');
-          md.appendMarkdown(`\n\nValid value for **${attributeName}** property`);
-          
-          if (propMeta.default && propMeta.default === value) {
-            md.appendMarkdown(`\n\n_This is the default value_`);
+          md.appendCodeblock(`${attributeName}="${value}"`, "php");
+          md.appendMarkdown(
+            `\n\nValid value for **${attributeName}** property`
+          );
+
+          // Mark default value with special styling and preselect it
+          if (propMeta.default && propMeta.default.trim() === value) {
+            md.appendMarkdown(`\n\n✨ _This is the default value_`);
             item.preselect = true;
+            item.detail = `${propMeta.type} value (default)`;
           }
-          
+
           item.documentation = md;
-          
+
           return item;
         });
-      }
+      },
     },
     '"', // Trigger on quote
     "'", // Trigger on single quote
-    " "  // Trigger on space
+    " " // Trigger on space
   );
 }
 
-function getAttributeValueContext(line: string, cursorOffset: number): {
+function getAttributeValueContext(
+  line: string,
+  cursorOffset: number
+): {
   tagName: string;
   attributeName: string;
   currentValue: string;
@@ -1377,34 +1356,34 @@ function getAttributeValueContext(line: string, cursorOffset: number): {
   // Look for pattern: <TagName ... attributeName="currentValue|cursor"
   const beforeCursor = line.substring(0, cursorOffset);
   const afterCursor = line.substring(cursorOffset);
-  
+
   // Find the opening tag
   const tagMatch = /<\s*([A-Z][A-Za-z0-9_]*)\b[^>]*$/.exec(beforeCursor);
   if (!tagMatch) {
     return null;
   }
-  
+
   const tagName = tagMatch[1];
-  
+
   // Find the attribute we're currently in
   const attrMatch = /([A-Za-z0-9_-]+)\s*=\s*"([^"]*?)$/.exec(beforeCursor);
   if (!attrMatch) {
     return null;
   }
-  
+
   const attributeName = attrMatch[1];
   const currentValue = attrMatch[2];
-  
+
   // Make sure we're inside quotes (not after closing quote)
   const nextQuoteIndex = afterCursor.indexOf('"');
   if (nextQuoteIndex === -1) {
     return null; // No closing quote found
   }
-  
+
   return {
     tagName,
     attributeName,
-    currentValue
+    currentValue,
   };
 }
 
