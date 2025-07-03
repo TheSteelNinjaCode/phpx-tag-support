@@ -26,66 +26,37 @@ interface PropMeta {
 
 type Cached = { mtime: number; props: PropMeta[] };
 
-type Primitive =
-  | "string"
-  | "bool"
-  | "boolean"
-  | "int"
-  | "float"
-  | "array"
-  | "null"
-  | "mixed";
+export function isAllowed(meta: any, value: string): boolean {
+  // If no allowed values specified, only check if value matches the type
+  if (!meta.allowed) {
+    return isValidType(meta.type, value);
+  }
 
-function splitTypes(typeStr: string): Primitive[] {
-  return typeStr.split("|").map((t) => t.trim().toLowerCase()) as Primitive[];
+  // If allowed values are specified, check against them
+  const allowedValues = meta.allowed.split("|").map((v: string) => v.trim());
+  return allowedValues.includes(value);
 }
 
-function classify(raw: string): Primitive {
-  const v = raw.trim().toLowerCase();
-
-  if (v === "" || v === "null") {
-    return "null";
-  }
-  if (v === "true" || v === "false" || v === "1" || v === "0") {
-    return "bool";
-  }
-  if (/^-?\d+$/.test(v)) {
-    return "int";
-  }
-  if (/^-?\d+\.\d+$/.test(v)) {
-    return "float";
-  }
-  if (v.startsWith("[") && v.endsWith("]")) {
-    return "array";
+function isValidType(type: string, value: string): boolean {
+  if (!value.trim()) {
+    return false; // Empty values are not valid
   }
 
-  return "string"; // fallback – every HTML attr is a string anyway
-}
-
-export function isAllowed(prop: PropMeta, raw: string): boolean {
-  // 🚩 NEW: If there are specific allowed literals, check those first
-  if (prop.allowed) {
-    const allowedValues = prop.allowed.split("|").map((v) => v.trim());
-    if (allowedValues.includes(raw)) {
-      return true; // Value is explicitly in the allowed list
-    }
-    // If specific values are defined but this value isn't in them, it's not allowed
-    return false;
+  switch (type.toLowerCase()) {
+    case "int":
+    case "integer":
+      return /^\d+$/.test(value);
+    case "float":
+    case "double":
+      return /^\d+\.?\d*$/.test(value);
+    case "bool":
+    case "boolean":
+      return ["true", "false", "1", "0"].includes(value.toLowerCase());
+    case "string":
+      return true; // Any non-empty string is valid
+    default:
+      return true; // Unknown types are allowed
   }
-
-  // Original type-based validation (fallback for when no specific values are defined)
-  const allowed = splitTypes(prop.type);
-  if (allowed.includes("mixed")) {
-    return true;
-  }
-
-  const kind = classify(raw);
-  return (
-    allowed.includes(kind) || // primitive match
-    (kind === "bool" && allowed.includes("boolean")) ||
-    (kind === "int" && allowed.includes("float")) || // int ⊂ float
-    (kind === "string" && allowed.includes("array"))
-  ); // JSON-like
 }
 
 function typeToString(t: any | undefined): string {
@@ -302,24 +273,41 @@ export class ComponentPropsProvider {
         let optional = false;
 
         if (docRaw) {
-          /* @property ↓ */
+          /* @property ↓ - IMPROVED REGEX TO CAPTURE FULL COMMENT */
           const rx = new RegExp(
-            `@property\\s+([^\\s]+)\\s+\\$${name}\\s*(?:=\\s*([^\\s]+))?`,
+            `@property\\s+([^\\s]+)\\s+\\$${name}\\s*(.*)`,
             "i"
           );
           const mProp = rx.exec(docRaw);
           if (mProp) {
-            const raw = mProp[1]; // ?int  ó  string[]
-            optional = raw.startsWith("?");
-            finalType = raw.replace(/^\?/, ""); // quita el "?"
+            const rawType = mProp[1]; // ?int
+            const fullComment = mProp[2]?.trim(); // = 1|2|3|4|5|6 Your Idea
 
-            // 🚩 FIX: Only set allowedLiterals if it contains multiple values (|)
-            const defaultValuePart = mProp[2]; // 1|2|3|4|5|6 OR 'Your Idea'
-            if (defaultValuePart && defaultValuePart.includes("|")) {
-              allowedLiterals = defaultValuePart; // Multiple values = restrictions
+            optional = rawType.startsWith("?");
+            finalType = rawType.replace(/^\?/, ""); // Remove the "?"
+
+            // Parse the comment part after the type
+            if (fullComment) {
+              // Look for pattern: = value(s) [optional description]
+              const commentMatch = /^\s*=\s*([^\s]+)(?:\s+(.*))?/.exec(
+                fullComment
+              );
+              if (commentMatch) {
+                const valuesPart = commentMatch[1]; // 1|2|3|4|5|6
+                const description = commentMatch[2]; // Your Idea
+
+                // Check if it contains multiple values (pipe-separated)
+                if (valuesPart.includes("|")) {
+                  allowedLiterals = valuesPart;
+                } else {
+                  // Single value - could be default, don't restrict
+                  // Only set default if it's not a description
+                  if (!description && !isNaN(Number(valuesPart))) {
+                    // It's a numeric default, don't restrict
+                  }
+                }
+              }
             }
-            // If it's a single value (like 'Your Idea'), don't set allowedLiterals
-            // This allows any value of the specified type
           } else {
             /* @var fallback ↓ */
             const mVar = /@var\s+([^\s]+)/i.exec(docRaw);
@@ -427,9 +415,7 @@ export function buildDynamicAttrItems(
 ): vscode.CompletionItem[] {
   return provider
     .getProps(tag)
-    .filter(
-      ({ name }) => !written.has(name) && name.startsWith(partial) // solo props no escritas + coincide con lo tecleado
-    )
+    .filter(({ name }) => !written.has(name) && name.startsWith(partial))
     .map(
       ({
         name,
@@ -437,66 +423,192 @@ export function buildDynamicAttrItems(
         default: def,
         doc,
         optional,
-        allowed, // ← NUEVO
+        allowed,
       }): vscode.CompletionItem => {
         /* ──────────────────────────────────────────────────────────────
-         * 1.  item básico
+         * 1. Combine property value with documentation values (IMPROVED)
+         * ─────────────────────────────────────────────────────────── */
+        const combinedValues = new Set<string>();
+
+        // Add documentation values first
+        if (allowed) {
+          if (allowed.includes("|")) {
+            allowed.split("|").forEach((val) => {
+              const trimmedVal = val.trim();
+              if (trimmedVal) {
+                // Only add non-empty values
+                combinedValues.add(trimmedVal);
+              }
+            });
+          } else {
+            const trimmedVal = allowed.trim();
+            if (trimmedVal) {
+              combinedValues.add(trimmedVal);
+            }
+          }
+        }
+
+        // Add property default value (ensure no duplicates)
+        if (def && def !== "null" && def.trim()) {
+          combinedValues.add(def.trim());
+        }
+
+        // Create final allowed values string - maintain original order with default first if present
+        let finalAllowed: string | undefined;
+        if (combinedValues.size > 0) {
+          const valuesArray = Array.from(combinedValues);
+
+          // If default exists and is in the allowed values, put it first
+          if (def && def !== "null" && combinedValues.has(def.trim())) {
+            const defaultVal = def.trim();
+            const otherValues = valuesArray.filter((v) => v !== defaultVal);
+            finalAllowed = [defaultVal, ...otherValues].join("|");
+          } else {
+            finalAllowed = valuesArray.sort().join("|");
+          }
+        }
+
+        /* ──────────────────────────────────────────────────────────────
+         * 2. Basic completion item setup
          * ─────────────────────────────────────────────────────────── */
         const item = new vscode.CompletionItem(
           name,
           vscode.CompletionItemKind.Field
         );
 
-        // inserta  foo="$0"
+        // Simplified insertion - always use placeholder, let value completion provider handle values
         item.insertText = new vscode.SnippetString(`${name}="$0"`);
 
+        // Set cursor position after insertion to trigger value completion
+        item.command = {
+          command: "editor.action.triggerSuggest",
+          title: "Trigger Suggest",
+        };
+
         /* ──────────────────────────────────────────────────────────────
-         * 2.  detail (lista desplegable)
+         * 3. Detail text (shown in completion dropdown)
          * ─────────────────────────────────────────────────────────── */
         const reqFlag = optional ? "(optional)" : "(required)";
-        const allowedInfo = allowed ? ` ∈ {${allowed}}` : "";
+        const allowedInfo = finalAllowed ? ` ∈ {${finalAllowed}}` : "";
 
         item.detail = def
-          ? `${reqFlag}  : ${type}${allowedInfo} = ${def}`
-          : `${reqFlag}  : ${type}${allowedInfo}`;
+          ? `${reqFlag} : ${type}${allowedInfo} = ${def}`
+          : `${reqFlag} : ${type}${allowedInfo}`;
 
         /* ──────────────────────────────────────────────────────────────
-         * 3.  documentación / hover
+         * 4. Documentation markdown (shown in hover/documentation panel)
          * ─────────────────────────────────────────────────────────── */
         const md = new vscode.MarkdownString(undefined, true);
 
-        // firma
-        md.appendCodeblock(
-          def
-            ? `${name}: ${type}${allowed ? `  /* ${allowed} */` : ""} = ${def}`
-            : `${name}: ${type}${allowed ? `  /* ${allowed} */` : ""}`,
-          "php"
-        );
+        // Property signature
+        const signature = def
+          ? `${name}: ${type}${
+              finalAllowed ? ` /* ${finalAllowed} */` : ""
+            } = ${def}`
+          : `${name}: ${type}${finalAllowed ? ` /* ${finalAllowed} */` : ""}`;
 
-        // opcional vs requerido
+        md.appendCodeblock(signature, "php");
+
+        // Required/Optional status with better styling
         md.appendMarkdown(
           `\n\n${
             optional
-              ? "_This prop can be omitted (nullable)_"
-              : "_This prop is required_"
+              ? "🔸 _This property is **optional** (nullable)_"
+              : "🔹 _This property is **required**_"
           }`
         );
 
-        // literales permitidos
-        if (allowed) {
-          md.appendMarkdown(
-            `\n\n_Accepts only:_ **${allowed.replace(/\|/g, " · ")}**`
-          );
+        // Allowed values section with enhanced formatting
+        if (finalAllowed) {
+          const allowedValues = finalAllowed.includes("|")
+            ? finalAllowed
+                .split("|")
+                .map((val) => val.trim())
+                .filter((val) => val) // Remove empty values
+                .map((val) => `\`${val}\``)
+                .join(" • ")
+            : `\`${finalAllowed}\``;
+
+          md.appendMarkdown(`\n\n**🎯 Allowed values:** ${allowedValues}`);
+
+          // Add helpful hint for multiple values
+          if (finalAllowed.includes("|")) {
+            md.appendMarkdown(
+              `\n\n💡 _Press **Ctrl+Space** inside the quotes to see all available options_`
+            );
+          }
         }
 
-        // docstring original
+        // Default value information with better styling
+        if (def) {
+          md.appendMarkdown(`\n\n**📌 Default value:** \`${def}\``);
+        }
+
+        // Type information
+        md.appendMarkdown(`\n\n**🏷️ Type:** \`${type}\``);
+
+        // Original documentation from PHP docblock
         if (doc) {
-          md.appendMarkdown("\n\n" + doc);
+          md.appendMarkdown(`\n\n---\n\n📝 **Documentation:**\n\n${doc}`);
+        }
+
+        // Usage example
+        if (finalAllowed && finalAllowed.includes("|")) {
+          const exampleValue = finalAllowed.split("|")[0].trim();
+          md.appendMarkdown(
+            `\n\n---\n\n**📋 Example:**\n\`\`\`php\n<${tag} ${name}="${exampleValue}" />\n\`\`\``
+          );
+        } else if (def) {
+          md.appendMarkdown(
+            `\n\n---\n\n**📋 Example:**\n\`\`\`php\n<${tag} ${name}="${def}" />\n\`\`\``
+          );
         }
 
         item.documentation = md;
 
-        /* ────────────────────────────────────────────────────────────── */
+        /* ──────────────────────────────────────────────────────────────
+         * 5. Additional completion item properties
+         * ─────────────────────────────────────────────────────────── */
+
+        // Sort priority (required props first, then by name)
+        item.sortText = optional ? `z_${name}` : `a_${name}`;
+
+        // Filter text for better matching
+        item.filterText = name;
+
+        // Preselect logic improvements
+        if (!optional) {
+          // Always preselect required properties
+          item.preselect = true;
+        } else if (finalAllowed && finalAllowed.includes("|")) {
+          // Preselect optional properties with restricted values
+          item.preselect = true;
+        }
+
+        // Enhanced kind based on property characteristics
+        if (finalAllowed && finalAllowed.includes("|")) {
+          item.kind = vscode.CompletionItemKind.Enum;
+        } else if (!optional) {
+          item.kind = vscode.CompletionItemKind.Property;
+        } else {
+          item.kind = vscode.CompletionItemKind.Field;
+        }
+
+        // Add visual indicators through tags
+        const tags: vscode.CompletionItemTag[] = [];
+        if (optional && !def) {
+          // Optional without default - less important
+          tags.push(vscode.CompletionItemTag.Deprecated);
+        }
+        if (tags.length > 0) {
+          item.tags = tags;
+        }
+
+        // Store the final allowed values for the attribute value completion provider
+        // IMPORTANT: This is where value completion gets its data - ensure no duplicates here
+        (item as any).allowedValues = finalAllowed;
+        (item as any).defaultValue = def?.trim();
+
         return item;
       }
     );

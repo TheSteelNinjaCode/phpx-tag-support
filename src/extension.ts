@@ -1128,7 +1128,8 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     stringDecorationType,
     numberDecorationType,
-    registerPrismaFieldProvider()
+    registerPrismaFieldProvider(),
+    registerAttributeValueCompletionProvider(propsProvider)
   );
 
   const createDiags =
@@ -1266,10 +1267,15 @@ function validateComponentPropValues(
         const absStart = tagStart + attrRelOffset + attrMatch[0].indexOf(value);
         const absEnd = absStart + value.length;
 
+        // Better error message showing allowed values
+        const allowedInfo = meta.allowed
+          ? `Allowed values: ${meta.allowed.replace(/\|/g, ", ")}`
+          : `Expected type: ${meta.type}`;
+
         diags.push(
           new vscode.Diagnostic(
             new vscode.Range(doc.positionAt(absStart), doc.positionAt(absEnd)),
-            `Invalid value "${value}". Allowed types: ${meta.type}`,
+            `Invalid value "${value}". ${allowedInfo}`,
             vscode.DiagnosticSeverity.Warning
           )
         );
@@ -1293,6 +1299,113 @@ function validateComponentPropValues(
   }
 
   ATTR_VALUE_DIAG.set(doc.uri, diags);
+}
+
+/* ────────────────────────────────────────────────────────────── *
+ *        🎯  ATTRIBUTE VALUE COMPLETION PROVIDER                  *
+ * ────────────────────────────────────────────────────────────── */
+
+function registerAttributeValueCompletionProvider(
+  propsProvider: ComponentPropsProvider
+): vscode.Disposable {
+  return vscode.languages.registerCompletionItemProvider(
+    "php",
+    {
+      provideCompletionItems(
+        document: vscode.TextDocument,
+        position: vscode.Position
+      ): vscode.CompletionItem[] {
+        const line = document.lineAt(position.line).text;
+        const cursorOffset = position.character;
+        
+        // Check if cursor is inside attribute value quotes
+        const valueContext = getAttributeValueContext(line, cursorOffset);
+        if (!valueContext) {
+          return [];
+        }
+        
+        const { tagName, attributeName, currentValue } = valueContext;
+        
+        // Get props for this component
+        const props = propsProvider.getProps(tagName);
+        const propMeta = props.find(p => p.name === attributeName);
+        
+        if (!propMeta || !propMeta.allowed) {
+          return [];
+        }
+        
+        // Create completion items for allowed values
+        const allowedValues = propMeta.allowed.split("|").map(v => v.trim());
+        
+        return allowedValues.map(value => {
+          const item = new vscode.CompletionItem(
+            value,
+            vscode.CompletionItemKind.Value
+          );
+          
+          // Replace the entire quoted value
+          item.insertText = value;
+          item.detail = `${propMeta.type} value`;
+          
+          // Add documentation
+          const md = new vscode.MarkdownString();
+          md.appendCodeblock(`${attributeName}="${value}"`, 'php');
+          md.appendMarkdown(`\n\nValid value for **${attributeName}** property`);
+          
+          if (propMeta.default && propMeta.default === value) {
+            md.appendMarkdown(`\n\n_This is the default value_`);
+            item.preselect = true;
+          }
+          
+          item.documentation = md;
+          
+          return item;
+        });
+      }
+    },
+    '"', // Trigger on quote
+    "'", // Trigger on single quote
+    " "  // Trigger on space
+  );
+}
+
+function getAttributeValueContext(line: string, cursorOffset: number): {
+  tagName: string;
+  attributeName: string;
+  currentValue: string;
+} | null {
+  // Look for pattern: <TagName ... attributeName="currentValue|cursor"
+  const beforeCursor = line.substring(0, cursorOffset);
+  const afterCursor = line.substring(cursorOffset);
+  
+  // Find the opening tag
+  const tagMatch = /<\s*([A-Z][A-Za-z0-9_]*)\b[^>]*$/.exec(beforeCursor);
+  if (!tagMatch) {
+    return null;
+  }
+  
+  const tagName = tagMatch[1];
+  
+  // Find the attribute we're currently in
+  const attrMatch = /([A-Za-z0-9_-]+)\s*=\s*"([^"]*?)$/.exec(beforeCursor);
+  if (!attrMatch) {
+    return null;
+  }
+  
+  const attributeName = attrMatch[1];
+  const currentValue = attrMatch[2];
+  
+  // Make sure we're inside quotes (not after closing quote)
+  const nextQuoteIndex = afterCursor.indexOf('"');
+  if (nextQuoteIndex === -1) {
+    return null; // No closing quote found
+  }
+  
+  return {
+    tagName,
+    attributeName,
+    currentValue
+  };
 }
 
 /* ────────────────────────────────────────────────────────────── *
@@ -1753,6 +1866,31 @@ async function buildComponentCompletions(
   position: vscode.Position
 ): Promise<vscode.CompletionItem[]> {
   await loadComponentsFromClassLog();
+
+  /* ‼️ EARLY-EXIT – only suggest components when we are **at** the tag name */
+  const lineText = line.slice(0, position.character);
+  const lt = lineText.lastIndexOf("<");
+
+  if (lt !== -1) {
+    /* ── Case ① we are inside an opening tag -------------------------------- */
+    let head = lineText.slice(lt + 1); // text after the “<”
+    if (head.startsWith("/")) {
+      head = head.slice(1);
+    } // ignore closing-slash
+
+    // any blank OR quote ⇒ we‘re past the tag name (attrs or value) – bail out
+    if (/\s|['"]/.test(head)) {
+      return [];
+    }
+  } else {
+    /* ── Case ② no “<” to the left – user typed “Acco|” first --------------- */
+    // We allow this only if everything before the word is just whitespace.
+    // Otherwise we’d be in the middle of text/JS and shouldn’t offer tags.
+    if (!/^\s*$/.test(lineText.replace(/\w*$/, ""))) {
+      return [];
+    }
+  }
+
   const completions: vscode.CompletionItem[] = [];
 
   const useMap: Map<string, string> = parsePhpUseStatements(document.getText());
