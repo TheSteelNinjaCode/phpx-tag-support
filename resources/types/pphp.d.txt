@@ -62,6 +62,7 @@ declare class PPHP {
     private encryptCallbackName;
     private decryptCallbackName;
     private qsa;
+    private bootstrapDeclarativeState;
     private _inferHierarchyFromEvent;
     callParent<T = any>(functionNameOrFn: string | Function, ...args: any[]): T | null;
     private callParentByName;
@@ -81,6 +82,7 @@ declare class PPHP {
     private initReactiveOn;
     private initLoopBindings;
     private registerLoop;
+    private processIfChainsInFragment;
     private extractComprehensiveLoopDependencies;
     private extractItemPropertiesFromTemplate;
     private parseForExpression;
@@ -92,6 +94,9 @@ declare class PPHP {
     private findItemByKey;
     private processElementBindingsInFragment;
     private processElementBindings;
+    private createElementAttributeTemplateBindingWithItemKey;
+    private createAttributeTemplateUpdaterWithItemKey;
+    private renderAttributeTemplate;
     private createElementBindingWithItemKey;
     private createElementBindingUpdaterWithItemKey;
     private getItemKey;
@@ -101,9 +106,12 @@ declare class PPHP {
     private renderElementBinding;
     private applyAttributeBinding;
     private processEventHandlersInFragment;
+    private _idxOf;
     private updateItemNodes;
+    private updateConditionalNodes;
     private updateNodesContent;
     private updateElementContent;
+    private updateElementTemplateAttributes;
     private updateElementBindingsContent;
     private createLoopUpdater;
     private captureFocusState;
@@ -131,9 +139,12 @@ declare class PPHP {
     private getScopedFunction;
     private processInlineModuleScripts;
     private injectScopedVariables;
+    private extractStateVariables;
     private extractDeclaredVariables;
     private findScopedKeyForVariable;
     private extractVariableReferences;
+    private isActualFunctionParameter;
+    private isInDestructuringDeclaration;
     private hasInScopedContext;
     private _registerScopedFunction;
     private extractSetters;
@@ -202,7 +213,6 @@ declare class PPHP {
     private isAsyncFunction;
     private containsAwait;
     private handleInvokeError;
-    private clearHandlerCaches;
     private handleParsedCallback;
     private handleUndefinedFunction;
     private handleAfterRequest;
@@ -244,8 +254,8 @@ declare class PPHP {
     private parseTransition;
     private fadeOut;
     private fadeIn;
+    private reconcileHead;
     private updateDocumentContent;
-    private rerunInlineScripts;
     private scrubTemplateValueAttributes;
     private restoreScrollPositions;
     private PRESERVE_HANDLERS;

@@ -21,60 +21,10 @@ interface PropMeta {
   default?: string; //  already‑formatted literal
   doc?: string; //  first line of PHP‑Doc
   optional: boolean; // true ↔ nullable (…|null)
+  allowed?: string; //  allowed literals, e.g. "1|2|3|4|5|6"
 }
 
 type Cached = { mtime: number; props: PropMeta[] };
-
-type Primitive =
-  | "string"
-  | "bool"
-  | "boolean"
-  | "int"
-  | "float"
-  | "array"
-  | "null"
-  | "mixed";
-
-function splitTypes(typeStr: string): Primitive[] {
-  return typeStr.split("|").map((t) => t.trim().toLowerCase()) as Primitive[];
-}
-
-function classify(raw: string): Primitive {
-  const v = raw.trim().toLowerCase();
-
-  if (v === "" || v === "null") {
-    return "null";
-  }
-  if (v === "true" || v === "false" || v === "1" || v === "0") {
-    return "bool";
-  }
-  if (/^-?\d+$/.test(v)) {
-    return "int";
-  }
-  if (/^-?\d+\.\d+$/.test(v)) {
-    return "float";
-  }
-  if (v.startsWith("[") && v.endsWith("]")) {
-    return "array";
-  }
-
-  return "string"; // fallback – every HTML attr is a string anyway
-}
-
-export function isAllowed(prop: PropMeta, raw: string): boolean {
-  const allowed = splitTypes(prop.type);
-  if (allowed.includes("mixed")) {
-    return true;
-  }
-
-  const kind = classify(raw);
-  return (
-    allowed.includes(kind) || // primitive match
-    (kind === "bool" && allowed.includes("boolean")) ||
-    (kind === "int" && allowed.includes("float")) || // int ⊂ float
-    (kind === "string" && allowed.includes("array"))
-  ); // JSON-like
-}
 
 function typeToString(t: any | undefined): string {
   if (!t) {
@@ -156,6 +106,60 @@ function inferTypeFromValue(v: any | undefined): string {
 }
 
 /* ------------------------------------------------------------- *
+ * 1.  helper: extrae la primera doc-comment relevante
+ * ------------------------------------------------------------- */
+/**
+ * Devuelve la línea @property o @var que hace referencia a la
+ * propiedad dada; si no existe, devuelve undefined.
+ */
+function extractDocForProp(
+  node: any,
+  allComments: any[],
+  propName: string
+): string | undefined {
+  /* 1) node.doc generado por extractDoc:true */
+  if (node.doc) {
+    const body = (node.doc.value ?? node.doc).replace(/^\*\s*/gm, "").trim();
+    if (new RegExp(`\\$${propName}\\b`).test(body)) {
+      return body;
+    }
+  }
+
+  /* 2) comentarios adjuntos al nodo */
+  for (const c of node.leadingComments ?? []) {
+    if (c.kind !== "commentblock") {
+      continue;
+    }
+    const body = (c.value ?? c)
+      .replace(/^\s*\/\*\*?/, "")
+      .replace(/\*\/\s*$/, "")
+      .replace(/^\s*\*\s?/gm, "")
+      .trim();
+    if (new RegExp(`\\$${propName}\\b`).test(body) || /@var\s+/.test(body)) {
+      return body;
+    }
+  }
+
+  /* 3) último bloque antes del nodo que haga match */
+  const nodeStart = node.loc?.start.offset ?? 0;
+  for (let i = allComments.length - 1; i >= 0; i--) {
+    const c = allComments[i];
+    if (c.kind !== "commentblock" || c.offset >= nodeStart) {
+      continue;
+    }
+    const body = (c.value ?? c)
+      .replace(/^\s*\/\*\*?/, "")
+      .replace(/\*\/\s*$/, "")
+      .replace(/^\s*\*\s?/gm, "")
+      .trim();
+    if (new RegExp(`\\$${propName}\\b`).test(body) || /@var\s+/.test(body)) {
+      return body;
+    }
+    break; // el primero que no hace match corta la búsqueda
+  }
+}
+
+/* ------------------------------------------------------------- *
  *  ComponentPropsProvider – extracts public props from PHPX classes
  * ------------------------------------------------------------- */
 export class ComponentPropsProvider {
@@ -167,22 +171,23 @@ export class ComponentPropsProvider {
   ) {}
 
   public getProps(tag: string): PropMeta[] {
-    /* 1️⃣  where is the PHP file for this tag? */
+    /* 1️⃣ locate file ------------------------------------------------- */
     const fqcn = this.tagMap.get(tag);
     const file = fqcn && this.fqcnToFile(fqcn);
     if (!file || !fs.existsSync(file)) {
       return [];
     }
 
-    /* 2️⃣  up‑to‑date cache hit?  -------------------------------- */
-    const mtime = fs.statSync(file).mtimeMs; // current disk stamp
-    const hit = this.cache.get(tag); // {mtime, props}
+    /* 2️⃣ cache ------------------------------------------------------- */
+    const mtime = fs.statSync(file).mtimeMs;
+    const hit = this.cache.get(tag);
     if (hit && hit.mtime === mtime) {
       return hit.props;
-    } // still fresh
+    }
 
-    /* 3️⃣  parse + extract  -------------------------------------- */
+    /* 3️⃣ parse ------------------------------------------------------- */
     const ast = phpEngine.parseCode(fs.readFileSync(file, "utf8"), file);
+    const comments = ast.comments ?? [];
     const props: PropMeta[] = [];
 
     this.walk(ast, (node) => {
@@ -195,34 +200,25 @@ export class ComponentPropsProvider {
       }
 
       const stmt: any = node;
-      const isPublic =
-        ((stmt.flags ?? 0) & FLAG_PUBLIC) !== 0 || stmt.visibility === "public";
-      if (!isPublic) {
+      if (
+        !(
+          ((stmt.flags ?? 0) & FLAG_PUBLIC) !== 0 ||
+          stmt.visibility === "public"
+        )
+      ) {
         return;
       }
 
-      /* PHP‑Doc (optional) */
-      const docRaw = (stmt.leadingComments ?? [])
-        .filter(
-          (c: any) => c.kind === "commentblock" && c.value.startsWith("*")
-        )
-        .map((c: any) => c.value.replace(/^\*\s*/gm, "").trim())
-        .pop();
+      const members =
+        node.kind !== "classconstant"
+          ? stmt.properties ?? []
+          : stmt.constants ?? [];
 
-      /* ───────────────────────────────────────────────────────────── */
-      /* A) ‑‑‑ properties & promoted‑properties ‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑ */
-      if (node.kind !== "classconstant") {
-        for (const p of stmt.properties ?? []) {
-          handleMember(p, p.name, p.value);
-        }
-      } else {
-        /* B) ‑‑‑ class constants ‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑ */
-        for (const c of stmt.constants ?? []) {
-          handleMember(c, c.name, c.value);
-        }
+      for (const m of members) {
+        handleMember(m, m.name, m.value);
       }
-      /* ───────────────────────────────────────────────────────────── */
 
+      /* ─────────────────────────────────────────────────────────────── */
       function handleMember(
         propNode: any,
         nameNode: any,
@@ -234,57 +230,63 @@ export class ComponentPropsProvider {
           return;
         }
 
-        /* 1️⃣  ── figure out the “raw” type that is written in code ───────── */
-        // use the member’s own type first, fall back to the statement’s
+        /* A) doc-comment (@property / @var) --------------------------- */
+        const docRaw =
+          extractDocForProp(propNode, comments, name) ??
+          extractDocForProp(stmt, comments, name);
+
+        /* B) declared type ------------------------------------------- */
         const rawTypeNode = propNode.type ?? stmt.type;
-        let codeTypeStr: string | undefined =
+        let finalType: string | undefined =
           rawTypeNode && typeToString(rawTypeNode);
 
-        /* 2️⃣  ── PHP-Doc always wins for the *display* type … ────────────── */
-        let finalType: string | undefined = codeTypeStr;
+        let allowedLiterals: string | undefined;
+        let optional = false;
+
         if (docRaw) {
-          const m = /@var\s+([^\s]+)/.exec(docRaw);
-          if (m) {
-            finalType = m[1]; // may or may not contain “null”
+          /* @property ↓ */
+          const rx = new RegExp(
+            `@property\\s+([^\\s]+)\\s+\\$${name}\\s*(?:=\\s*([^\\s]+))?`,
+            "i"
+          );
+          const mProp = rx.exec(docRaw);
+          if (mProp) {
+            const raw = mProp[1]; // ?int  ó  string[]
+            optional = raw.startsWith("?");
+            finalType = raw.replace(/^\?/, ""); // quita el "?"
+            allowedLiterals = mProp[2]; // 1|2|3|4|5|6
+          } else {
+            /* @var fallback ↓ */
+            const mVar = /@var\s+([^\s]+)/i.exec(docRaw);
+            if (mVar) {
+              finalType = mVar[1];
+            }
           }
         }
 
-        // 2) declaración de tipo en código (propiedad/promoted property)
+        /* C) fallback to declaration / inference --------------------- */
         if (!finalType && stmt.type) {
           finalType = typeToString(stmt.type);
         }
-        /* 3️⃣  ── still nothing? → infer from default literal ────────────── */
         if (!finalType || finalType === "mixed") {
           finalType = inferTypeFromValue(valueNode);
         }
 
-        /* ── optional? ───────────────────────────────────────────── */
-        const defaultIsNull = valueNode && valueNode.kind === "nullkeyword";
+        /* D) optional via nullable/default null ---------------------- */
+        const defaultIsNull = valueNode?.kind === "nullkeyword";
+        optional =
+          optional ||
+          defaultIsNull ||
+          propNode.nullable === true ||
+          /\bnull\b/.test(finalType);
 
-        const optional =
-          defaultIsNull || //   = null
-          propNode.nullable === true || //   ?Type
-          /\bnull\b/.test(finalType); //   Type|…|null
-
-        /* 5️⃣  ── default-value extraction unchanged ─────────────────────── */
+        /* E) default value ------------------------------------------ */
         let def: string | string[] | undefined;
         if (valueNode) {
           switch (valueNode.kind) {
             case "string":
               def = valueNode.value;
               break;
-            case "array": {
-              const keys: string[] = [];
-              for (const item of valueNode.items as any[]) {
-                if (item.key && item.key.kind === "string") {
-                  keys.push(item.key.value as string);
-                } else if (!item.key && item.value?.kind === "string") {
-                  keys.push(item.value.value as string);
-                }
-              }
-              def = keys;
-              break;
-            }
             case "number":
               def = String(valueNode.value);
               break;
@@ -294,20 +296,35 @@ export class ComponentPropsProvider {
             case "nullkeyword":
               def = "null";
               break;
+            case "array":
+              {
+                const keys: string[] = [];
+                for (const it of valueNode.items as any[]) {
+                  if (it.key?.kind === "string") {
+                    keys.push(it.key.value);
+                  } else if (!it.key && it.value?.kind === "string") {
+                    keys.push(it.value.value);
+                  }
+                }
+                def = keys;
+              }
+              break;
           }
         }
 
+        /* F) push metadata ------------------------------------------ */
         props.push({
           name,
-          type: finalType,
+          type: finalType ?? "mixed",
           default: Array.isArray(def) ? def.join("|") : def,
           doc: docRaw?.split(/\r?\n/)[0],
-          optional, // ✅ now correct
+          optional,
+          allowed: allowedLiterals,
         });
       }
     });
 
-    /* 4️⃣  cache + return */
+    /* 4️⃣ cache + return -------------------------------------------- */
     this.cache.set(tag, { mtime, props });
     return props;
   }
@@ -345,40 +362,77 @@ export function buildDynamicAttrItems(
 ): vscode.CompletionItem[] {
   return provider
     .getProps(tag)
-    .filter(({ name }) => !written.has(name) && name.startsWith(partial))
-    .map(({ name, type, default: def, doc, optional }) => {
-      const item = new vscode.CompletionItem(
+    .filter(
+      ({ name }) => !written.has(name) && name.startsWith(partial) // solo props no escritas + coincide con lo tecleado
+    )
+    .map(
+      ({
         name,
-        vscode.CompletionItemKind.Field
-      );
+        type,
+        default: def,
+        doc,
+        optional,
+        allowed, // ← NUEVO
+      }): vscode.CompletionItem => {
+        /* ──────────────────────────────────────────────────────────────
+         * 1.  item básico
+         * ─────────────────────────────────────────────────────────── */
+        const item = new vscode.CompletionItem(
+          name,
+          vscode.CompletionItemKind.Field
+        );
 
-      /* insert   variant="$0"   as before */
-      item.insertText = new vscode.SnippetString(`${name}="$0"`);
+        // inserta  foo="$0"
+        item.insertText = new vscode.SnippetString(`${name}="$0"`);
 
-      /* list detail  – add (optional) / (required) marker */
-      const reqFlag = optional ? "(optional)" : "(required)";
-      item.detail = def
-        ? `${reqFlag}  : ${type} = ${def}`
-        : `${reqFlag}  : ${type}`;
+        /* ──────────────────────────────────────────────────────────────
+         * 2.  detail (lista desplegable)
+         * ─────────────────────────────────────────────────────────── */
+        const reqFlag = optional ? "(optional)" : "(required)";
+        const allowedInfo = allowed ? ` ∈ {${allowed}}` : "";
 
-      /* docs / hover */
-      const md = new vscode.MarkdownString();
-      md.appendCodeblock(
-        def ? `${name}: ${type} = ${def}` : `${name}: ${type}`,
-        "php"
-      );
-      md.appendMarkdown(
-        `\n\n${
-          optional
-            ? "_This prop can be omitted (nullable)_"
-            : "_This prop is required_"
-        }`
-      );
-      if (doc) {
-        md.appendMarkdown("\n\n" + doc);
+        item.detail = def
+          ? `${reqFlag}  : ${type}${allowedInfo} = ${def}`
+          : `${reqFlag}  : ${type}${allowedInfo}`;
+
+        /* ──────────────────────────────────────────────────────────────
+         * 3.  documentación / hover
+         * ─────────────────────────────────────────────────────────── */
+        const md = new vscode.MarkdownString(undefined, true);
+
+        // firma
+        md.appendCodeblock(
+          def
+            ? `${name}: ${type}${allowed ? `  /* ${allowed} */` : ""} = ${def}`
+            : `${name}: ${type}${allowed ? `  /* ${allowed} */` : ""}`,
+          "php"
+        );
+
+        // opcional vs requerido
+        md.appendMarkdown(
+          `\n\n${
+            optional
+              ? "_This prop can be omitted (nullable)_"
+              : "_This prop is required_"
+          }`
+        );
+
+        // literales permitidos
+        if (allowed) {
+          md.appendMarkdown(
+            `\n\n_Accepts only:_ **${allowed.replace(/\|/g, " · ")}**`
+          );
+        }
+
+        // docstring original
+        if (doc) {
+          md.appendMarkdown("\n\n" + doc);
+        }
+
+        item.documentation = md;
+
+        /* ────────────────────────────────────────────────────────────── */
+        return item;
       }
-      item.documentation = md;
-
-      return item;
-    });
+    );
 }
