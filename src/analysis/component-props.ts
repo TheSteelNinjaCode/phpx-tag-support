@@ -26,6 +26,57 @@ interface PropMeta {
 
 type Cached = { mtime: number; props: PropMeta[] };
 
+type Primitive =
+  | "string"
+  | "bool"
+  | "boolean"
+  | "int"
+  | "float"
+  | "array"
+  | "null"
+  | "mixed";
+
+function splitTypes(typeStr: string): Primitive[] {
+  return typeStr.split("|").map((t) => t.trim().toLowerCase()) as Primitive[];
+}
+
+function classify(raw: string): Primitive {
+  const v = raw.trim().toLowerCase();
+
+  if (v === "" || v === "null") {
+    return "null";
+  }
+  if (v === "true" || v === "false" || v === "1" || v === "0") {
+    return "bool";
+  }
+  if (/^-?\d+$/.test(v)) {
+    return "int";
+  }
+  if (/^-?\d+\.\d+$/.test(v)) {
+    return "float";
+  }
+  if (v.startsWith("[") && v.endsWith("]")) {
+    return "array";
+  }
+
+  return "string"; // fallback – every HTML attr is a string anyway
+}
+
+export function isAllowed(prop: PropMeta, raw: string): boolean {
+  const allowed = splitTypes(prop.type);
+  if (allowed.includes("mixed")) {
+    return true;
+  }
+
+  const kind = classify(raw);
+  return (
+    allowed.includes(kind) || // primitive match
+    (kind === "bool" && allowed.includes("boolean")) ||
+    (kind === "int" && allowed.includes("float")) || // int ⊂ float
+    (kind === "string" && allowed.includes("array"))
+  ); // JSON-like
+}
+
 function typeToString(t: any | undefined): string {
   if (!t) {
     return "mixed";
