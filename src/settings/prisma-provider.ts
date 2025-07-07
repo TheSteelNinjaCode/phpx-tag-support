@@ -1377,6 +1377,15 @@ function printArrayLiteral(arr: PhpArray): string {
   }
 }
 
+function isDynamicKey(key?: Node | null): boolean {
+  return (
+    !!key &&
+    (key.kind === "variable" || //  $column
+      key.kind === "propertylookup" || //  $obj->field
+      key.kind === "identifier") //  CONST_CASE  ó  Foo::BAR
+  );
+}
+
 /**
  * Checks for simultaneous use of `select` and `include` at the top level
  * of a PhpArray literal. If both are found, pushes an Error diagnostic
@@ -2013,13 +2022,19 @@ export async function validateUpdateCall(
       const entries = (dataEntry.value as PhpArray).items as Entry[];
 
       // ① make sure they’re actually updating at least one *column*
-      const realUpdates = entries
-        .filter(
-          (e) =>
-            e.key?.kind === "string" &&
-            !PRISMA_OPERATORS.has((e.key as any).value)
-        )
-        .map((e) => (e.key as any).value as string);
+      const realUpdates = entries.filter((e) => {
+        if (!e.key) {
+          return false;
+        }
+
+        /* ① Claves literales ─ se aceptan salvo que sean operadores */
+        if (e.key.kind === "string") {
+          return !PRISMA_OPERATORS.has((e.key as any).value);
+        }
+
+        /* ② Claves dinámicas ($var, $obj->prop, CONST) */
+        return isDynamicKey(e.key);
+      });
 
       if (realUpdates.length === 0) {
         diagnostics.push(
