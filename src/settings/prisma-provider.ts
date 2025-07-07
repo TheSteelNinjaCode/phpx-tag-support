@@ -879,77 +879,95 @@ function validateIncludeBlock(
   includeEntry: Entry,
   fields: Map<string, FieldInfo>,
   modelName: string,
-  diags: vscode.Diagnostic[]
-) {
-  // make sure we actually have an array literal:
+  diags: vscode.Diagnostic[],
+  modelMap: ModelMap
+): void {
+  /* ——————————————————————— 0. sólo si es array literal ——————————————————— */
   if (!isArray(includeEntry.value) || !includeEntry.value.loc) {
     return;
   }
-
   const arrNode = includeEntry.value as PhpArray;
 
+  /* ——————————————————————— 1. recorrer cada clave del bloque ————————————————— */
   for (const item of arrNode.items as Entry[]) {
-    if (item.key?.kind !== "string" || !item.value?.loc) {
+    if (item.key?.kind !== "string" || !item.value) {
       continue;
     }
 
-    const keyName = (item.key as any).value as string;
-    const keyRange = new vscode.Range(
-      item.key.loc
-        ? doc.positionAt(item.key.loc.start.offset)
-        : doc.positionAt(0),
-      item.key.loc ? doc.positionAt(item.key.loc.end.offset) : doc.positionAt(0)
-    );
+    const relName = (item.key as any).value as string;
+    const keyRange = rangeOf(doc, item.key.loc!);
 
-    // ——— 1) normal relation => boolean ———
-    if (keyName !== "_count") {
-      const raw = doc
-        .getText(
-          new vscode.Range(
-            doc.positionAt(item.value.loc.start.offset),
-            doc.positionAt(item.value.loc.end.offset)
-          )
+    /* ——— 1-A. relación inexistente ———————————————————————————————— */
+    const relInfo = fields.get(relName);
+    if (!relInfo && relName !== "_count") {
+      diags.push(
+        new vscode.Diagnostic(
+          keyRange,
+          `The relation "${relName}" does not exist on ${modelName}.`,
+          vscode.DiagnosticSeverity.Error
         )
-        .trim();
+      );
+      continue;
+    }
 
-      if (!fields.has(keyName)) {
-        diags.push(
-          new vscode.Diagnostic(
-            keyRange,
-            `The relation "${keyName}" does not exist on ${modelName}.`,
-            vscode.DiagnosticSeverity.Error
-          )
-        );
-      } else if (!/^(true|false)$/i.test(raw)) {
-        diags.push(
-          new vscode.Diagnostic(
-            keyRange,
-            `\`include\` for "${keyName}" expects a boolean, but got "${raw}".`,
-            vscode.DiagnosticSeverity.Error
-          )
-        );
+    /* ——— 1-B. _count: boolean 𝘰 select-bools ——————————————————————— */
+    if (relName === "_count") {
+      // i) valor booleano simple
+      if (item.value.kind !== "array") {
+        const raw = doc.getText(rangeOf(doc, item.value.loc!)).trim();
+        if (!/^(true|false)$/i.test(raw)) {
+          diags.push(
+            new vscode.Diagnostic(
+              keyRange,
+              "`include._count` expects a boolean or a nested [ 'select' => [...] ] block, " +
+                `but got ${JSON.stringify(raw)}.`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+        }
+        continue;
       }
+
+      // ii) array literal → debe contener select => [ cols => bool ]
+      const countArr = item.value as PhpArray;
+      const selEntry = (countArr.items as Entry[]).find(
+        (e) => e.key?.kind === "string" && (e.key as any).value === "select"
+      );
+      if (!selEntry || !isArray(selEntry.value) || !selEntry.value.loc) {
+        diags.push(
+          new vscode.Diagnostic(
+            keyRange,
+            "`include._count` array must contain a `select` entry with boolean values.",
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+        continue;
+      }
+
+      const innerArr = selEntry.value as PhpArray;
+      if (!innerArr.loc) {
+        continue;
+      }
+      const start = innerArr.loc.start.offset;
+      const end = innerArr.loc.end.offset;
+      const literal = doc.getText(
+        new vscode.Range(doc.positionAt(start), doc.positionAt(end))
+      );
+
+      validateSelectBlock(doc, literal, start, fields, modelName, diags);
       continue;
     }
 
-    // ——— 2) special `_count` ———
-    // a) boolean?
-    if (!isArray(item.value)) {
-      const raw = doc
-        .getText(
-          new vscode.Range(
-            doc.positionAt(item.value.loc.start.offset),
-            doc.positionAt(item.value.loc.end.offset)
-          )
-        )
-        .trim();
-
+    /* ——— 1-C. valor booleano normal ———————————————————————————————— */
+    if (item.value.kind !== "array") {
+      const raw = doc.getText(rangeOf(doc, item.value.loc!)).trim();
       if (!/^(true|false)$/i.test(raw)) {
         diags.push(
           new vscode.Diagnostic(
             keyRange,
-            "`include._count` expects a boolean or a nested [ 'select' => [...] ], but got " +
-              JSON.stringify(raw),
+            `\`include\` for "${relName}" expects a boolean or a nested array, but got ${JSON.stringify(
+              raw
+            )}.`,
             vscode.DiagnosticSeverity.Error
           )
         );
@@ -957,46 +975,39 @@ function validateIncludeBlock(
       continue;
     }
 
-    // b) array ⇒ must contain exactly a `select` entry whose values are booleans
-    const countArr = item.value as PhpArray;
-    const selEntry = (countArr.items as Entry[]).find(
-      (e) => e.key?.kind === "string" && (e.key as any).value === "select"
+    /* ——— 1-D. array nested ⇒ validar recursivamente ———————————————— */
+    const nestedArr = item.value as PhpArray;
+    const nestedModel = relInfo!.type.toLowerCase();
+    const nestedFlds =
+      modelMap.get(nestedModel) ?? new Map<string, FieldInfo>();
+
+    // i) validar select/include/omit/where dentro del bloque anidado
+    validateSelectIncludeEntries(
+      doc,
+      nestedArr,
+      nestedFlds,
+      relInfo!.type,
+      diags,
+      modelMap
     );
 
-    if (!selEntry) {
-      diags.push(
-        new vscode.Diagnostic(
-          keyRange,
-          "`include._count` array must contain a `select` entry.",
-          vscode.DiagnosticSeverity.Error
-        )
-      );
-      continue;
+    // ii) buscar include anidados aún más profundos
+    for (const sub of nestedArr.items as Entry[]) {
+      if (
+        sub.key?.kind === "string" &&
+        sub.value?.kind === "array" &&
+        nestedFlds.has((sub.key as any).value as string)
+      ) {
+        validateIncludeBlock(
+          doc,
+          sub,
+          nestedFlds,
+          relInfo!.type,
+          diags,
+          modelMap
+        );
+      }
     }
-    if (!isArray(selEntry.value) || !selEntry.value.loc) {
-      diags.push(
-        new vscode.Diagnostic(
-          keyRange,
-          "`include._count.select` must be an array literal.",
-          vscode.DiagnosticSeverity.Error
-        )
-      );
-      continue;
-    }
-
-    // c) finally, validate that each field => boolean in that inner select
-    const innerArr = selEntry.value as PhpArray;
-    if (!innerArr.loc) {
-      return;
-    }
-    const start = innerArr.loc.start.offset;
-    const end = innerArr.loc.end.offset;
-    const innerText = doc.getText(
-      new vscode.Range(doc.positionAt(start), doc.positionAt(end))
-    );
-
-    // re-use your boolean-only validator
-    validateSelectBlock(doc, innerText, start, fields, modelName, diags);
   }
 }
 
@@ -1079,7 +1090,7 @@ export function validateSelectIncludeEntries(
     (e) => e.key?.kind === "string" && (e.key as any).value === "include"
   );
   if (includeEntry) {
-    validateIncludeBlock(doc, includeEntry, fields, modelName, diags);
+    validateIncludeBlock(doc, includeEntry, fields, modelName, diags, modelMap);
   }
 }
 
@@ -1109,43 +1120,56 @@ const PRISMA_OPERATORS = new Set([
  * Encapsulate your big switch(...) in one place.
  */
 function isValidPhpType(expr: string, info: FieldInfo): boolean {
-  const allowed = phpDataTypes[info.type] ?? [];
-  const isString = /^['"]/.test(expr);
-  const isNumber = /^-?\d+(\.\d+)?$/.test(expr);
-  const isBool = /^(true|false)$/i.test(expr);
-  const isArray = /^\[.*\]$/.test(expr);
-  const isVar = /^\$[A-Za-z_]\w*/.test(expr);
-  const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(expr);
-  const isNull = /^null$/i.test(expr);
+  /**
+   * For Boolean fields we allow any number of leading “!” operators,
+   * because `!$foo`, `!!$foo`, `!true`, etc. are still valid booleans.
+   * For every other Prisma type we keep the original string intact.
+   */
+  const raw =
+    info.type === "Boolean" ? expr.replace(/^!+\s*/, "").trim() : expr.trim();
 
+  const allowed = phpDataTypes[info.type] ?? [];
+
+  /* ── quick classifiers (all run on the *cleaned* raw string) ── */
+  const isString = /^['"]/.test(raw);
+  const isNumber = /^-?\d+(\.\d+)?$/.test(raw);
+  const isBool = /^(true|false)$/i.test(raw);
+  const isArray = /^\[.*\]$/.test(raw);
+  const isVar = /^\$[A-Za-z_]\w*/.test(raw);
+  const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(raw);
+  const isNull = /^null$/i.test(raw);
+
+  /* variables are always accepted (type checked at runtime) */
   if (isVar) {
     return true;
   }
 
+  /* explicit null only if the column is nullable */
   if (isNull) {
     return info.nullable === true;
   }
 
+  /* final decision against the Prisma field type */
   return allowed.some((t) => {
     switch (t) {
       case "string":
         return isString || isVar;
       case "int":
-        return isNumber && !expr.includes(".");
+        return isNumber && !raw.includes(".");
       case "float":
         return isNumber;
       case "bool":
-        return isBool;
+        return isBool || isVar; // ← allows cleaned booleans
       case "array":
         return isArray;
       case "DateTime":
-        return /^new\s+DateTime/.test(expr) || isFnCall || isString || isVar;
+        return /^new\s+DateTime/.test(raw) || isFnCall || isString || isVar;
       case "BigInteger":
       case "BigDecimal":
         return isFnCall;
       case "enum":
         return isString;
-      default:
+      default: /* custom scalar, class, etc. */
         return isFnCall;
     }
   });
