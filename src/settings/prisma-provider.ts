@@ -73,6 +73,28 @@ const ROOT_KEYS_MAP = {
 type PrismaOp = keyof typeof ROOT_KEYS_MAP;
 type RootKey = (typeof ROOT_KEYS_MAP)[PrismaOp][number];
 
+interface CompletionContext {
+  doc: vscode.TextDocument;
+  pos: vscode.Position;
+  callNode: Call;
+  opName: PrismaOp;
+  modelName: string;
+  rootKeys: readonly RootKey[];
+  curOffset: number;
+  lastPrisma: number;
+  already: string;
+  modelMap: ModelMap;
+  fieldMap: Map<string, FieldInfo>;
+}
+
+interface ArrayContext {
+  hostArray: PhpArray;
+  entrySide: "key" | "value" | null;
+  currentRoot?: RootKey;
+  nestedRoot?: string;
+  parentKey?: string;
+}
+
 const FILTER_OPERATORS = [
   "contains",
   "startsWith",
@@ -159,7 +181,7 @@ function arrayUnderCursor(
   return arr;
 }
 
-function findParentKey(arr: PhpArray, target: PhpArray): string | null {
+function findParentKey(arr: PhpArray, target: PhpArray): string | undefined {
   for (const e of arr.items as Entry[]) {
     if (e.value === target && e.key?.kind === "string") {
       return (e.key as any).value as string;
@@ -171,7 +193,7 @@ function findParentKey(arr: PhpArray, target: PhpArray): string | null {
       }
     }
   }
-  return null;
+  return undefined;
 }
 
 function makeReplaceRange(
@@ -186,514 +208,631 @@ function makeReplaceRange(
   return new vscode.Range(start, end);
 }
 
-// ❷ ▶︎ In your provider:
+// ========== MAIN PROVIDER FUNCTION ==========
 export function registerPrismaFieldProvider(): vscode.Disposable {
   return vscode.languages.registerCompletionItemProvider(
     "php",
     {
       async provideCompletionItems(doc, pos) {
-        // ————— Extract snippet & parse AST (unchanged) —————
-        const before = doc.getText(
-          new vscode.Range(new vscode.Position(0, 0), pos)
-        );
-        const lastPrisma = before.lastIndexOf("$prisma->");
-        if (lastPrisma === -1) {
-          return;
-        }
-        const tail = before.slice(lastPrisma);
-        let ast: Node;
-        try {
-          ast = phpEngine.parseEval(tail);
-        } catch {
+        const context = await parseCompletionContext(doc, pos);
+        if (!context) {
           return;
         }
 
-        const alreadyMatch = /['"]([\w]*)$/.exec(before);
-        const already = alreadyMatch ? alreadyMatch[1] : "";
-
-        // ————— Find the call, the op and the model —————
-        let callNode: Call | undefined,
-          opName: PrismaOp | undefined,
-          modelName: string | undefined;
-        walk(ast, (n) => {
-          if (callNode) {
-            return;
-          }
-          if (n.kind !== "call") {
-            return;
-          }
-          const c = n as Call;
-          if (!isPropLookup(c.what)) {
-            return;
-          }
-          const op = nodeName(c.what.offset) as PrismaOp;
-          if (!(op in ROOT_KEYS_MAP)) {
-            return;
-          }
-          const mChain = c.what.what;
-          if (!isPropLookup(mChain)) {
-            return;
-          }
-          const mdl = nodeName(mChain.offset);
-          if (!mdl) {
-            return;
-          }
-          callNode = c;
-          opName = op;
-          modelName = typeof mdl === "string" ? mdl.toLowerCase() : "";
-        });
-        if (!callNode || !opName || !modelName) {
+        const arrayContext = analyzeArrayContext(context);
+        if (!arrayContext) {
           return;
         }
 
-        const rootKeys = ROOT_KEYS_MAP[opName] as readonly RootKey[];
-        const curOffset = doc.offsetAt(pos);
-
-        // ————— Are we directly inside the top-level array? —————
-        const argsArr = callNode.arguments?.[0];
-        const hostArray = isArray(argsArr)
-          ? arrayUnderCursor(argsArr, curOffset, lastPrisma)
-          : null;
-
-        if (!hostArray) {
-          return;
-        }
-
-        // ── within that literal, which entry/side is it? ─────────────
-        let entrySide: "key" | "value" | null = null;
-        for (const ent of hostArray.items.filter(isEntry)) {
-          entrySide = sectionOfEntry(ent, curOffset, lastPrisma);
-          if (entrySide) {
-            break;
-          }
-        }
-
-        if (isArray(argsArr) && argsArr.loc) {
-          const arrStart = lastPrisma + argsArr.loc.start.offset;
-          const arrEnd = lastPrisma + argsArr.loc.end.offset;
-
-          if (curOffset >= arrStart && curOffset <= arrEnd) {
-            // check if we're *not* inside any nested block
-            const inNested = (argsArr.items as Entry[]).some((item) => {
-              if (item.key?.kind !== "string") {
-                return false;
-              }
-              const k = (item.key as any).value as RootKey;
-              if (!rootKeys.includes(k)) {
-                return false;
-              }
-              if (!item.value?.loc) {
-                return false;
-              }
-              const start = lastPrisma + item.value.loc.start.offset;
-              const end = lastPrisma + item.value.loc.end.offset;
-              return curOffset >= start && curOffset <= end;
-            });
-            if (!inNested) {
-              // ▶︎ suggest root keys: "'where' => $0", etc.
-              return rootKeys.map((rk): vscode.CompletionItem => {
-                const it = new vscode.CompletionItem(
-                  `${rk}`,
-                  vscode.CompletionItemKind.Keyword
-                );
-                it.insertText = new vscode.SnippetString(`${rk}' => $0`);
-                it.range = makeReplaceRange(doc, pos, already.length);
-                return it;
-              });
-            }
-          }
-        }
-
-        // ————— Are we inside a nested array for one of those rootKeys? —————
-        // loop over first-level entries to see which block we’re in:
-        let currentRoot: RootKey | undefined;
-        let nestedArrLoc: { start: number; end: number } | undefined;
-        for (const entry of (argsArr as PhpArray).items as Entry[]) {
-          if (
-            entry.key?.kind !== "string" ||
-            !entry.value ||
-            !entry.value.loc
-          ) {
-            continue;
-          }
-          const key = (entry.key as any).value as RootKey;
-          if (!rootKeys.includes(key)) {
-            continue;
-          }
-          const s = lastPrisma + entry.value.loc.start.offset;
-          const e = lastPrisma + entry.value.loc.end.offset;
-          if (curOffset >= s && curOffset <= e) {
-            currentRoot = key;
-            nestedArrLoc = { start: s, end: e };
-            break;
-          }
-        }
-
-        const fieldMap = (await getModelMap()).get(modelName);
-        if (!fieldMap) {
-          return;
-        }
-
-        // → instead, look *inside* the top-level `select` block:
-        const nestedRoot = (() => {
-          if (!currentRoot || !isArray(argsArr)) {
-            return null;
-          }
-          // find the entry for our root key (e.g. 'select' => [...] )
-          const rootEntry = (argsArr.items as Entry[]).find(
-            (e) =>
-              e.key?.kind === "string" &&
-              (e.key as any).value === currentRoot &&
-              isArray(e.value)
-          );
-          if (!rootEntry) {
-            return null;
-          }
-          // now find which key *inside* that block holds your hostArray
-          return findParentKey(rootEntry.value as PhpArray, hostArray!);
-        })();
-
-        // use nestedRoot if present, otherwise fall back to the top-level key
-        const modelMap = await getModelMap();
-        const modelNames = new Set(modelMap.keys());
-        const rootMap = modelMap.get(modelName)!;
-        const activeRoot = currentRoot;
-
-        // ── special: handle both key & value for orderBy ────────────
-        if (currentRoot === "orderBy") {
-          const orderByEntry = (argsArr as PhpArray).items.find(
-            (e): e is Entry =>
-              e.kind === "entry" &&
-              isEntry(e) &&
-              e.key?.kind === "string" &&
-              (e.key as any).value === "orderBy"
-          );
-          if (orderByEntry && isArray(orderByEntry.value)) {
-            const orderArr = orderByEntry.value as PhpArray;
-            const s = lastPrisma + orderArr.loc!.start.offset;
-            const e = lastPrisma + orderArr.loc!.end.offset;
-            if (curOffset >= s && curOffset <= e) {
-              for (const itm of orderArr.items.filter(isEntry) as Entry[]) {
-                const side = sectionOfEntry(itm, curOffset, lastPrisma);
-                if (entrySide !== "key" && side === "value") {
-                  return ["asc", "desc"].map((dir) => {
-                    const it = new vscode.CompletionItem(
-                      dir,
-                      vscode.CompletionItemKind.Value
-                    );
-                    it.insertText = new vscode.SnippetString(`${dir}'`);
-                    it.range = makeReplaceRange(doc, pos, already.length);
-                    return it;
-                  });
-                }
-              }
-            }
-          }
-        }
-
-        // special‐case boolean roots:
-        if (activeRoot === "skipDuplicates" && entrySide === "value") {
-          return ["true", "false"].map((v) => {
-            const it = new vscode.CompletionItem(
-              v,
-              vscode.CompletionItemKind.Value
-            );
-            it.insertText = new vscode.SnippetString(`${v}`);
-            it.range = makeReplaceRange(doc, pos, already.length);
-            return it;
-          });
-        }
-
-        // ── all other roots only on the *key* side ───────────────────
-        if (!currentRoot || !nestedArrLoc || entrySide !== "key") {
-          return;
-        }
-
-        if (currentRoot === "by") {
-          return [...fieldMap.keys()].map((fld) => {
-            const it = new vscode.CompletionItem(
-              fld,
-              vscode.CompletionItemKind.Keyword
-            );
-            it.insertText = new vscode.SnippetString(`${fld}', $0`);
-            it.range = makeReplaceRange(doc, pos, already.length);
-            return it;
-          });
-        }
-
-        if (["_count", "_max", "_min", "_avg", "_sum"].includes(currentRoot)) {
-          return [...fieldMap.keys()].map((fld) => {
-            const it = new vscode.CompletionItem(
-              fld,
-              vscode.CompletionItemKind.Value
-            );
-            it.insertText = new vscode.SnippetString(`${fld}' => true, $0`);
-            it.range = makeReplaceRange(doc, pos, already.length);
-            return it;
-          });
-        }
-
-        // ─── 1) If we’re in a `select` block on a _relation_ field …
-        if (
-          currentRoot === "select" &&
-          nestedRoot &&
-          entrySide === "key" &&
-          fieldMap.has(nestedRoot) // it's a real field
-        ) {
-          const relInfo = fieldMap.get(nestedRoot)!;
-          // only if that field’s type is another model
-          if (modelNames.has(relInfo.type.toLowerCase())) {
-            const nestedOps = ["select", "include", "omit", "where"] as const;
-            return nestedOps.map((op) => {
-              const it = new vscode.CompletionItem(
-                op,
-                vscode.CompletionItemKind.Keyword
-              );
-              // we want `'select' => [ 'user' => [ 'select' => ` ready to go
-              it.insertText = new vscode.SnippetString(`${op}' => `);
-              it.range = makeReplaceRange(doc, pos, already.length);
-              return it;
-            });
-          }
-        }
-
-        // ── we’re inside a nested array for one of the rootKeys ───────
-        // — detect the relation name when we're in a nested `select` ——
-        let nestedRelation: string | undefined;
-        if (currentRoot === "select" && isArray(argsArr)) {
-          // find the first‐level `'select' => [ … ]` entry
-          const selectEntry = (argsArr.items as Entry[]).find(
-            (e) =>
-              e.key?.kind === "string" &&
-              (e.key as any).value === "select" &&
-              isArray(e.value)
-          );
-
-          if (selectEntry) {
-            const relArray = selectEntry.value as PhpArray;
-            // scan each `'<relation>' => […]` inside that array…
-            for (const ent of relArray.items.filter(isEntry) as Entry[]) {
-              if (ent.key?.kind === "string" && ent.value?.loc) {
-                const start = lastPrisma + ent.value.loc.start.offset;
-                const end = lastPrisma + ent.value.loc.end.offset;
-                // if my cursor is somewhere in that relation’s block…
-                if (curOffset >= start && curOffset <= end) {
-                  nestedRelation = (ent.key as any).value as string;
-                  break;
-                }
-              }
-            }
-          }
-        }
-
-        // pick which fieldMap to use for suggestions:
-        let suggestMap = rootMap;
-
-        // if we’re in a `select` block and the key is a relation → swap in its map
-        if (activeRoot === "select" && nestedRoot && rootMap.has(nestedRoot)) {
-          const relInfo = rootMap.get(nestedRoot)!;
-          const relMap = modelMap.get(relInfo.type.toLowerCase());
-          if (relMap) {
-            suggestMap = relMap;
-          }
-        }
-
-        // now use `suggestMap` everywhere:
-        const allFields = [...suggestMap.entries()];
-        let suggestions: [string, FieldInfo][] = [];
-
-        if (activeRoot === "_count") {
-          // inside the _count => [ … ] block → only offer `select`
-          const selectItem = new vscode.CompletionItem(
-            "select",
-            vscode.CompletionItemKind.Keyword
-          );
-          selectItem.insertText = new vscode.SnippetString(`select' => $0`);
-          selectItem.documentation = new vscode.MarkdownString(
-            "**Select** which fields to count"
-          );
-          selectItem.range = makeReplaceRange(doc, pos, already.length);
-          return [selectItem];
-        } else if (activeRoot === "select") {
-          if (nestedRelation && fieldMap.has(nestedRelation)) {
-            // it’s a relation → grab *that* model’s map
-            const relInfo = fieldMap.get(nestedRelation)!;
-            const relMap = modelMap.get(relInfo.type.toLowerCase());
-            if (relMap) {
-              suggestions = [...relMap.entries()];
-            }
-          } else {
-            // top-level select → root model’s fields
-            suggestions = allFields;
-          }
-        } else if (activeRoot === "include") {
-          // back up to include → offer relations + _count
-          suggestions = allFields.filter(([, info]) =>
-            modelNames.has(info.type.toLowerCase())
-          );
-          suggestions.push([
-            "_count",
-            {
-              type: "boolean",
-              required: false,
-              isList: false,
-              nullable: true,
-            },
-          ]);
-        } else {
-          // your other roots (data, where, etc.)
-          suggestions = allFields;
-        }
-
-        // ⑥ Only these roots ever get field suggestions:
-        const fieldsRoots = [
-          "data",
-          "where",
-          "select",
-          "include",
-          "orderBy",
-          "distinct",
-          "omit",
-          "update",
-          "create",
-          "having",
-          "by",
-          "_count",
-          "_max",
-          "_min",
-          "_avg",
-          "_sum",
-        ];
-        if (!fieldsRoots.includes(currentRoot)) {
-          return;
-        }
-
-        //
-        // ── NON-WHERE ROOTS ──────────────────────────────────────
-        //
-        if (currentRoot !== "where") {
-          return suggestions.map(([name, info]) => {
-            const typeStr = `${info.type}${info.isList ? "[]" : ""}`;
-            const optional = info.nullable; // <-- now only nullable fields get “?”
-            const label: vscode.CompletionItemLabel = {
-              label: optional ? `${name}?` : name,
-              detail: `: ${typeStr}`,
-            };
-            const it = new vscode.CompletionItem(
-              label,
-              vscode.CompletionItemKind.Field
-            );
-
-            it.insertText = new vscode.SnippetString(`${name}' => $0`);
-            it.documentation = new vscode.MarkdownString(
-              `**Type**: \`${typeStr}\`\n\n- **Required**: ${!info.nullable}\n- **Nullable**: ${
-                info.nullable
-              }`
-            );
-            it.range = makeReplaceRange(doc, pos, already.length);
-            return it;
-          });
-        }
-
-        //
-        // ── “where” root: split into three zones ──────────────────
-        //
-        const phpArgs = argsArr as PhpArray;
-        const topWhereEnt = (phpArgs.items as Entry[]).find(
-          (e) =>
-            e.key?.kind === "string" &&
-            (e.key as any).value === "where" &&
-            isArray(e.value)
-        );
-        if (!topWhereEnt) {
-          return;
-        }
-        const topWhereArr = topWhereEnt.value as PhpArray;
-        const parentKey = findParentKey(phpArgs, hostArray);
-
-        // A) Top-level WHERE: first columns, then AND|OR|NOT
-        if (hostArray === topWhereArr) {
-          const out: vscode.CompletionItem[] = [];
-
-          // 1) columns
-          for (const [name, info] of fieldMap.entries()) {
-            const typeStr = `${info.type}${info.isList ? "[]" : ""}`;
-            const optional = info.nullable;
-            const label: vscode.CompletionItemLabel = {
-              label: optional ? `${name}?` : name,
-              detail: `: ${typeStr}`,
-            };
-            const col = new vscode.CompletionItem(
-              label,
-              vscode.CompletionItemKind.Field
-            );
-            col.sortText = `0_${name}`;
-            col.insertText = new vscode.SnippetString(`${name}' => $0`);
-            col.documentation = new vscode.MarkdownString(
-              `**Type**: \`${typeStr}\`\n\n- **Required**: ${!info.nullable}\n- **Nullable**: ${
-                info.nullable
-              }`
-            );
-            col.range = makeReplaceRange(doc, pos, already.length);
-            out.push(col);
-          }
-
-          // 2) combinators
-          for (const c of ["AND", "OR", "NOT"] as const) {
-            const it = new vscode.CompletionItem(
-              c,
-              vscode.CompletionItemKind.Keyword
-            );
-            it.sortText = `1_${c}`;
-            it.insertText = new vscode.SnippetString(`${c}' => $0`);
-            it.range = makeReplaceRange(doc, pos, already.length);
-            out.push(it);
-          }
-
-          return out;
-        }
-
-        // B) inside an AND|OR|NOT block: only columns
-        if (parentKey && ["AND", "OR", "NOT"].includes(parentKey)) {
-          return [...fieldMap.entries()].map(([name, info]) => {
-            const typeStr = `${info.type}${info.isList ? "[]" : ""}`;
-            const optional = info.nullable;
-            const label: vscode.CompletionItemLabel = {
-              label: optional ? `${name}?` : name,
-              detail: `: ${typeStr}`,
-            };
-            const col = new vscode.CompletionItem(
-              label,
-              vscode.CompletionItemKind.Field
-            );
-            col.sortText = `0_${name}`;
-            col.insertText = new vscode.SnippetString(`${name}' => $0`);
-            col.documentation = new vscode.MarkdownString(
-              `**Type**: \`${typeStr}\`\n\n- **Required**: ${!info.nullable}\n- **Nullable**: ${
-                info.nullable
-              }`
-            );
-            col.range = makeReplaceRange(doc, pos, already.length);
-            return col;
-          });
-        }
-
-        // C) inside a specific field’s array: only filter ops
-        return FILTER_OPERATORS.map((op) => {
-          const it = new vscode.CompletionItem(
-            op,
-            vscode.CompletionItemKind.Keyword
-          );
-          it.sortText = `2_${op}`;
-          it.insertText = new vscode.SnippetString(`${op}' => $0`);
-          it.range = makeReplaceRange(doc, pos, already.length);
-          return it;
-        });
+        return generateCompletions(context, arrayContext);
       },
     },
     "'", // single-quote trigger
     '"' // double-quote trigger
   );
+}
+
+// ========== CONTEXT PARSING ==========
+async function parseCompletionContext(
+  doc: vscode.TextDocument,
+  pos: vscode.Position
+): Promise<CompletionContext | null> {
+  const parsedCode = extractAndParseCode(doc, pos);
+  if (!parsedCode) {
+    return null;
+  }
+
+  const { ast, lastPrisma, already } = parsedCode;
+
+  const callInfo = findPrismaCall(ast);
+  if (!callInfo) {
+    return null;
+  }
+
+  const { callNode, opName, modelName } = callInfo;
+  const rootKeys = ROOT_KEYS_MAP[opName] as readonly RootKey[];
+  const curOffset = doc.offsetAt(pos);
+  const modelMap = await getModelMap();
+  const fieldMap = modelMap.get(modelName.toLowerCase());
+
+  if (!fieldMap) {
+    return null;
+  }
+
+  return {
+    doc,
+    pos,
+    callNode,
+    opName,
+    modelName,
+    rootKeys,
+    curOffset,
+    lastPrisma,
+    already,
+    modelMap,
+    fieldMap,
+  };
+}
+
+function extractAndParseCode(doc: vscode.TextDocument, pos: vscode.Position) {
+  const before = doc.getText(new vscode.Range(new vscode.Position(0, 0), pos));
+  const lastPrisma = before.lastIndexOf("$prisma->");
+
+  if (lastPrisma === -1) {
+    return null;
+  }
+
+  const tail = before.slice(lastPrisma);
+  const alreadyMatch = /['"]([\w]*)$/.exec(before);
+  const already = alreadyMatch ? alreadyMatch[1] : "";
+
+  try {
+    const ast = phpEngine.parseEval(tail);
+    return { ast, lastPrisma, already };
+  } catch {
+    return null;
+  }
+}
+
+function findPrismaCall(
+  ast: Node
+): { callNode: Call; opName: PrismaOp; modelName: string } | null {
+  let result: {
+    callNode: Call;
+    opName: PrismaOp;
+    modelName: string;
+  } | null = null;
+
+  walk(ast, (node) => {
+    if (result || node.kind !== "call") {
+      return;
+    }
+
+    const call = node as Call;
+    if (!isPropLookup(call.what)) {
+      return;
+    }
+
+    const op = nodeName(call.what.offset) as PrismaOp;
+    if (!(op in ROOT_KEYS_MAP)) {
+      return;
+    }
+
+    const modelChain = call.what.what;
+    if (!isPropLookup(modelChain)) {
+      return;
+    }
+
+    const model = nodeName(modelChain.offset);
+    if (!model || typeof model !== "string") {
+      return;
+    }
+
+    result = {
+      callNode: call,
+      opName: op,
+      modelName: model, // keep as string, lowercase later if needed
+    };
+  });
+
+  return result;
+}
+
+// ========== ARRAY CONTEXT ANALYSIS ==========
+function analyzeArrayContext(context: CompletionContext): ArrayContext | null {
+  const { callNode, curOffset, lastPrisma } = context;
+
+  const argsArr = callNode.arguments?.[0];
+  if (!isArray(argsArr)) {
+    return null;
+  }
+
+  const hostArray = arrayUnderCursor(argsArr, curOffset, lastPrisma);
+  if (!hostArray) {
+    return null;
+  }
+
+  const entrySide = determineEntrySide(hostArray, curOffset, lastPrisma);
+  const currentRoot = findCurrentRoot(
+    argsArr,
+    curOffset,
+    lastPrisma,
+    context.rootKeys
+  );
+  const nestedRoot = findNestedRoot(argsArr, hostArray, currentRoot);
+  const parentKey = findParentKey(argsArr, hostArray);
+
+  return {
+    hostArray,
+    entrySide,
+    currentRoot,
+    nestedRoot,
+    parentKey,
+  };
+}
+
+function determineEntrySide(
+  hostArray: PhpArray,
+  curOffset: number,
+  lastPrisma: number
+): "key" | "value" | null {
+  for (const entry of hostArray.items.filter(isEntry)) {
+    const side = sectionOfEntry(entry, curOffset, lastPrisma);
+    if (side) {
+      return side;
+    }
+  }
+  return null;
+}
+
+function findCurrentRoot(
+  argsArr: PhpArray,
+  curOffset: number,
+  lastPrisma: number,
+  rootKeys: readonly RootKey[]
+): RootKey | undefined {
+  for (const entry of argsArr.items as Entry[]) {
+    if (entry.key?.kind !== "string" || !entry.value?.loc) {
+      continue;
+    }
+
+    const key = (entry.key as any).value as RootKey;
+    if (!rootKeys.includes(key)) {
+      continue;
+    }
+
+    const start = lastPrisma + entry.value.loc.start.offset;
+    const end = lastPrisma + entry.value.loc.end.offset;
+
+    if (curOffset >= start && curOffset <= end) {
+      return key;
+    }
+  }
+  return undefined;
+}
+
+function findNestedRoot(
+  argsArr: PhpArray,
+  hostArray: PhpArray,
+  currentRoot?: RootKey
+): string | undefined {
+  if (!currentRoot || !isArray(argsArr)) {
+    return undefined;
+  }
+
+  const rootEntry = (argsArr.items as Entry[]).find(
+    (e) =>
+      e.key?.kind === "string" &&
+      (e.key as any).value === currentRoot &&
+      isArray(e.value)
+  );
+
+  if (!rootEntry) {
+    return undefined;
+  }
+  return findParentKey(rootEntry.value as PhpArray, hostArray);
+}
+
+// ========== COMPLETION GENERATION ==========
+function generateCompletions(
+  context: CompletionContext,
+  arrayContext: ArrayContext
+): vscode.CompletionItem[] {
+  const { currentRoot, entrySide } = arrayContext;
+
+  // Root key completions (top-level array)
+  if (shouldProvideRootKeys(context, arrayContext)) {
+    return createRootKeyCompletions(context);
+  }
+
+  // Special completions for specific contexts
+  const specialCompletions = handleSpecialCompletions(context, arrayContext);
+  if (specialCompletions) {
+    return specialCompletions;
+  }
+
+  // Field completions
+  if (shouldProvideFieldCompletions(currentRoot, entrySide)) {
+    return createFieldCompletions(context, arrayContext);
+  }
+
+  return [];
+}
+
+function shouldProvideRootKeys(
+  context: CompletionContext,
+  arrayContext: ArrayContext
+): boolean {
+  const { callNode, curOffset, lastPrisma } = context;
+  const { hostArray } = arrayContext;
+
+  const argsArr = callNode.arguments?.[0];
+  if (!isArray(argsArr) || !argsArr.loc) {
+    return false;
+  }
+
+  const arrStart = lastPrisma + argsArr.loc.start.offset;
+  const arrEnd = lastPrisma + argsArr.loc.end.offset;
+
+  if (curOffset < arrStart || curOffset > arrEnd) {
+    return false;
+  }
+  if (hostArray !== argsArr) {
+    return false;
+  }
+
+  // Check if we're not inside any nested block
+  return !(argsArr.items as Entry[]).some((item) => {
+    if (item.key?.kind !== "string") {
+      return false;
+    }
+
+    const key = (item.key as any).value as RootKey;
+    if (!context.rootKeys.includes(key)) {
+      return false;
+    }
+    if (!item.value?.loc) {
+      return false;
+    }
+
+    const start = lastPrisma + item.value.loc.start.offset;
+    const end = lastPrisma + item.value.loc.end.offset;
+    return curOffset >= start && curOffset <= end;
+  });
+}
+
+function createRootKeyCompletions(
+  context: CompletionContext
+): vscode.CompletionItem[] {
+  const { rootKeys, pos, already, doc } = context;
+
+  return rootKeys.map((rootKey): vscode.CompletionItem => {
+    const item = new vscode.CompletionItem(
+      `${rootKey}`,
+      vscode.CompletionItemKind.Keyword
+    );
+    item.insertText = new vscode.SnippetString(`${rootKey}' => $0`);
+    item.range = makeReplaceRange(doc, pos, already.length);
+    return item;
+  });
+}
+
+function handleSpecialCompletions(
+  context: CompletionContext,
+  arrayContext: ArrayContext
+): vscode.CompletionItem[] | null {
+  const { currentRoot, entrySide } = arrayContext;
+
+  // OrderBy value completions
+  if (currentRoot === "orderBy" && entrySide === "value") {
+    return createOrderByValueCompletions(context);
+  }
+
+  // Boolean value completions
+  if (currentRoot === "skipDuplicates" && entrySide === "value") {
+    return createBooleanCompletions(context);
+  }
+
+  // Where clause completions
+  if (currentRoot === "where") {
+    return createWhereCompletions(context, arrayContext);
+  }
+
+  // Select relation completions
+  const selectRelationCompletions = createSelectRelationCompletions(
+    context,
+    arrayContext
+  );
+  if (selectRelationCompletions) {
+    return selectRelationCompletions;
+  }
+
+  return null;
+}
+
+function createOrderByValueCompletions(
+  context: CompletionContext
+): vscode.CompletionItem[] {
+  const { pos, already, doc } = context;
+
+  return ["asc", "desc"].map((direction) => {
+    const item = new vscode.CompletionItem(
+      direction,
+      vscode.CompletionItemKind.Value
+    );
+    item.insertText = new vscode.SnippetString(`${direction}'`);
+    item.range = makeReplaceRange(doc, pos, already.length);
+    return item;
+  });
+}
+
+function createBooleanCompletions(
+  context: CompletionContext
+): vscode.CompletionItem[] {
+  const { pos, already, doc } = context;
+
+  return ["true", "false"].map((value) => {
+    const item = new vscode.CompletionItem(
+      value,
+      vscode.CompletionItemKind.Value
+    );
+    item.insertText = new vscode.SnippetString(`${value}`);
+    item.range = makeReplaceRange(doc, pos, already.length);
+    return item;
+  });
+}
+
+function createWhereCompletions(
+  context: CompletionContext,
+  arrayContext: ArrayContext
+): vscode.CompletionItem[] {
+  const { fieldMap, pos, already, doc } = context;
+  const { hostArray, parentKey } = arrayContext;
+
+  // Top-level WHERE: columns + combinators
+  if (isTopLevelWhere(context, arrayContext)) {
+    return [
+      ...createFieldCompletions(context, arrayContext),
+      ...createCombinatorCompletions(context),
+    ];
+  }
+
+  // Inside AND|OR|NOT: only columns
+  if (parentKey && ["AND", "OR", "NOT"].includes(parentKey)) {
+    return createFieldCompletions(context, arrayContext);
+  }
+
+  // Inside field filter: only operators
+  return FILTER_OPERATORS.map((operator) => {
+    const item = new vscode.CompletionItem(
+      operator,
+      vscode.CompletionItemKind.Keyword
+    );
+    item.sortText = `2_${operator}`;
+    item.insertText = new vscode.SnippetString(`${operator}' => $0`);
+    item.range = makeReplaceRange(doc, pos, already.length);
+    return item;
+  });
+}
+
+function isTopLevelWhere(
+  context: CompletionContext,
+  arrayContext: ArrayContext
+): boolean {
+  const { callNode, lastPrisma } = context;
+  const { hostArray } = arrayContext;
+
+  const argsArr = callNode.arguments?.[0] as PhpArray;
+  const topWhereEntry = (argsArr.items as Entry[]).find(
+    (e) =>
+      e.key?.kind === "string" &&
+      (e.key as any).value === "where" &&
+      isArray(e.value)
+  );
+
+  return topWhereEntry?.value === hostArray;
+}
+
+function createCombinatorCompletions(
+  context: CompletionContext
+): vscode.CompletionItem[] {
+  const { pos, already, doc } = context;
+
+  return ["AND", "OR", "NOT"].map((combinator) => {
+    const item = new vscode.CompletionItem(
+      combinator,
+      vscode.CompletionItemKind.Keyword
+    );
+    item.sortText = `1_${combinator}`;
+    item.insertText = new vscode.SnippetString(`${combinator}' => $0`);
+    item.range = makeReplaceRange(doc, pos, already.length);
+    return item;
+  });
+}
+
+function createSelectRelationCompletions(
+  context: CompletionContext,
+  arrayContext: ArrayContext
+): vscode.CompletionItem[] | null {
+  const { fieldMap, modelMap, pos, already, doc } = context;
+  const { currentRoot, nestedRoot, entrySide } = arrayContext;
+
+  if (
+    currentRoot !== "select" ||
+    !nestedRoot ||
+    entrySide !== "key" ||
+    !fieldMap.has(nestedRoot)
+  ) {
+    return null;
+  }
+
+  const relationInfo = fieldMap.get(nestedRoot)!;
+  const isRelation = Array.from(modelMap.keys()).includes(
+    relationInfo.type.toLowerCase()
+  );
+
+  if (!isRelation) {
+    return null;
+  }
+
+  const relationOps = ["select", "include", "omit", "where"] as const;
+  return relationOps.map((op) => {
+    const item = new vscode.CompletionItem(
+      op,
+      vscode.CompletionItemKind.Keyword
+    );
+    item.insertText = new vscode.SnippetString(`${op}' => `);
+    item.range = makeReplaceRange(doc, pos, already.length);
+    return item;
+  });
+}
+
+function shouldProvideFieldCompletions(
+  currentRoot?: RootKey,
+  entrySide?: "key" | "value" | null
+): boolean {
+  if (!currentRoot || entrySide !== "key") {
+    return false;
+  }
+
+  const fieldRoots = [
+    "data",
+    "where",
+    "select",
+    "include",
+    "orderBy",
+    "distinct",
+    "omit",
+    "update",
+    "create",
+    "having",
+    "by",
+    "_count",
+    "_max",
+    "_min",
+    "_avg",
+    "_sum",
+  ];
+
+  return fieldRoots.includes(currentRoot);
+}
+
+function createFieldCompletions(
+  context: CompletionContext,
+  arrayContext: ArrayContext
+): vscode.CompletionItem[] {
+  const { currentRoot } = arrayContext;
+  const fieldSuggestions = determineFieldSuggestions(context, arrayContext);
+
+  if (currentRoot === "where") {
+    return createWhereFieldCompletions(context, fieldSuggestions);
+  }
+
+  return createStandardFieldCompletions(context, fieldSuggestions);
+}
+
+function determineFieldSuggestions(
+  context: CompletionContext,
+  arrayContext: ArrayContext
+): [string, FieldInfo][] {
+  const { fieldMap, modelMap } = context;
+  const { currentRoot, nestedRoot } = arrayContext;
+
+  // Handle special cases
+  if (currentRoot === "_count") {
+    return [
+      [
+        "select",
+        { type: "boolean", required: false, isList: false, nullable: true },
+      ],
+    ];
+  }
+
+  if (currentRoot === "include") {
+    const relations = [...fieldMap.entries()].filter(([, info]) =>
+      Array.from(modelMap.keys()).includes(info.type.toLowerCase())
+    );
+    relations.push([
+      "_count",
+      { type: "boolean", required: false, isList: false, nullable: true },
+    ]);
+    return relations;
+  }
+
+  // Handle nested relation fields
+  if (currentRoot === "select" && nestedRoot && fieldMap.has(nestedRoot)) {
+    const relationInfo = fieldMap.get(nestedRoot)!;
+    const relationMap = modelMap.get(relationInfo.type.toLowerCase());
+    if (relationMap) {
+      return [...relationMap.entries()];
+    }
+  }
+
+  // Default: return all fields
+  return [...fieldMap.entries()];
+}
+
+function createWhereFieldCompletions(
+  context: CompletionContext,
+  suggestions: [string, FieldInfo][]
+): vscode.CompletionItem[] {
+  const { pos, already, doc } = context;
+
+  return suggestions.map(([name, info]) => {
+    const typeStr = `${info.type}${info.isList ? "[]" : ""}`;
+    const optional = info.nullable;
+
+    const label: vscode.CompletionItemLabel = {
+      label: optional ? `${name}?` : name,
+      detail: `: ${typeStr}`,
+    };
+
+    const item = new vscode.CompletionItem(
+      label,
+      vscode.CompletionItemKind.Field
+    );
+
+    item.sortText = `0_${name}`;
+    item.insertText = new vscode.SnippetString(`${name}' => $0`);
+    item.documentation = new vscode.MarkdownString(
+      `**Type**: \`${typeStr}\`\n\n- **Required**: ${!info.nullable}\n- **Nullable**: ${
+        info.nullable
+      }`
+    );
+    item.range = makeReplaceRange(doc, pos, already.length);
+    return item;
+  });
+}
+
+function createStandardFieldCompletions(
+  context: CompletionContext,
+  suggestions: [string, FieldInfo][]
+): vscode.CompletionItem[] {
+  const { pos, already, doc } = context;
+
+  return suggestions.map(([name, info]) => {
+    const typeStr = `${info.type}${info.isList ? "[]" : ""}`;
+    const optional = info.nullable;
+
+    const label: vscode.CompletionItemLabel = {
+      label: optional ? `${name}?` : name,
+      detail: `: ${typeStr}`,
+    };
+
+    const item = new vscode.CompletionItem(
+      label,
+      vscode.CompletionItemKind.Field
+    );
+
+    item.insertText = new vscode.SnippetString(`${name}' => $0`);
+    item.documentation = new vscode.MarkdownString(
+      `**Type**: \`${typeStr}\`\n\n- **Required**: ${!info.nullable}\n- **Nullable**: ${
+        info.nullable
+      }`
+    );
+    item.range = makeReplaceRange(doc, pos, already.length);
+    return item;
+  });
 }
 
 export interface FieldInfo {
