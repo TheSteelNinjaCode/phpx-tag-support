@@ -2685,6 +2685,14 @@ export function* findPlaceholders(src: string) {
   }
 }
 
+const functionCallRegex = /(?<![.$])\b([A-Za-z_$][\w$]*)\b(?=\s*\()/g;
+const FUNCTION_CALL_COLOR = "#DCDCAA";
+const functionCallDecorationType = vscode.window.createTextEditorDecorationType(
+  {
+    color: FUNCTION_CALL_COLOR,
+  }
+);
+
 function updateNativeTokenDecorations(
   document: vscode.TextDocument,
   funcDecoType: vscode.TextEditorDecorationType,
@@ -2696,17 +2704,21 @@ function updateNativeTokenDecorations(
   }
 
   const text = document.getText();
+
+  /* ── 0️⃣  colecciones de rangos por tipo de token ──────────────── */
   const funcDecorations: vscode.DecorationOptions[] = [];
   const nativePropDecorations: vscode.DecorationOptions[] = [];
   const objectPropDecorations: vscode.DecorationOptions[] = [];
   const numberDecorations: vscode.DecorationOptions[] = [];
   const stringSpans: vscode.DecorationOptions[] = [];
+  const functionCallDecos: vscode.DecorationOptions[] = [];
 
+  /* ── 1️⃣  recorra cada expresión {{ … }} encontrada ─────────────── */
   for (const exprMatch of text.matchAll(JS_EXPR_REGEX)) {
     const jsExpr = exprMatch[1];
     const baseIndex = exprMatch.index! + exprMatch[0].indexOf(jsExpr);
 
-    // — highlight native string *methods* as before
+    /* — a) métodos nativos de String (substring, padEnd, …) — */
     for (const m of jsExpr.matchAll(nativeFuncRegex)) {
       const start = baseIndex + m.index!;
       const end = start + m[0].length;
@@ -2718,7 +2730,7 @@ function updateNativeTokenDecorations(
       });
     }
 
-    // — highlight native string *properties* as before
+    /* — b) propiedades nativas de String (length, …) — */
     for (const m of jsExpr.matchAll(nativePropRegex)) {
       const start = baseIndex + m.index!;
       const end = start + m[0].length;
@@ -2730,15 +2742,13 @@ function updateNativeTokenDecorations(
       });
     }
 
-    // — now highlight **only** your own object.property
+    /* — c) propiedades de objetos de usuario (foo.bar) — */
     for (const m of jsExpr.matchAll(objectPropRegex)) {
-      // m[0] is the property name after the dot
-      // skip if it’s one of the native‐string props or methods
       if (
         NATIVE_STRING_METHODS.includes(m[0]) ||
         NATIVE_STRING_PROPS.includes(m[0])
       ) {
-        continue;
+        continue; // ya coloreadas como nativas
       }
       const start = baseIndex + m.index!;
       const end = start + m[0].length;
@@ -2750,6 +2760,7 @@ function updateNativeTokenDecorations(
       });
     }
 
+    /* — d) literales numéricos — */
     for (const numMatch of jsExpr.matchAll(numberRegex)) {
       const start = baseIndex + numMatch.index!;
       const end = start + numMatch[0].length;
@@ -2761,11 +2772,32 @@ function updateNativeTokenDecorations(
       });
     }
 
+    /* — e) llamadas de función:  myFunc(arg1)  — */
+    for (const fc of jsExpr.matchAll(functionCallRegex)) {
+      const ident = fc[1];
+      if (
+        NATIVE_STRING_METHODS.includes(ident) ||
+        NATIVE_STRING_PROPS.includes(ident)
+      ) {
+        continue; // evitar duplicar nativas
+      }
+      const start = baseIndex + fc.index!;
+      const end = start + ident.length;
+      functionCallDecos.push({
+        range: new vscode.Range(
+          document.positionAt(start),
+          document.positionAt(end)
+        ),
+      });
+    }
+
+    /* — f) template literals  `Hola ${name}` — */
     for (const tl of jsExpr.matchAll(templateLiteralRegex)) {
       const tplBase = baseIndex + tl.index!;
       const raw = tl[0];
       const inner = raw.slice(1, -1);
 
+      // tildes de apertura y cierre
       stringSpans.push({
         range: new vscode.Range(
           document.positionAt(tplBase),
@@ -2779,6 +2811,7 @@ function updateNativeTokenDecorations(
         ),
       });
 
+      // fragmentos literales entre ${ … }
       let last = 0;
       for (const ph of findPlaceholders(inner)) {
         const litStart = tplBase + 1 + last;
@@ -2793,7 +2826,6 @@ function updateNativeTokenDecorations(
         }
         last = ph.end;
       }
-
       if (last < inner.length) {
         const litStart = tplBase + 1 + last;
         const litEnd = tplBase + 1 + inner.length;
@@ -2807,11 +2839,13 @@ function updateNativeTokenDecorations(
     }
   }
 
+  /* ── 2️⃣  aplicar todas las decoraciones ───────────────────────── */
   editor.setDecorations(funcDecoType, funcDecorations);
   editor.setDecorations(propDecoType, nativePropDecorations);
   editor.setDecorations(objectPropertyDecorationType, objectPropDecorations);
   editor.setDecorations(numberDecorationType, numberDecorations);
   editor.setDecorations(tplLiteralDecorationType, stringSpans);
+  editor.setDecorations(functionCallDecorationType, functionCallDecos);
 }
 
 /* ────────────────────────────────────────────────────────────── *
