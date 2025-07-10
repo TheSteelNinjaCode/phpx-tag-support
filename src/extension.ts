@@ -2193,6 +2193,12 @@ const blankMustaches = (txt: string) =>
 function sanitizeForDiagnosticsXML(raw: string): string {
   let text = raw;
 
+  /* 0️⃣ NEW: hide JS inside <script> … </script>  */
+  text = text.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gi, (full, body) => {
+    // keep the tags, blank out only the body
+    return full.replace(body, spacer(body));
+  });
+
   // ── 0️⃣ Remove PHP variable assignments with regex patterns first ──
   text = sanitizePhpVariableAssignments(text);
 
