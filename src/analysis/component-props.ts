@@ -2,6 +2,7 @@ import { Node } from "php-parser";
 import * as fs from "fs";
 import * as vscode from "vscode";
 import { phpEngine } from "../util/php-engine";
+import { getComponentsFromClassLog } from "../extension";
 
 /**
  * php‑parser uses bit‑flags for visibility.  Public = 4.
@@ -26,7 +27,7 @@ interface PropMeta {
 
 type Cached = { mtime: number; props: PropMeta[] };
 
-export function isAllowed(meta: any, value: string): boolean {
+function isAllowed(meta: any, value: string): boolean {
   // If no allowed values specified, only check if value matches the type
   if (!meta.allowed) {
     return isValidType(meta.type, value);
@@ -402,6 +403,124 @@ export class ComponentPropsProvider {
       }
     }
   }
+}
+
+/* ────────────────────────────────────────────────────────────── *
+ *        1️⃣  A tiny validator for component‑prop *values*        *
+ * ────────────────────────────────────────────────────────────── */
+
+const ATTR_VALUE_DIAG =
+  vscode.languages.createDiagnosticCollection("phpx-attr-values");
+
+export function validateComponentPropValues(
+  doc: vscode.TextDocument,
+  propsProvider: ComponentPropsProvider
+) {
+  if (doc.languageId !== "php") {
+    return;
+  }
+
+  const text = doc.getText();
+  const diags: vscode.Diagnostic[] = [];
+
+  /*           <Tag  foo="bar"  other="…">                            */
+  const tagRe = /<\s*([A-Z][A-Za-z0-9_]*)\b([^>]*?)\/?>/g; // entire opening tag
+  const attrRe = /([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"/g; // every attr="val"
+
+  let tagMatch: RegExpExecArray | null;
+  while ((tagMatch = tagRe.exec(text))) {
+    const [, tag, attrPart] = tagMatch;
+
+    // ✅ FIX: Reset regex state and get props for THIS specific component
+    attrRe.lastIndex = 0;
+
+    const props = propsProvider.getProps(tag);
+    if (!props.length) {
+      continue;
+    }
+
+    // ✅ FIX: Add logging to debug which component we're validating
+    console.log(
+      `Validating component: ${tag}, Props:`,
+      props.map((p) => `${p.name}${p.optional ? "?" : ""}`)
+    );
+
+    /* record which attrs we actually saw in this tag */
+    const present = new Set<string>();
+
+    /* ── 1️⃣  validate values that ARE present ─────────────────── */
+    let attrMatch: RegExpExecArray | null;
+    while ((attrMatch = attrRe.exec(attrPart))) {
+      const [, attrName, value] = attrMatch;
+      present.add(attrName);
+
+      const meta = props.find((p) => p.name === attrName);
+      if (!meta) {
+        continue; // we don't know this prop
+      }
+
+      if (!isAllowed(meta, value)) {
+        const tagStart = tagMatch.index;
+        const attrRelOffset = tagMatch[0].indexOf(attrMatch[0]);
+        const absStart = tagStart + attrRelOffset + attrMatch[0].indexOf(value);
+        const absEnd = absStart + value.length;
+
+        const allowedInfo = meta.allowed
+          ? `Allowed values: ${meta.allowed.replace(/\|/g, ", ")}`
+          : `Expected type: ${meta.type}`;
+
+        diags.push(
+          new vscode.Diagnostic(
+            new vscode.Range(doc.positionAt(absStart), doc.positionAt(absEnd)),
+            `Invalid value "${value}". ${allowedInfo}`,
+            vscode.DiagnosticSeverity.Warning
+          )
+        );
+      }
+    }
+
+    /* ── 2️⃣  flag *missing* required props ─────────────────────── */
+    for (const p of props) {
+      if (!p.optional && !present.has(p.name)) {
+        // ✅ FIX: Add detailed logging to track the issue
+        console.log(`Component ${tag} is missing required prop: ${p.name}`);
+        console.log(`Present attributes:`, Array.from(present));
+
+        // ✅ FIX: Double-check that this prop actually belongs to this component
+        const componentsMap = getComponentsFromClassLog();
+        const fqcn = componentsMap.get(tag);
+        console.log(`FQCN for ${tag}:`, fqcn);
+
+        // ✅ FIX: Only add diagnostic if we're sure this is the right component
+        if (
+          fqcn &&
+          propsProvider
+            .getProps(tag)
+            .some((prop) => prop.name === p.name && !prop.optional)
+        ) {
+          // highlight the tag name itself for visibility
+          const tagNameStart = tagMatch.index + 1; // skip '<'
+          const tagNameEnd = tagNameStart + tag.length;
+
+          diags.push(
+            new vscode.Diagnostic(
+              new vscode.Range(
+                doc.positionAt(tagNameStart),
+                doc.positionAt(tagNameEnd)
+              ),
+              `Missing required attribute "${p.name}" for component <${tag}>.`,
+              vscode.DiagnosticSeverity.Error
+            )
+          );
+        }
+      }
+    }
+
+    // ✅ FIX: Reset regex state after each tag
+    attrRe.lastIndex = 0;
+  }
+
+  ATTR_VALUE_DIAG.set(doc.uri, diags);
 }
 
 /* ------------------------------------------------------------- *

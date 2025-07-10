@@ -20,7 +20,7 @@ import type { FqcnToFile } from "./analysis/component-props";
 import {
   ComponentPropsProvider,
   buildDynamicAttrItems,
-  isAllowed,
+  validateComponentPropValues,
 } from "./analysis/component-props";
 import { buildAttrCompletions } from "./settings/pp-attributes";
 import {
@@ -1141,90 +1141,6 @@ export async function activate(context: vscode.ExtensionContext) {
     null,
     context.subscriptions
   );
-}
-
-/* ────────────────────────────────────────────────────────────── *
- *        1️⃣  A tiny validator for component‑prop *values*        *
- * ────────────────────────────────────────────────────────────── */
-
-const ATTR_VALUE_DIAG =
-  vscode.languages.createDiagnosticCollection("phpx-attr-values");
-
-function validateComponentPropValues(
-  doc: vscode.TextDocument,
-  propsProvider: ComponentPropsProvider
-) {
-  if (doc.languageId !== "php") {
-    return;
-  }
-
-  const text = doc.getText();
-  const diags: vscode.Diagnostic[] = [];
-
-  /*           <Tag  foo="bar"  other="…">                            */
-  const tagRe = /<\s*([A-Z][A-Za-z0-9_]*)\b([^>]*?)\/?>/g; // entire opening tag
-  const attrRe = /([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"/g; // every attr="val"
-
-  let tagMatch: RegExpExecArray | null;
-  while ((tagMatch = tagRe.exec(text))) {
-    const [, tag, attrPart] = tagMatch;
-    const props = propsProvider.getProps(tag);
-    if (!props.length) {
-      continue;
-    }
-
-    /* record which attrs we actually saw in this tag */
-    const present = new Set<string>();
-
-    /* ── 1️⃣  validate values that ARE present ─────────────────── */
-    let attrMatch: RegExpExecArray | null;
-    while ((attrMatch = attrRe.exec(attrPart))) {
-      const [, attrName, value] = attrMatch;
-      present.add(attrName);
-
-      const meta = props.find((p) => p.name === attrName);
-      if (!meta) {
-        continue; // we don't know this prop
-      }
-
-      if (!isAllowed(meta, value)) {
-        const tagStart = tagMatch.index;
-        const attrRelOffset = tagMatch[0].indexOf(attrMatch[0]);
-        const absStart = tagStart + attrRelOffset + attrMatch[0].indexOf(value);
-        const absEnd = absStart + value.length;
-
-        // Better error message showing allowed values
-        const allowedInfo = meta.allowed
-          ? `Allowed values: ${meta.allowed.replace(/\|/g, ", ")}`
-          : `Expected type: ${meta.type}`;
-
-        diags.push(
-          new vscode.Diagnostic(
-            new vscode.Range(doc.positionAt(absStart), doc.positionAt(absEnd)),
-            `Invalid value "${value}". ${allowedInfo}`,
-            vscode.DiagnosticSeverity.Warning
-          )
-        );
-      }
-    }
-
-    /* ── 2️⃣  flag *missing* required props ─────────────────────── */
-    for (const p of props) {
-      if (!p.optional && !present.has(p.name)) {
-        // highlight the tag name itself for visibility
-        const tagNamePos = doc.positionAt(tagMatch.index + 1); // skip '<'
-        diags.push(
-          new vscode.Diagnostic(
-            new vscode.Range(tagNamePos, tagNamePos.translate(0, tag.length)),
-            `Missing required attribute "${p.name}".`,
-            vscode.DiagnosticSeverity.Error
-          )
-        );
-      }
-    }
-  }
-
-  ATTR_VALUE_DIAG.set(doc.uri, diags);
 }
 
 /* ────────────────────────────────────────────────────────────── *
@@ -2374,7 +2290,7 @@ async function loadComponentsFromClassLog(): Promise<void> {
 /**
  * Returns the cached components map.
  */
-function getComponentsFromClassLog(): Map<string, string> {
+export function getComponentsFromClassLog(): Map<string, string> {
   return componentsCache;
 }
 

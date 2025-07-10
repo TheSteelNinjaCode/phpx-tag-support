@@ -81,6 +81,18 @@ export const ATTRS: readonly AttrDoc[] = [
       "Synchronises the element’s value with the current URL’s **query‑string** (great for filters & pagination).",
     mdExtra: `[Full docs](https://prismaphp.tsnc.tech/docs?doc=pp-append-params)`,
   },
+  {
+    label: "pp-init-state",
+    blurb:
+      "The pp-init-state directive is used to initialize reactive state variables directly in your DOM elements. It provides a declarative way to set up initial values, especially useful when creating standalone components without needing an explicit <script> block.",
+    mdExtra: `[Full docs](https://prismaphp.tsnc.tech/docs?doc=pp-init-state)`,
+  },
+  {
+    label: "pp-append-params",
+    blurb:
+      "Synchronises the element’s value with the current URL’s **query‑string** (great for filters & pagination).",
+    mdExtra: `[Full docs](https://prismaphp.tsnc.tech/docs?doc=pp-append-params)`,
+  },
 
   /* ── Reactivity & refs ─────────────────────────────────── */
   {
