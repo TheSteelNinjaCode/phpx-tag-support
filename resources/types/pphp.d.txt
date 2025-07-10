@@ -40,8 +40,6 @@ declare class PPHP {
     private _inlineModuleFns;
     private _currentExecutionScope;
     private _isInNavigation;
-    private _registeredEffectHashes;
-    private _navigationId;
     private readonly _eventHandlers;
     private readonly _redirectRegex;
     private readonly _assignmentRe;
@@ -78,7 +76,6 @@ declare class PPHP {
     private generateScopedKey;
     ref(key: string, index?: number): HTMLElement | HTMLElement[];
     effect(fn: () => void | (() => void), deps?: (string | (() => any))[]): () => void;
-    private generateEffectHash;
     private resolveDependencyPath;
     private getResolvedValue;
     private hasValueChanged;

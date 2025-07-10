@@ -2513,15 +2513,25 @@ export function containsJsAssignment(expr: string): boolean {
  *   $bar   → bar
  */
 function preNormalizePhpVars(text: string): string {
-  return text.replace(
-    /{{([\s\S]*?)}}/g,
-    (_, inside) =>
-      "{{" +
-      inside
-        .replace(/\{\s*\$([A-Za-z_]\w*)\s*\}/g, "$1")
-        .replace(/\$([A-Za-z_]\w*)/g, "$1") +
-      "}}"
-  );
+  return text.replace(/{{([\s\S]*?)}}/g, (_, inside) => {
+    const normal = inside
+      /* ①  {$this->index}   →   this.index */
+      .replace(/\{\s*\$([A-Za-z_]\w*)\s*->\s*([A-Za-z_]\w*)\s*\}/g, "$1.$2")
+
+      /* ②  {$foo}           →   foo */
+      .replace(/\{\s*\$([A-Za-z_]\w*)\s*\}/g, "$1")
+
+      /* ③  variables sueltas $bar → bar */
+      .replace(/\$([A-Za-z_]\w*)/g, "$1")
+
+      /* ④  flechas restantes  ->  →  .  */
+      .replace(/->/g, ".")
+
+      /* ⑤  quita llaves residuales {this.index} → this.index */
+      .replace(/\{([A-Za-z_][\w$.]*)\}/g, "$1");
+
+    return "{{" + normal + "}}";
+  });
 }
 
 // A cache to remember the last set of diagnostics per document URI
