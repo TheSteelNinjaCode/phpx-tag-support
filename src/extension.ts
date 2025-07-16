@@ -807,20 +807,43 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   const fqcnToFile: FqcnToFile = (fqcn) => {
-    const entry = getComponentsFromClassLog().get(getLastPart(fqcn));
-    if (!entry) {
+
+    // 🔧 FIX: Look up the file path directly from class-log.json data
+    // instead of using the processed cache
+    const wsFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!wsFolder) {
       return undefined;
     }
 
-    const sourceRoot = vscode.workspace
-      .getConfiguration("phpx-tag-support")
-      .get("sourceRoot", "src");
-
-    return path.join(
-      vscode.workspace.workspaceFolders![0].uri.fsPath,
-      sourceRoot,
-      entry.replace(/\\/g, "/") + ".php"
+    // Read the class-log.json directly
+    const jsonUri = vscode.Uri.joinPath(
+      wsFolder.uri,
+      "settings",
+      "class-log.json"
     );
+
+    try {
+      const data = fs.readFileSync(jsonUri.fsPath, "utf8");
+      const jsonMapping = JSON.parse(data);
+      const entry = jsonMapping[fqcn];
+      if (!entry) {
+        return undefined;
+      }
+
+      const sourceRoot = vscode.workspace
+        .getConfiguration("phpx-tag-support")
+        .get("sourceRoot", "src");
+
+      const filePath = path.join(
+        wsFolder.uri.fsPath,
+        sourceRoot,
+        entry.filePath.replace(/\\/g, "/")
+      );
+
+      return filePath;
+    } catch (error) {
+      return undefined;
+    }
   };
 
   const propsProvider = new ComponentPropsProvider(

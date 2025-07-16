@@ -254,6 +254,7 @@ export class ComponentPropsProvider {
     /* 1️⃣ localizar el archivo --------------------------------------- */
     const fqcn = this.tagMap.get(tag);
     const file = fqcn && this.fqcnToFile(fqcn);
+
     if (!file || !fs.existsSync(file)) {
       return [];
     }
@@ -268,11 +269,10 @@ export class ComponentPropsProvider {
     /* 3️⃣ parsear el AST completo ------------------------------------ */
     const src = fs.readFileSync(file, "utf8");
     const ast = phpEngine.parseCode(src, file);
-    console.log("🚀 ~ ComponentPropsProvider ~ getProps ~ ast:", ast);
     const comments = ast.comments ?? [];
-    console.log("🚀 ~ ComponentPropsProvider ~ getProps ~ comments:", comments);
 
-    const targetClass = fqcn!.split("\\").pop()!; // «InputOTPSlot» p.ej.
+    // 🔧 FIX: Extract the correct target class name from the FQCN
+    const targetClass = fqcn!.split("\\").pop()!;
     const props: PropMeta[] = [];
 
     /* ——— helpers locales ——————————————————————————————— */
@@ -367,55 +367,54 @@ export class ComponentPropsProvider {
         }
       }
 
-      props.push({
+      const finalProp = {
         name,
         type: finalType ?? "mixed",
         default: Array.isArray(def) ? def.join("|") : def,
         doc: docRaw?.split(/\r?\n/)[0],
         optional,
         allowed: allowedLiterals,
-      });
+      };
+
+      props.push(finalProp);
     };
 
-    /* ——— recorrer SOLO la clase que importa ———————————————— */
-    const walk = (node: any, inside: boolean) => {
-      /* entrar en class … { } */
-      if (node.kind === "class") {
-        const isTarget = (node.name?.name ?? node.name) === targetClass;
-        node.body?.forEach((child: any) => walk(child, isTarget));
-        return;
+    /* ——— 🔧 FIX: Find and process the specific target class ——— */
+    const walkClass = (classNode: any) => {
+      const className = classNode.name?.name ?? classNode.name;
+
+      if (className !== targetClass) {
+        return; // Skip classes that don't match
       }
 
-      /* dentro de la clase correcta → procesar props ----------------- */
-      if (inside) {
+      // Only process the direct body of the target class
+      for (const stmt of classNode.body ?? []) {
         if (
-          node.kind === "propertystatement" ||
-          node.kind === "promotedproperty" ||
-          node.kind === "classconstant"
+          stmt.kind === "propertystatement" ||
+          stmt.kind === "promotedproperty" ||
+          stmt.kind === "classconstant"
         ) {
-          const stmt: any = node;
-          console.log("🚀 ~ ComponentPropsProvider ~ walk ~ stmt:", stmt);
           const pub =
             ((stmt.flags ?? 0) & FLAG_PUBLIC) !== 0 ||
             stmt.visibility === "public";
 
           if (!pub) {
-            return;
+            continue;
           }
 
           const members =
-            node.kind !== "classconstant"
+            stmt.kind !== "classconstant"
               ? stmt.properties ?? []
               : stmt.constants ?? [];
 
-          for (const m of members) {
-            pushProp(stmt, m, m.name, m.value);
+          for (const member of members) {
+            pushProp(stmt, member, member.name, member.value);
           }
         }
 
         /* promoted‑properties en __construct() ----------------------- */
-        if (node.kind === "method" && node.name?.name === "__construct") {
-          for (const param of node.arguments ?? []) {
+        if (stmt.kind === "method" && stmt.name?.name === "__construct") {
+          for (const param of stmt.arguments ?? []) {
             if (
               param.kind === "parameter" &&
               ((param.flags ?? 0) & FLAG_PUBLIC) !== 0
@@ -425,19 +424,26 @@ export class ComponentPropsProvider {
           }
         }
       }
+    };
 
-      /* recursión genérica ------------------------------------------ */
-      for (const k of Object.keys(node)) {
-        const child = (node as any)[k];
-        if (Array.isArray(child)) {
-          child.forEach((c) => c && walk(c, inside));
-        } else if (child && typeof child === "object" && child.kind) {
-          walk(child, inside);
+    /* ——— 🔧 FIX: Find all classes in the file ——— */
+    const findClasses = (node: any) => {
+      if (node.kind === "class") {
+        walkClass(node);
+        return; // Don't recurse into class body, we handle it above
+      }
+
+      // Only recurse into container nodes
+      if (node.kind === "namespace" || node.kind === "program") {
+        for (const child of node.children ?? []) {
+          if (child && typeof child === "object" && child.kind) {
+            findClasses(child);
+          }
         }
       }
     };
 
-    walk(ast, false);
+    findClasses(ast);
 
     /* 4️⃣ cache y return -------------------------------------------- */
     this.cache.set(tag, { mtime, props });
@@ -447,22 +453,6 @@ export class ComponentPropsProvider {
   /** Clear cache – call when class files change. */
   public clear(): void {
     this.cache.clear();
-  }
-
-  /* --- tiny recursive walker -------------------------------- */
-  private walk(node: Node, visit: (n: Node) => void): void {
-    visit(node);
-    for (const key of Object.keys(node)) {
-      const child = (node as any)[key];
-      if (!child) {
-        continue;
-      }
-      if (Array.isArray(child)) {
-        child.forEach((c) => c && this.walk(c, visit));
-      } else if (typeof child === "object" && child.kind) {
-        this.walk(child as Node, visit);
-      }
-    }
   }
 }
 
@@ -484,24 +474,16 @@ export function validateComponentPropValues(
   const text = doc.getText();
   const diags: vscode.Diagnostic[] = [];
 
-  /*           <Tag  foo="bar"  other="…">                            */
-  const tagRe = /<\s*([A-Z][A-Za-z0-9_]*)\b([^>]*?)\/?>/g; // entire opening tag
-  const attrRe = /([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"/g; // every attr="val"
+  const tagRe = /<\s*([A-Z][A-Za-z0-9_]*)\b([^>]*?)\/?>/g;
+  const attrRe = /([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"/g;
 
   let tagMatch: RegExpExecArray | null;
   while ((tagMatch = tagRe.exec(text))) {
     const [, tag, attrPart] = tagMatch;
 
-    // ✅ FIX: Reset regex state and get props for THIS specific component
     attrRe.lastIndex = 0;
 
     const props = propsProvider.getProps(tag);
-
-    // ✅ FIX: Add logging to debug which component we're validating
-    console.log(
-      `Validating component: ${tag}, Props:`,
-      props.map((p) => `${p.name}${p.optional ? "?" : ""}`)
-    );
 
     /* record which attrs we actually saw in this tag */
     const present = new Set<string>();
@@ -540,14 +522,9 @@ export function validateComponentPropValues(
     /* ── 2️⃣  flag *missing* required props ─────────────────────── */
     for (const p of props) {
       if (!p.optional && !present.has(p.name)) {
-        // ✅ FIX: Add detailed logging to track the issue
-        console.log(`Component ${tag} is missing required prop: ${p.name}`);
-        console.log(`Present attributes:`, Array.from(present));
-
         // ✅ FIX: Double-check that this prop actually belongs to this component
         const componentsMap = getComponentsFromClassLog();
         const fqcn = componentsMap.get(tag);
-        console.log(`FQCN for ${tag}:`, fqcn);
 
         // ✅ FIX: Only add diagnostic if we're sure this is the right component
         if (
