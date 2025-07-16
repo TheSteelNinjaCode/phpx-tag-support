@@ -1,6 +1,6 @@
 declare global {
     interface EventTarget {
-        removeAllEventListeners(type: string): void;
+        removeAllEventListeners(type?: string): void;
     }
 }
 type LocalStoreState = Record<string, any>;
@@ -39,7 +39,7 @@ declare class PPHP {
     private _currentTemplateHierarchy;
     private _inlineModuleFns;
     private _currentExecutionScope;
-    private _isInNavigation;
+    private _transitionStyleInjected;
     private readonly _eventHandlers;
     private readonly _redirectRegex;
     private readonly _assignmentRe;
@@ -64,13 +64,6 @@ declare class PPHP {
     private decryptCallbackName;
     private qsa;
     private bootstrapDeclarativeState;
-    private _inferHierarchyFromEvent;
-    callParent<T = any>(functionNameOrFn: string | Function, ...args: any[]): T | null;
-    private callParentByName;
-    private executeInParentContext;
-    private createParentScopeContext;
-    private executeWithContext;
-    private executeArrowFunctionWithContext;
     private detectComponentHierarchy;
     private detectElementHierarchy;
     private generateScopedKey;
@@ -81,6 +74,7 @@ declare class PPHP {
     private hasValueChanged;
     private resetProps;
     private initReactiveOn;
+    private removeAllEventListenersOnNavigation;
     private initLoopBindings;
     private registerLoop;
     private processIfChainsInFragment;
@@ -139,6 +133,7 @@ declare class PPHP {
     private callInlineModule;
     private getScopedFunction;
     private processInlineModuleScripts;
+    private stateDeclarations;
     private injectScopedVariables;
     private extractStateVariables;
     private extractDeclaredVariables;
@@ -179,7 +174,16 @@ declare class PPHP {
     private extractDependencies;
     private isPlainText;
     private initializeAllReferencedProps;
-    setNestedProperty(obj: any, path: string, value: any): void;
+    private updateDocumentContent;
+    private ensurePageTransitionStyles;
+    private fadeOutBody;
+    private fadeInBody;
+    private reconcileHead;
+    private scrubTemplateValueAttributes;
+    private restoreScrollPositions;
+    private PRESERVE_HANDLERS;
+    private populateDocumentBody;
+    private saveScrollPositions;
     private attachWireFunctionEvents;
     private decodeEntities;
     private unwrapArrowBody;
@@ -255,13 +259,6 @@ declare class PPHP {
     private parseTransition;
     private fadeOut;
     private fadeIn;
-    private reconcileHead;
-    private updateDocumentContent;
-    private scrubTemplateValueAttributes;
-    private restoreScrollPositions;
-    private PRESERVE_HANDLERS;
-    private populateDocumentBody;
-    private saveScrollPositions;
     private getElementKey;
     redirect(url: string): Promise<void>;
     abortActiveRequest(): void;

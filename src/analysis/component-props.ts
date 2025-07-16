@@ -139,6 +139,56 @@ function inferTypeFromValue(v: any | undefined): string {
   }
 }
 
+function extractClassBodies(src: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const classRe = /class\s+([A-Za-z_]\w*)[^{]*\{/g;
+  let m: RegExpExecArray | null;
+
+  while ((m = classRe.exec(src))) {
+    const name = m[1];
+    let depth = 1,
+      i = classRe.lastIndex;
+    while (depth && i < src.length) {
+      if (src[i] === "{") {
+        depth++;
+      } else if (src[i] === "}") {
+        depth--;
+      }
+      i++;
+    }
+    out[name] = src.slice(classRe.lastIndex, i - 1); // cuerpo limpio
+    classRe.lastIndex = i; // seguimos tras la llave
+  }
+  return out;
+}
+
+function parsePublicProps(body: string): PropMeta[] {
+  const props: PropMeta[] = [];
+  const propRe =
+    /public\s+\??([\w\\|]+)\s+\$([A-Za-z_]\w*)(?:\s*=\s*([^;]+))?;/g;
+  let m: RegExpExecArray | null;
+
+  while ((m = propRe.exec(body))) {
+    const [, rawType, name, def] = m;
+
+    props.push({
+      name,
+      type: rawType, // dejamos todos los “|” para el tooltip
+      default: def?.trim(),
+      optional: /\bnull\b/i.test(rawType), // ← lo que pide tu interfaz
+      // doc y allowed los puedes añadir más tarde si lo necesitas
+    });
+  }
+  return props;
+}
+
+export function buildPropsFromPhpFile(fqcn: string, src: string): PropMeta[] {
+  const classes = extractClassBodies(src);
+  const short = fqcn.split("\\").pop()!;
+  const body = classes[short];
+  return body ? parsePublicProps(body) : [];
+}
+
 /* ------------------------------------------------------------- *
  * 1.  helper: extrae la primera doc-comment relevante
  * ------------------------------------------------------------- */
@@ -201,7 +251,7 @@ export class ComponentPropsProvider {
   ) {}
 
   public getProps(tag: string): PropMeta[] {
-    /* 1️⃣ locate file ------------------------------------------------- */
+    /* 1️⃣ localizar el archivo --------------------------------------- */
     const fqcn = this.tagMap.get(tag);
     const file = fqcn && this.fqcnToFile(fqcn);
     if (!file || !fs.existsSync(file)) {
@@ -215,170 +265,181 @@ export class ComponentPropsProvider {
       return hit.props;
     }
 
-    /* 3️⃣ parse ------------------------------------------------------- */
-    const ast = phpEngine.parseCode(fs.readFileSync(file, "utf8"), file);
+    /* 3️⃣ parsear el AST completo ------------------------------------ */
+    const src = fs.readFileSync(file, "utf8");
+    const ast = phpEngine.parseCode(src, file);
+    console.log("🚀 ~ ComponentPropsProvider ~ getProps ~ ast:", ast);
     const comments = ast.comments ?? [];
+    console.log("🚀 ~ ComponentPropsProvider ~ getProps ~ comments:", comments);
+
+    const targetClass = fqcn!.split("\\").pop()!; // «InputOTPSlot» p.ej.
     const props: PropMeta[] = [];
 
-    this.walk(ast, (node) => {
-      if (
-        node.kind !== "propertystatement" &&
-        node.kind !== "promotedproperty" &&
-        node.kind !== "classconstant"
-      ) {
+    /* ——— helpers locales ——————————————————————————————— */
+    const pushProp = (
+      stmt: any,
+      propNode: any,
+      nameNode: any,
+      valueNode: any | undefined
+    ) => {
+      const name =
+        typeof nameNode === "string" ? nameNode : (nameNode?.name as string);
+      if (!name) {
         return;
       }
 
-      const stmt: any = node;
-      if (
-        !(
-          ((stmt.flags ?? 0) & FLAG_PUBLIC) !== 0 ||
-          stmt.visibility === "public"
-        )
-      ) {
+      /* A) doc-comment ------------------------------------------------ */
+      const docRaw =
+        extractDocForProp(propNode, comments, name) ??
+        extractDocForProp(stmt, comments, name);
+
+      /* B) tipo declarado ------------------------------------------- */
+      const rawTypeNode = propNode.type ?? stmt.type;
+      let finalType: string | undefined =
+        rawTypeNode && typeToString(rawTypeNode);
+
+      let allowedLiterals: string | undefined;
+      let optional = false;
+
+      if (docRaw) {
+        const rx = new RegExp(
+          `@property\\s+([^\\s]+)\\s+\\$${name}\\s*(.*)`,
+          "i"
+        );
+        const mProp = rx.exec(docRaw);
+        if (mProp) {
+          const rawType = mProp[1];
+          const full = mProp[2]?.trim();
+          optional = rawType.startsWith("?");
+          finalType = rawType.replace(/^\?/, "");
+
+          if (full) {
+            const cm = /^\s*=\s*([^\s]+)(?:\s+.*)?$/.exec(full);
+            if (cm && cm[1].includes("|")) {
+              allowedLiterals = cm[1];
+            }
+          }
+        } else {
+          const mVar = /@var\s+([^\s]+)/i.exec(docRaw);
+          if (mVar) {
+            finalType = mVar[1];
+          }
+        }
+      }
+
+      /* C) fallback a declaración/inferencia ------------------------- */
+      if (!finalType && stmt.type) {
+        finalType = typeToString(stmt.type);
+      }
+      if (!finalType || finalType === "mixed") {
+        finalType = inferTypeFromValue(valueNode);
+      }
+
+      /* D) optional por nullable o default null ---------------------- */
+      const defaultIsNull = valueNode?.kind === "nullkeyword";
+      optional =
+        optional ||
+        defaultIsNull ||
+        propNode.nullable === true ||
+        /\bnull\b/.test(finalType);
+
+      /* E) default --------------------------------------------------- */
+      let def: string | string[] | undefined;
+      if (valueNode) {
+        switch (valueNode.kind) {
+          case "string":
+            def = valueNode.value;
+            break;
+          case "number":
+            def = String(valueNode.value);
+            break;
+          case "boolean":
+            def = valueNode.value ? "true" : "false";
+            break;
+          case "nullkeyword":
+            def = "null";
+            break;
+          case "array":
+            def = (valueNode.items as any[])
+              .map((it: any) => it.value?.value ?? it.key?.value)
+              .filter(Boolean);
+            break;
+        }
+      }
+
+      props.push({
+        name,
+        type: finalType ?? "mixed",
+        default: Array.isArray(def) ? def.join("|") : def,
+        doc: docRaw?.split(/\r?\n/)[0],
+        optional,
+        allowed: allowedLiterals,
+      });
+    };
+
+    /* ——— recorrer SOLO la clase que importa ———————————————— */
+    const walk = (node: any, inside: boolean) => {
+      /* entrar en class … { } */
+      if (node.kind === "class") {
+        const isTarget = (node.name?.name ?? node.name) === targetClass;
+        node.body?.forEach((child: any) => walk(child, isTarget));
         return;
       }
 
-      const members =
-        node.kind !== "classconstant"
-          ? stmt.properties ?? []
-          : stmt.constants ?? [];
+      /* dentro de la clase correcta → procesar props ----------------- */
+      if (inside) {
+        if (
+          node.kind === "propertystatement" ||
+          node.kind === "promotedproperty" ||
+          node.kind === "classconstant"
+        ) {
+          const stmt: any = node;
+          console.log("🚀 ~ ComponentPropsProvider ~ walk ~ stmt:", stmt);
+          const pub =
+            ((stmt.flags ?? 0) & FLAG_PUBLIC) !== 0 ||
+            stmt.visibility === "public";
 
-      for (const m of members) {
-        handleMember(m, m.name, m.value);
-      }
+          if (!pub) {
+            return;
+          }
 
-      /* ─────────────────────────────────────────────────────────────── */
-      function handleMember(
-        propNode: any,
-        nameNode: any,
-        valueNode: any | undefined
-      ): void {
-        const name =
-          typeof nameNode === "string" ? nameNode : (nameNode?.name as string);
-        if (!name) {
-          return;
-        }
+          const members =
+            node.kind !== "classconstant"
+              ? stmt.properties ?? []
+              : stmt.constants ?? [];
 
-        /* A) doc-comment (@property / @var) --------------------------- */
-        const docRaw =
-          extractDocForProp(propNode, comments, name) ??
-          extractDocForProp(stmt, comments, name);
-
-        /* B) declared type ------------------------------------------- */
-        const rawTypeNode = propNode.type ?? stmt.type;
-        let finalType: string | undefined =
-          rawTypeNode && typeToString(rawTypeNode);
-
-        let allowedLiterals: string | undefined;
-        let optional = false;
-
-        if (docRaw) {
-          /* @property ↓ - IMPROVED REGEX TO CAPTURE FULL COMMENT */
-          const rx = new RegExp(
-            `@property\\s+([^\\s]+)\\s+\\$${name}\\s*(.*)`,
-            "i"
-          );
-          const mProp = rx.exec(docRaw);
-          if (mProp) {
-            const rawType = mProp[1]; // ?int
-            const fullComment = mProp[2]?.trim(); // = 1|2|3|4|5|6 Your Idea
-
-            optional = rawType.startsWith("?");
-            finalType = rawType.replace(/^\?/, ""); // Remove the "?"
-
-            // Parse the comment part after the type
-            if (fullComment) {
-              // Look for pattern: = value(s) [optional description]
-              const commentMatch = /^\s*=\s*([^\s]+)(?:\s+(.*))?/.exec(
-                fullComment
-              );
-              if (commentMatch) {
-                const valuesPart = commentMatch[1]; // 1|2|3|4|5|6
-                const description = commentMatch[2]; // Your Idea
-
-                // Check if it contains multiple values (pipe-separated)
-                if (valuesPart.includes("|")) {
-                  allowedLiterals = valuesPart;
-                } else {
-                  // Single value - could be default, don't restrict
-                  // Only set default if it's not a description
-                  if (!description && !isNaN(Number(valuesPart))) {
-                    // It's a numeric default, don't restrict
-                  }
-                }
-              }
-            }
-          } else {
-            /* @var fallback ↓ */
-            const mVar = /@var\s+([^\s]+)/i.exec(docRaw);
-            if (mVar) {
-              finalType = mVar[1];
-            }
+          for (const m of members) {
+            pushProp(stmt, m, m.name, m.value);
           }
         }
 
-        /* C) fallback to declaration / inference --------------------- */
-        if (!finalType && stmt.type) {
-          finalType = typeToString(stmt.type);
-        }
-        if (!finalType || finalType === "mixed") {
-          finalType = inferTypeFromValue(valueNode);
-        }
-
-        /* D) optional via nullable/default null ---------------------- */
-        const defaultIsNull = valueNode?.kind === "nullkeyword";
-        optional =
-          optional ||
-          defaultIsNull ||
-          propNode.nullable === true ||
-          /\bnull\b/.test(finalType);
-
-        /* E) default value ------------------------------------------ */
-        let def: string | string[] | undefined;
-        if (valueNode) {
-          switch (valueNode.kind) {
-            case "string":
-              def = valueNode.value;
-              break;
-            case "number":
-              def = String(valueNode.value);
-              break;
-            case "boolean":
-              def = valueNode.value ? "true" : "false";
-              break;
-            case "nullkeyword":
-              def = "null";
-              break;
-            case "array":
-              {
-                const keys: string[] = [];
-                for (const it of valueNode.items as any[]) {
-                  if (it.key?.kind === "string") {
-                    keys.push(it.key.value);
-                  } else if (!it.key && it.value?.kind === "string") {
-                    keys.push(it.value.value);
-                  }
-                }
-                def = keys;
-              }
-              break;
+        /* promoted‑properties en __construct() ----------------------- */
+        if (node.kind === "method" && node.name?.name === "__construct") {
+          for (const param of node.arguments ?? []) {
+            if (
+              param.kind === "parameter" &&
+              ((param.flags ?? 0) & FLAG_PUBLIC) !== 0
+            ) {
+              pushProp(param, param, param.name, param.value);
+            }
           }
         }
-
-        /* F) push metadata ------------------------------------------ */
-        props.push({
-          name,
-          type: finalType ?? "mixed",
-          default: Array.isArray(def) ? def.join("|") : def,
-          doc: docRaw?.split(/\r?\n/)[0],
-          optional,
-          allowed: allowedLiterals,
-        });
       }
-    });
 
-    /* 4️⃣ cache + return -------------------------------------------- */
+      /* recursión genérica ------------------------------------------ */
+      for (const k of Object.keys(node)) {
+        const child = (node as any)[k];
+        if (Array.isArray(child)) {
+          child.forEach((c) => c && walk(c, inside));
+        } else if (child && typeof child === "object" && child.kind) {
+          walk(child, inside);
+        }
+      }
+    };
+
+    walk(ast, false);
+
+    /* 4️⃣ cache y return -------------------------------------------- */
     this.cache.set(tag, { mtime, props });
     return props;
   }
@@ -435,9 +496,6 @@ export function validateComponentPropValues(
     attrRe.lastIndex = 0;
 
     const props = propsProvider.getProps(tag);
-    if (!props.length) {
-      continue;
-    }
 
     // ✅ FIX: Add logging to debug which component we're validating
     console.log(
@@ -715,10 +773,6 @@ export function buildDynamicAttrItems(
 
         // Add visual indicators through tags
         const tags: vscode.CompletionItemTag[] = [];
-        if (optional && !def) {
-          // Optional without default - less important
-          tags.push(vscode.CompletionItemTag.Deprecated);
-        }
         if (tags.length > 0) {
           item.tags = tags;
         }
