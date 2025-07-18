@@ -120,6 +120,7 @@ declare class PPHP {
     private initRefs;
     private scheduleBindingUpdate;
     private makeReactive;
+    private shouldUnwrapValue;
     private getBindingType;
     private makeAttrTemplateUpdater;
     private formatValue;
@@ -180,10 +181,8 @@ declare class PPHP {
     private fadeInBody;
     private reconcileHead;
     private scrubTemplateValueAttributes;
-    private restoreScrollPositions;
     private PRESERVE_HANDLERS;
     private populateDocumentBody;
-    private saveScrollPositions;
     private attachWireFunctionEvents;
     private decodeEntities;
     private unwrapArrowBody;
@@ -194,7 +193,6 @@ declare class PPHP {
     private escapeRegex;
     private handleDebounce;
     debounce<T extends (...args: any[]) => void>(func: T, wait?: number, immediate?: boolean): (...args: Parameters<T>) => void;
-    private handlerAutofocusAttribute;
     private invokeHandler;
     private parseHandler;
     private isArrowFunction;
@@ -242,6 +240,7 @@ declare class PPHP {
     private getUrlParams;
     private createFetchOptions;
     private parseCallback;
+    private clean;
     private evaluateJavaScriptObject;
     private handleInputElement;
     private setCursorPosition;

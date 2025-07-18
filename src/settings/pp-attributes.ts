@@ -35,6 +35,12 @@ export const ATTRS: readonly AttrDoc[] = [
 (\`'2s'\`, \`500ms\`, \`{ start:'1s', end:'5s' }\`, …).  
 [Full docs](https://prismaphp.tsnc.tech/docs?doc=pp-display) :contentReference[oaicite:0]{index=0}`,
   },
+  {
+    label: "pp-loading-content=\"true\"",
+    blurb:
+      "A loading screen is a user interface displayed while a route is loading. This file, loading.php, defines the content shown during the loading process.",
+    mdExtra: `[Full docs](https://prismaphp.tsnc.tech/docs?doc=fc-loading)`,
+  },
 
   /* ── Network lifecycle helpers ─────────────────────────── */
   {
