@@ -481,6 +481,14 @@ function shouldProvideRootKeys(
     return false;
   }
 
+  // Check if we have any unused root keys available
+  const usedKeys = getUsedKeys(context);
+  const hasAvailableKeys = context.rootKeys.some((key) => !usedKeys.has(key));
+
+  if (!hasAvailableKeys) {
+    return false; // All keys are already used
+  }
+
   // Check if we're not inside any nested block
   return !(argsArr.items as Entry[]).some((item) => {
     if (item.key?.kind !== "string") {
@@ -504,9 +512,15 @@ function shouldProvideRootKeys(
 function createRootKeyCompletions(
   context: CompletionContext
 ): vscode.CompletionItem[] {
-  const { rootKeys, pos, already, doc } = context;
+  const { rootKeys, pos, already, doc, callNode, lastPrisma } = context;
 
-  return rootKeys.map((rootKey): vscode.CompletionItem => {
+  // Get already used keys from the current array
+  const usedKeys = getUsedKeys(context);
+
+  // Filter out already used keys
+  const availableKeys = rootKeys.filter((key) => !usedKeys.has(key));
+
+  return availableKeys.map((rootKey): vscode.CompletionItem => {
     const item = new vscode.CompletionItem(
       `${rootKey}`,
       vscode.CompletionItemKind.Keyword
@@ -515,6 +529,28 @@ function createRootKeyCompletions(
     item.range = makeReplaceRange(doc, pos, already.length);
     return item;
   });
+}
+
+function getUsedKeys(context: CompletionContext): Set<RootKey> {
+  const { callNode } = context;
+  const usedKeys = new Set<RootKey>();
+
+  const argsArr = callNode.arguments?.[0];
+  if (!isArray(argsArr)) {
+    return usedKeys;
+  }
+
+  // Check all entries in the top-level array
+  for (const item of argsArr.items as Entry[]) {
+    if (item.key?.kind === "string") {
+      const keyName = (item.key as any).value as string;
+      if (context.rootKeys.includes(keyName as RootKey)) {
+        usedKeys.add(keyName as RootKey);
+      }
+    }
+  }
+
+  return usedKeys;
 }
 
 function handleSpecialCompletions(
@@ -724,11 +760,41 @@ function createFieldCompletions(
   const { currentRoot } = arrayContext;
   const fieldSuggestions = determineFieldSuggestions(context, arrayContext);
 
+  // Get already used field names in the current array context
+  const usedFields = getUsedFieldNames(context, arrayContext);
+
+  // Filter out already used fields
+  const availableFields = fieldSuggestions.filter(
+    ([name]) => !usedFields.has(name)
+  );
+
   if (currentRoot === "where") {
-    return createWhereFieldCompletions(context, fieldSuggestions);
+    return createWhereFieldCompletions(context, availableFields);
   }
 
-  return createStandardFieldCompletions(context, fieldSuggestions);
+  return createStandardFieldCompletions(context, availableFields);
+}
+
+function getUsedFieldNames(
+  context: CompletionContext,
+  arrayContext: ArrayContext
+): Set<string> {
+  const { hostArray } = arrayContext;
+  const usedFields = new Set<string>();
+
+  if (!hostArray) {
+    return usedFields;
+  }
+
+  // Check all entries in the current array context
+  for (const item of hostArray.items as Entry[]) {
+    if (item.key?.kind === "string") {
+      const keyName = (item.key as any).value as string;
+      usedFields.add(keyName);
+    }
+  }
+
+  return usedFields;
 }
 
 function determineFieldSuggestions(
