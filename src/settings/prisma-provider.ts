@@ -445,26 +445,45 @@ function findNestedContext(
 
   // Find the path from argsArr to hostArray
   const path = findArrayPath(argsArr, hostArray);
-  if (!path || path.length < 2) {
+  if (!path || path.length < 1) {
     return null;
   }
 
   // Build the relation chain by walking through the path
   const relationChain = buildRelationChain(path, currentRoot);
 
-  if (relationChain.length === 0) {
-    return null;
+  // If we have at least one relation in the chain
+  if (relationChain.length > 0) {
+    const lastRelation = relationChain[relationChain.length - 1];
+
+    return {
+      relation: lastRelation.relationName,
+      operation: lastRelation.operation,
+      parentKey: lastRelation.relationName,
+      relationChain,
+    };
   }
 
-  // Get the last item in the chain to determine current context
-  const lastRelation = relationChain[relationChain.length - 1];
+  // Handle simple case where we're directly in a relation
+  if (path.length >= 2) {
+    const relationName = path[path.length - 2]; // The parent key
+    const operation = currentRoot as "select" | "include" | "where" | "omit";
 
-  return {
-    relation: lastRelation?.relationName,
-    operation: lastRelation?.operation,
-    parentKey: lastRelation?.relationName,
-    relationChain, // NEW: Full chain information
-  };
+    return {
+      relation: relationName,
+      operation,
+      parentKey: relationName,
+      relationChain: [
+        {
+          relationName,
+          operation,
+          modelType: "", // Will be resolved later
+        },
+      ],
+    };
+  }
+
+  return null;
 }
 
 function buildRelationChain(
@@ -473,19 +492,30 @@ function buildRelationChain(
 ): RelationChainItem[] {
   const chain: RelationChainItem[] = [];
 
-  // Skip the root operation (include/select) and process pairs
-  for (let i = 1; i < path.length; i += 2) {
-    const relationName = path[i];
-    const operation = path[i + 1];
+  // For include/select operations, the path structure is:
+  // [rootOperation, relationName, nestedOperation?, nestedRelation?, ...]
 
-    if (
-      relationName &&
-      operation &&
-      ["select", "include", "where", "omit"].includes(operation)
-    ) {
+  if (rootOperation === "include" || rootOperation === "select") {
+    // Start from index 1 (skip the root operation)
+    for (let i = 1; i < path.length; i++) {
+      const relationName = path[i];
+
+      // Determine the operation - if we have a next item and it's an operation, use it
+      // Otherwise, default to the root operation
+      let operation: "select" | "include" | "where" | "omit" =
+        rootOperation as any;
+
+      if (i + 1 < path.length) {
+        const nextItem = path[i + 1];
+        if (["select", "include", "where", "omit"].includes(nextItem)) {
+          operation = nextItem as "select" | "include" | "where" | "omit";
+          i++; // Skip the operation in next iteration
+        }
+      }
+
       chain.push({
         relationName,
-        operation: operation as "select" | "include" | "where" | "omit",
+        operation,
         modelType: "", // Will be resolved later
       });
     }
@@ -497,24 +527,30 @@ function buildRelationChain(
 // Helper function to find the path of keys from root array to target array
 function findArrayPath(
   rootArray: PhpArray,
-  targetArray: PhpArray
+  targetArray: PhpArray,
+  currentPath: string[] = []
 ): string[] | null {
   if (rootArray === targetArray) {
-    return [];
+    return currentPath;
   }
 
   for (const entry of rootArray.items as Entry[]) {
     if (entry.key?.kind === "string") {
       const keyName = (entry.key as any).value as string;
+      const newPath = [...currentPath, keyName];
 
       if (entry.value === targetArray) {
-        return [keyName];
+        return newPath;
       }
 
       if (isArray(entry.value)) {
-        const subPath = findArrayPath(entry.value as PhpArray, targetArray);
+        const subPath = findArrayPath(
+          entry.value as PhpArray,
+          targetArray,
+          newPath
+        );
         if (subPath) {
-          return [keyName, ...subPath];
+          return subPath;
         }
       }
     }
@@ -870,9 +906,14 @@ function createSelectRelationCompletions(
   arrayContext: ArrayContext
 ): vscode.CompletionItem[] | null {
   const { fieldMap, modelMap, pos, already, doc } = context;
-  const { currentRoot, entrySide, relationChain } = arrayContext;
+  const { currentRoot, entrySide, relationChain, nestedRoot } = arrayContext;
 
-  // Determine which fields we're working with
+  // Only provide completions when we're typing a key
+  if (entrySide !== "key") {
+    return null;
+  }
+
+  // Determine which fields we're working with based on relation chain
   let workingFields = fieldMap;
   let contextModelName = context.modelName;
 
@@ -881,28 +922,56 @@ function createSelectRelationCompletions(
     const targetModel = getTargetModelFromChain(relationChain, modelMap);
     if (targetModel) {
       workingFields = targetModel;
-      contextModelName = relationChain[relationChain.length - 1].modelType;
+      const lastRelation = relationChain[relationChain.length - 1];
+      contextModelName = lastRelation.modelType;
     }
   }
 
-  // Support both include->relation and select->relation patterns
-  if (
-    (currentRoot !== "select" && currentRoot !== "include") ||
-    !arrayContext.nestedRoot ||
-    entrySide !== "key" ||
-    !workingFields.has(arrayContext.nestedRoot)
-  ) {
+  // Check if we're in a relation context (either through chain or simple nested)
+  const inRelationContext =
+    (relationChain && relationChain.length > 0) ||
+    (nestedRoot && workingFields.has(nestedRoot));
+
+  if (!inRelationContext) {
     return null;
   }
 
-  const relationInfo = workingFields.get(arrayContext.nestedRoot)!;
-  const isRelation = Array.from(modelMap.keys()).includes(
-    relationInfo.type.toLowerCase()
-  );
+  // If we have a nestedRoot but no chain, handle simple case
+  if (nestedRoot && !relationChain?.length && workingFields.has(nestedRoot)) {
+    const relationInfo = workingFields.get(nestedRoot)!;
+    const isRelation = Array.from(modelMap.keys()).includes(
+      relationInfo.type.toLowerCase()
+    );
 
-  if (!isRelation) {
-    return null;
+    if (isRelation) {
+      // Provide relation operations for this nested relation
+      return createRelationOperationCompletions(
+        context,
+        nestedRoot,
+        relationInfo.type
+      );
+    }
   }
+
+  // For relation chains, provide operations for the current relation
+  if (relationChain && relationChain.length > 0) {
+    const lastRelation = relationChain[relationChain.length - 1];
+    return createRelationOperationCompletions(
+      context,
+      lastRelation.relationName,
+      lastRelation.modelType
+    );
+  }
+
+  return null;
+}
+
+function createRelationOperationCompletions(
+  context: CompletionContext,
+  relationName: string,
+  relationModelType: string
+): vscode.CompletionItem[] {
+  const { pos, already, doc } = context;
 
   // Enhanced relation operations
   const relationOps = [
@@ -922,9 +991,8 @@ function createSelectRelationCompletions(
     // Provide better snippets based on operation
     switch (op) {
       case "select":
-        item.insertText = new vscode.SnippetString(`${op}' => [\n\t$0\n]`);
-        break;
       case "include":
+      case "omit":
         item.insertText = new vscode.SnippetString(`${op}' => [\n\t$0\n]`);
         break;
       case "where":
@@ -941,8 +1009,23 @@ function createSelectRelationCompletions(
 
     item.range = makeReplaceRange(doc, pos, already.length);
     item.documentation = new vscode.MarkdownString(
-      `**${op}** operation for relation **${arrayContext.nestedRoot}** (${relationInfo.type})`
+      `**${op}** operation for relation **${relationName}** (${relationModelType})`
     );
+
+    // Add sort priority to commonly used operations
+    switch (op) {
+      case "select":
+        item.sortText = "0_select";
+        break;
+      case "include":
+        item.sortText = "0_include";
+        break;
+      case "where":
+        item.sortText = "1_where";
+        break;
+      default:
+        item.sortText = `2_${op}`;
+    }
 
     return item;
   });
