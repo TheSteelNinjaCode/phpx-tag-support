@@ -98,8 +98,9 @@ interface ArrayContext {
 interface NestedContext {
   relation?: string;
   parentKey?: string;
-  operation?: "select" | "include" | "where" | "omit"; // NEW
-  relationModel?: string; // NEW: track which model the relation points to
+  operation?: "select" | "include" | "where" | "omit";
+  relationModel?: string;
+  relationChain?: RelationChainItem[]; // NEW: Full relation chain
 }
 
 interface ArrayContext {
@@ -108,7 +109,14 @@ interface ArrayContext {
   currentRoot?: RootKey;
   nestedRoot?: string;
   parentKey?: string;
-  nestedOperation?: "select" | "include" | "where" | "omit"; // NEW
+  nestedOperation?: "select" | "include" | "where" | "omit";
+  relationChain?: RelationChainItem[]; // NEW: Full chain of relations
+}
+
+interface RelationChainItem {
+  relationName: string;
+  operation: "select" | "include" | "where" | "omit";
+  modelType: string; // The target model type
 }
 
 const FILTER_OPERATORS = [
@@ -376,8 +384,13 @@ function analyzeArrayContext(context: CompletionContext): ArrayContext | null {
     context.rootKeys
   );
 
-  // Enhanced nested root detection for include->relation->select patterns
+  // Enhanced nested root detection for deep nesting
   const nestedContext = findNestedContext(argsArr, hostArray, currentRoot);
+
+  // Resolve model types in the relation chain
+  const relationChain = nestedContext?.relationChain
+    ? resolveRelationChain(nestedContext.relationChain, context)
+    : [];
 
   return {
     hostArray,
@@ -385,8 +398,40 @@ function analyzeArrayContext(context: CompletionContext): ArrayContext | null {
     currentRoot,
     nestedRoot: nestedContext?.relation,
     parentKey: nestedContext?.parentKey,
-    nestedOperation: nestedContext?.operation, // NEW: track nested operation
+    nestedOperation: nestedContext?.operation,
+    relationChain, // NEW: Enhanced with resolved model types
   };
+}
+
+function resolveRelationChain(
+  chain: RelationChainItem[],
+  context: CompletionContext
+): RelationChainItem[] {
+  const { modelMap, fieldMap } = context;
+  const resolvedChain: RelationChainItem[] = [];
+
+  let currentFields = fieldMap; // Start with the base model fields
+
+  for (const item of chain) {
+    const relationInfo = currentFields.get(item.relationName);
+
+    if (relationInfo) {
+      const modelType = relationInfo.type;
+      const resolvedItem = {
+        ...item,
+        modelType,
+      };
+      resolvedChain.push(resolvedItem);
+
+      // Move to the next model's fields for the next iteration
+      currentFields = modelMap.get(modelType.toLowerCase()) || new Map();
+    } else {
+      // If we can't resolve, stop the chain here
+      break;
+    }
+  }
+
+  return resolvedChain;
 }
 
 function findNestedContext(
@@ -404,39 +449,49 @@ function findNestedContext(
     return null;
   }
 
-  // For include -> relation -> select pattern
-  if (currentRoot === "include" && path.length >= 3) {
-    const relationKey = path[1]; // e.g., 'userRole'
-    const operation = path[2]; // e.g., 'select'
+  // Build the relation chain by walking through the path
+  const relationChain = buildRelationChain(path, currentRoot);
 
-    return {
-      relation: relationKey,
-      operation: operation as "select" | "include" | "where" | "omit",
-      parentKey: relationKey,
-    };
+  if (relationChain.length === 0) {
+    return null;
   }
 
-  // For select -> relation -> select pattern
-  if (currentRoot === "select" && path.length >= 3) {
-    const relationKey = path[1];
-    const operation = path[2];
+  // Get the last item in the chain to determine current context
+  const lastRelation = relationChain[relationChain.length - 1];
 
-    return {
-      relation: relationKey,
-      operation: operation as "select" | "include" | "where" | "omit",
-      parentKey: relationKey,
-    };
+  return {
+    relation: lastRelation?.relationName,
+    operation: lastRelation?.operation,
+    parentKey: lastRelation?.relationName,
+    relationChain, // NEW: Full chain information
+  };
+}
+
+function buildRelationChain(
+  path: string[],
+  rootOperation: RootKey
+): RelationChainItem[] {
+  const chain: RelationChainItem[] = [];
+
+  // Skip the root operation (include/select) and process pairs
+  for (let i = 1; i < path.length; i += 2) {
+    const relationName = path[i];
+    const operation = path[i + 1];
+
+    if (
+      relationName &&
+      operation &&
+      ["select", "include", "where", "omit"].includes(operation)
+    ) {
+      chain.push({
+        relationName,
+        operation: operation as "select" | "include" | "where" | "omit",
+        modelType: "", // Will be resolved later
+      });
+    }
   }
 
-  // Simple nested case
-  if (path.length >= 2) {
-    return {
-      relation: path[1],
-      parentKey: path[1],
-    };
-  }
-
-  return null;
+  return chain;
 }
 
 // Helper function to find the path of keys from root array to target array
@@ -654,7 +709,16 @@ function handleSpecialCompletions(
   context: CompletionContext,
   arrayContext: ArrayContext
 ): vscode.CompletionItem[] | null {
-  const { currentRoot, entrySide, nestedOperation } = arrayContext;
+  const { currentRoot, entrySide, nestedOperation, relationChain } =
+    arrayContext;
+
+  // Handle deeply nested select within include/select chains
+  if (relationChain && relationChain.length > 0) {
+    const lastRelation = relationChain[relationChain.length - 1];
+    if (lastRelation.operation === "select" && entrySide === "key") {
+      return createFieldCompletions(context, arrayContext);
+    }
+  }
 
   // Handle nested select within include
   if (
@@ -806,19 +870,32 @@ function createSelectRelationCompletions(
   arrayContext: ArrayContext
 ): vscode.CompletionItem[] | null {
   const { fieldMap, modelMap, pos, already, doc } = context;
-  const { currentRoot, nestedRoot, entrySide } = arrayContext;
+  const { currentRoot, entrySide, relationChain } = arrayContext;
+
+  // Determine which fields we're working with
+  let workingFields = fieldMap;
+  let contextModelName = context.modelName;
+
+  // If we have a relation chain, use the target model's fields
+  if (relationChain && relationChain.length > 0) {
+    const targetModel = getTargetModelFromChain(relationChain, modelMap);
+    if (targetModel) {
+      workingFields = targetModel;
+      contextModelName = relationChain[relationChain.length - 1].modelType;
+    }
+  }
 
   // Support both include->relation and select->relation patterns
   if (
     (currentRoot !== "select" && currentRoot !== "include") ||
-    !nestedRoot ||
+    !arrayContext.nestedRoot ||
     entrySide !== "key" ||
-    !fieldMap.has(nestedRoot)
+    !workingFields.has(arrayContext.nestedRoot)
   ) {
     return null;
   }
 
-  const relationInfo = fieldMap.get(nestedRoot)!;
+  const relationInfo = workingFields.get(arrayContext.nestedRoot)!;
   const isRelation = Array.from(modelMap.keys()).includes(
     relationInfo.type.toLowerCase()
   );
@@ -827,7 +904,7 @@ function createSelectRelationCompletions(
     return null;
   }
 
-  // Enhanced relation operations - include more options
+  // Enhanced relation operations
   const relationOps = [
     "select",
     "include",
@@ -864,7 +941,7 @@ function createSelectRelationCompletions(
 
     item.range = makeReplaceRange(doc, pos, already.length);
     item.documentation = new vscode.MarkdownString(
-      `**${op}** operation for relation **${nestedRoot}** (${relationInfo.type})`
+      `**${op}** operation for relation **${arrayContext.nestedRoot}** (${relationInfo.type})`
     );
 
     return item;
@@ -950,11 +1027,23 @@ function determineFieldSuggestions(
   arrayContext: ArrayContext
 ): [string, FieldInfo][] {
   const { fieldMap, modelMap } = context;
-  const { currentRoot, nestedRoot, nestedOperation } = arrayContext;
+  const { currentRoot, relationChain, nestedOperation } = arrayContext;
 
-  // Handle nested relation selections (e.g., include -> userRole -> select)
-  if (currentRoot === "include" && nestedRoot && nestedOperation === "select") {
-    const relationInfo = fieldMap.get(nestedRoot);
+  // Handle deeply nested relations using the relation chain
+  if (relationChain && relationChain.length > 0) {
+    const targetModel = getTargetModelFromChain(relationChain, modelMap);
+    if (targetModel) {
+      return [...targetModel.entries()];
+    }
+  }
+
+  // Handle simple nested cases (backward compatibility)
+  if (
+    currentRoot === "include" &&
+    arrayContext.nestedRoot &&
+    nestedOperation === "select"
+  ) {
+    const relationInfo = fieldMap.get(arrayContext.nestedRoot);
     if (relationInfo) {
       const relationModelName = relationInfo.type.toLowerCase();
       const relationFields = modelMap.get(relationModelName);
@@ -965,8 +1054,12 @@ function determineFieldSuggestions(
   }
 
   // Handle nested relation selections in select blocks
-  if (currentRoot === "select" && nestedRoot && nestedOperation === "select") {
-    const relationInfo = fieldMap.get(nestedRoot);
+  if (
+    currentRoot === "select" &&
+    arrayContext.nestedRoot &&
+    nestedOperation === "select"
+  ) {
+    const relationInfo = fieldMap.get(arrayContext.nestedRoot);
     if (relationInfo) {
       const relationModelName = relationInfo.type.toLowerCase();
       const relationFields = modelMap.get(relationModelName);
@@ -998,8 +1091,12 @@ function determineFieldSuggestions(
   }
 
   // Handle nested relation fields in select
-  if (currentRoot === "select" && nestedRoot && fieldMap.has(nestedRoot)) {
-    const relationInfo = fieldMap.get(nestedRoot)!;
+  if (
+    currentRoot === "select" &&
+    arrayContext.nestedRoot &&
+    fieldMap.has(arrayContext.nestedRoot)
+  ) {
+    const relationInfo = fieldMap.get(arrayContext.nestedRoot)!;
     const relationMap = modelMap.get(relationInfo.type.toLowerCase());
     if (relationMap) {
       return [...relationMap.entries()];
@@ -1008,6 +1105,19 @@ function determineFieldSuggestions(
 
   // Default: return all fields
   return [...fieldMap.entries()];
+}
+
+function getTargetModelFromChain(
+  relationChain: RelationChainItem[],
+  modelMap: ModelMap
+): Map<string, FieldInfo> | null {
+  if (relationChain.length === 0) {
+    return null;
+  }
+
+  // Get the last relation in the chain - that's our target model
+  const lastRelation = relationChain[relationChain.length - 1];
+  return modelMap.get(lastRelation.modelType.toLowerCase()) || null;
 }
 
 function createWhereFieldCompletions(
