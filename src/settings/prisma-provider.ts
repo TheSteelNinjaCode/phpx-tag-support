@@ -95,6 +95,22 @@ interface ArrayContext {
   parentKey?: string;
 }
 
+interface NestedContext {
+  relation?: string;
+  parentKey?: string;
+  operation?: "select" | "include" | "where" | "omit"; // NEW
+  relationModel?: string; // NEW: track which model the relation points to
+}
+
+interface ArrayContext {
+  hostArray: PhpArray;
+  entrySide: "key" | "value" | null;
+  currentRoot?: RootKey;
+  nestedRoot?: string;
+  parentKey?: string;
+  nestedOperation?: "select" | "include" | "where" | "omit"; // NEW
+}
+
 const FILTER_OPERATORS = [
   "contains",
   "startsWith",
@@ -359,16 +375,97 @@ function analyzeArrayContext(context: CompletionContext): ArrayContext | null {
     lastPrisma,
     context.rootKeys
   );
-  const nestedRoot = findNestedRoot(argsArr, hostArray, currentRoot);
-  const parentKey = findParentKey(argsArr, hostArray);
+
+  // Enhanced nested root detection for include->relation->select patterns
+  const nestedContext = findNestedContext(argsArr, hostArray, currentRoot);
 
   return {
     hostArray,
     entrySide,
     currentRoot,
-    nestedRoot,
-    parentKey,
+    nestedRoot: nestedContext?.relation,
+    parentKey: nestedContext?.parentKey,
+    nestedOperation: nestedContext?.operation, // NEW: track nested operation
   };
+}
+
+function findNestedContext(
+  argsArr: PhpArray,
+  hostArray: PhpArray,
+  currentRoot?: RootKey
+): NestedContext | null {
+  if (!currentRoot || !isArray(argsArr)) {
+    return null;
+  }
+
+  // Find the path from argsArr to hostArray
+  const path = findArrayPath(argsArr, hostArray);
+  if (!path || path.length < 2) {
+    return null;
+  }
+
+  // For include -> relation -> select pattern
+  if (currentRoot === "include" && path.length >= 3) {
+    const relationKey = path[1]; // e.g., 'userRole'
+    const operation = path[2]; // e.g., 'select'
+
+    return {
+      relation: relationKey,
+      operation: operation as "select" | "include" | "where" | "omit",
+      parentKey: relationKey,
+    };
+  }
+
+  // For select -> relation -> select pattern
+  if (currentRoot === "select" && path.length >= 3) {
+    const relationKey = path[1];
+    const operation = path[2];
+
+    return {
+      relation: relationKey,
+      operation: operation as "select" | "include" | "where" | "omit",
+      parentKey: relationKey,
+    };
+  }
+
+  // Simple nested case
+  if (path.length >= 2) {
+    return {
+      relation: path[1],
+      parentKey: path[1],
+    };
+  }
+
+  return null;
+}
+
+// Helper function to find the path of keys from root array to target array
+function findArrayPath(
+  rootArray: PhpArray,
+  targetArray: PhpArray
+): string[] | null {
+  if (rootArray === targetArray) {
+    return [];
+  }
+
+  for (const entry of rootArray.items as Entry[]) {
+    if (entry.key?.kind === "string") {
+      const keyName = (entry.key as any).value as string;
+
+      if (entry.value === targetArray) {
+        return [keyName];
+      }
+
+      if (isArray(entry.value)) {
+        const subPath = findArrayPath(entry.value as PhpArray, targetArray);
+        if (subPath) {
+          return [keyName, ...subPath];
+        }
+      }
+    }
+  }
+
+  return null;
 }
 
 function determineEntrySide(
@@ -557,7 +654,25 @@ function handleSpecialCompletions(
   context: CompletionContext,
   arrayContext: ArrayContext
 ): vscode.CompletionItem[] | null {
-  const { currentRoot, entrySide } = arrayContext;
+  const { currentRoot, entrySide, nestedOperation } = arrayContext;
+
+  // Handle nested select within include
+  if (
+    currentRoot === "include" &&
+    nestedOperation === "select" &&
+    entrySide === "key"
+  ) {
+    return createFieldCompletions(context, arrayContext);
+  }
+
+  // Handle nested select within select (for relations)
+  if (
+    currentRoot === "select" &&
+    nestedOperation === "select" &&
+    entrySide === "key"
+  ) {
+    return createFieldCompletions(context, arrayContext);
+  }
 
   // OrderBy value completions
   if (currentRoot === "orderBy" && entrySide === "value") {
@@ -574,7 +689,7 @@ function handleSpecialCompletions(
     return createWhereCompletions(context, arrayContext);
   }
 
-  // Select relation completions
+  // Select relation completions (enhanced)
   const selectRelationCompletions = createSelectRelationCompletions(
     context,
     arrayContext
@@ -693,8 +808,9 @@ function createSelectRelationCompletions(
   const { fieldMap, modelMap, pos, already, doc } = context;
   const { currentRoot, nestedRoot, entrySide } = arrayContext;
 
+  // Support both include->relation and select->relation patterns
   if (
-    currentRoot !== "select" ||
+    (currentRoot !== "select" && currentRoot !== "include") ||
     !nestedRoot ||
     entrySide !== "key" ||
     !fieldMap.has(nestedRoot)
@@ -711,14 +827,46 @@ function createSelectRelationCompletions(
     return null;
   }
 
-  const relationOps = ["select", "include", "omit", "where"] as const;
+  // Enhanced relation operations - include more options
+  const relationOps = [
+    "select",
+    "include",
+    "omit",
+    "where",
+    "orderBy",
+  ] as const;
+
   return relationOps.map((op) => {
     const item = new vscode.CompletionItem(
       op,
       vscode.CompletionItemKind.Keyword
     );
-    item.insertText = new vscode.SnippetString(`${op}' => `);
+
+    // Provide better snippets based on operation
+    switch (op) {
+      case "select":
+        item.insertText = new vscode.SnippetString(`${op}' => [\n\t$0\n]`);
+        break;
+      case "include":
+        item.insertText = new vscode.SnippetString(`${op}' => [\n\t$0\n]`);
+        break;
+      case "where":
+        item.insertText = new vscode.SnippetString(`${op}' => [\n\t$0\n]`);
+        break;
+      case "orderBy":
+        item.insertText = new vscode.SnippetString(
+          `${op}' => [\n\t'$1' => '$2'\n]`
+        );
+        break;
+      default:
+        item.insertText = new vscode.SnippetString(`${op}' => $0`);
+    }
+
     item.range = makeReplaceRange(doc, pos, already.length);
+    item.documentation = new vscode.MarkdownString(
+      `**${op}** operation for relation **${nestedRoot}** (${relationInfo.type})`
+    );
+
     return item;
   });
 }
@@ -802,7 +950,31 @@ function determineFieldSuggestions(
   arrayContext: ArrayContext
 ): [string, FieldInfo][] {
   const { fieldMap, modelMap } = context;
-  const { currentRoot, nestedRoot } = arrayContext;
+  const { currentRoot, nestedRoot, nestedOperation } = arrayContext;
+
+  // Handle nested relation selections (e.g., include -> userRole -> select)
+  if (currentRoot === "include" && nestedRoot && nestedOperation === "select") {
+    const relationInfo = fieldMap.get(nestedRoot);
+    if (relationInfo) {
+      const relationModelName = relationInfo.type.toLowerCase();
+      const relationFields = modelMap.get(relationModelName);
+      if (relationFields) {
+        return [...relationFields.entries()];
+      }
+    }
+  }
+
+  // Handle nested relation selections in select blocks
+  if (currentRoot === "select" && nestedRoot && nestedOperation === "select") {
+    const relationInfo = fieldMap.get(nestedRoot);
+    if (relationInfo) {
+      const relationModelName = relationInfo.type.toLowerCase();
+      const relationFields = modelMap.get(relationModelName);
+      if (relationFields) {
+        return [...relationFields.entries()];
+      }
+    }
+  }
 
   // Handle special cases
   if (currentRoot === "_count") {
@@ -825,7 +997,7 @@ function determineFieldSuggestions(
     return relations;
   }
 
-  // Handle nested relation fields
+  // Handle nested relation fields in select
   if (currentRoot === "select" && nestedRoot && fieldMap.has(nestedRoot)) {
     const relationInfo = fieldMap.get(nestedRoot)!;
     const relationMap = modelMap.get(relationInfo.type.toLowerCase());
