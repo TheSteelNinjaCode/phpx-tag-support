@@ -175,6 +175,9 @@ declare class PPHP {
     private extractDependencies;
     private isPlainText;
     private initializeAllReferencedProps;
+    dispatchEvent(target: string, value: any | ((prev: any) => any)): boolean;
+    private resolveStatePath;
+    private updateNestedValue;
     private updateDocumentContent;
     private ensurePageTransitionStyles;
     private fadeOutBody;
@@ -258,7 +261,6 @@ declare class PPHP {
     private parseTransition;
     private fadeOut;
     private fadeIn;
-    private getElementKey;
     redirect(url: string): Promise<void>;
     abortActiveRequest(): void;
     fetch(url: string, options?: RequestInit, abortPrevious?: boolean): Promise<Response>;

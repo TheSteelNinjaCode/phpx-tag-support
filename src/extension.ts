@@ -807,7 +807,6 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   const fqcnToFile: FqcnToFile = (fqcn) => {
-
     // 🔧 FIX: Look up the file path directly from class-log.json data
     // instead of using the processed cache
     const wsFolder = vscode.workspace.workspaceFolders?.[0];
@@ -2219,6 +2218,15 @@ function sanitizeForDiagnosticsXML(raw: string): string {
   /* 0️⃣ NEW: hide JS inside <script> … </script>  */
   text = text.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gi, (full, body) => {
     // keep the tags, blank out only the body
+    return full.replace(body, spacer(body));
+  });
+
+  /* 0️⃣ NEW: hide content inside <pre> … </pre> and <code> … </code> */
+  text = text.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (full, body) => {
+    return full.replace(body, spacer(body));
+  });
+
+  text = text.replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (full, body) => {
     return full.replace(body, spacer(body));
   });
 
