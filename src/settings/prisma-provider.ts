@@ -449,7 +449,30 @@ function findNestedContext(
     return null;
   }
 
-  // Parse the path to build relation chain
+  // **NEW: Special handling for _count**
+  if (isCountContext(path)) {
+    const countIndex = path.indexOf("_count");
+    if (countIndex !== -1 && countIndex < path.length - 1) {
+      // We're inside _count, the next element should be the operation (like "select")
+      const operation = path[countIndex + 1];
+      if (["select", "where", "orderBy"].includes(operation)) {
+        return {
+          relation: "_count",
+          operation: operation as "select" | "include" | "where" | "omit",
+          parentKey: "_count",
+          relationChain: [
+            {
+              relationName: "_count",
+              operation: operation as "select" | "include" | "where" | "omit",
+              modelType: "Count",
+            },
+          ],
+        };
+      }
+    }
+  }
+
+  // Parse the path to build relation chain (existing logic)
   const relationChain = parsePathToRelationChain(path, currentRoot);
 
   if (relationChain.length > 0) {
@@ -463,6 +486,11 @@ function findNestedContext(
   }
 
   return null;
+}
+
+function isCountContext(path: string[]): boolean {
+  // Check if we're inside a _count block
+  return path.includes("_count");
 }
 
 function parsePathToRelationChain(
@@ -574,6 +602,23 @@ function determineFieldSuggestions(
   const { currentRoot, relationChain, nestedOperation, nestedRoot } =
     arrayContext;
 
+  // **FIXED: Handle _count -> select context first**
+  if (relationChain && relationChain.length > 0) {
+    const lastRelation = relationChain[relationChain.length - 1];
+
+    if (
+      lastRelation.relationName === "_count" &&
+      lastRelation.operation === "select"
+    ) {
+      // For _count -> select, show only relations (not scalar fields) and NOT _count itself
+      const allFields = [...fieldMap.entries()];
+      const relations = filterFieldsByOperation(allFields, "include", modelMap);
+
+      // **IMPORTANT: Don't add _count here since we're already inside _count**
+      return relations;
+    }
+  }
+
   // **Case 1: Deep nested relations using the relation chain**
   if (relationChain && relationChain.length > 0) {
     let currentFields = fieldMap; // Start with base model
@@ -582,6 +627,12 @@ function determineFieldSuggestions(
     // Walk through the chain to find the target model
     for (let i = 0; i < relationChain.length; i++) {
       const relation = relationChain[i];
+
+      // Skip _count processing in the chain since it's handled above
+      if (relation.relationName === "_count") {
+        continue;
+      }
+
       const relationInfo = currentFields.get(relation.relationName);
 
       if (relationInfo) {
@@ -604,7 +655,7 @@ function determineFieldSuggestions(
   }
 
   // **Case 2: Simple nested relation (backward compatibility)**
-  if (nestedRoot && fieldMap.has(nestedRoot)) {
+  if (nestedRoot && nestedRoot !== "_count" && fieldMap.has(nestedRoot)) {
     const relationInfo = fieldMap.get(nestedRoot);
     if (relationInfo) {
       const relationModelName = relationInfo.type.toLowerCase();
@@ -629,6 +680,19 @@ function determineFieldSuggestions(
 
   // **Case 4: Include at root level - only show relations**
   if (currentRoot === "include") {
+    // **CHECK: Make sure we're not inside a nested _count context**
+    const path = findArrayPath(
+      context.callNode.arguments?.[0] as PhpArray,
+      arrayContext.hostArray
+    );
+
+    // If we're inside _count, don't add _count again
+    if (path && isCountContext(path)) {
+      const allFields = [...fieldMap.entries()];
+      return filterFieldsByOperation(allFields, "include", modelMap);
+    }
+
+    // Normal include at root level - add _count
     const allFields = [...fieldMap.entries()];
     const relations = filterFieldsByOperation(allFields, "include", modelMap);
     relations.push([
@@ -643,45 +707,6 @@ function determineFieldSuggestions(
   return filterFieldsByOperation(allFields, currentRoot || "select", modelMap);
 }
 
-function buildRelationChain(
-  path: string[],
-  rootOperation: RootKey
-): RelationChainItem[] {
-  const chain: RelationChainItem[] = [];
-
-  // For include/select operations, the path structure is:
-  // [rootOperation, relationName, nestedOperation?, nestedRelation?, ...]
-
-  if (rootOperation === "include" || rootOperation === "select") {
-    // Start from index 1 (skip the root operation)
-    for (let i = 1; i < path.length; i++) {
-      const relationName = path[i];
-
-      // Determine the operation - if we have a next item and it's an operation, use it
-      // Otherwise, default to the root operation
-      let operation: "select" | "include" | "where" | "omit" =
-        rootOperation as any;
-
-      if (i + 1 < path.length) {
-        const nextItem = path[i + 1];
-        if (["select", "include", "where", "omit"].includes(nextItem)) {
-          operation = nextItem as "select" | "include" | "where" | "omit";
-          i++; // Skip the operation in next iteration
-        }
-      }
-
-      chain.push({
-        relationName,
-        operation,
-        modelType: "", // Will be resolved later
-      });
-    }
-  }
-
-  return chain;
-}
-
-// Helper function to find the path of keys from root array to target array
 function findArrayPath(
   rootArray: PhpArray,
   targetArray: PhpArray,
@@ -768,7 +793,33 @@ function generateCompletions(
     return createRootKeyCompletions(context);
   }
 
-  // **All the relation logic is now here directly**
+  // **Enhanced _count context handling**
+  if (entrySide === "key") {
+    const path = findArrayPath(
+      context.callNode.arguments?.[0] as PhpArray,
+      arrayContext.hostArray
+    );
+
+    if (path && isCountContext(path)) {
+      const countIndex = path.indexOf("_count");
+
+      // If we're directly inside _count (like _count: { | })
+      if (countIndex === path.length - 1) {
+        return createCountOperationCompletions(context);
+      }
+
+      // If we're inside _count -> select (like _count: { select: { | } })
+      if (countIndex < path.length - 1) {
+        const operation = path[countIndex + 1];
+        if (operation === "select") {
+          // **IMPORTANT: This should only show relation fields, not _count**
+          return createFieldCompletions(context, arrayContext);
+        }
+      }
+    }
+  }
+
+  // **Enhanced relation logic**
   if (entrySide === "key" && relationChain && relationChain.length > 0) {
     const path = findArrayPath(
       context.callNode.arguments?.[0] as PhpArray,
@@ -802,6 +853,33 @@ function generateCompletions(
   }
 
   return [];
+}
+
+function createCountOperationCompletions(
+  context: CompletionContext
+): vscode.CompletionItem[] {
+  const { pos, already, doc } = context;
+
+  // Operations available for _count
+  const countOps = ["select"] as const;
+
+  return countOps.map((op) => {
+    const item = new vscode.CompletionItem(
+      op,
+      vscode.CompletionItemKind.Keyword
+    );
+
+    item.insertText = new vscode.SnippetString(`${op}' => [\n\t$0\n]`);
+    item.documentation = new vscode.MarkdownString(
+      `**${op}** - ${
+        op === "select" ? "Select specific relations to count" : op
+      }`
+    );
+    item.range = makeReplaceRange(doc, pos, already.length);
+    item.sortText = `0_${op}`; // Prioritize these completions
+
+    return item;
+  });
 }
 
 function shouldProvideRootKeys(
