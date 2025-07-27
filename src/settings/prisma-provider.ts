@@ -1,16 +1,16 @@
-import * as vscode from "vscode";
 import {
   Call,
   Entry,
-  Node,
   Identifier,
+  Node,
   Array as PhpArray,
   PropertyLookup,
   Variable,
 } from "php-parser";
-import { phpEngine } from "../util/php-engine";
-import { Diagnostic, TextDocument, Range } from "vscode";
+import * as vscode from "vscode";
+import { Diagnostic, Range, TextDocument } from "vscode";
 import { findPrismaCalls } from "../analysis/php-ast";
+import { phpEngine } from "../util/php-engine";
 
 // ❶ ▶︎ Declare once at the top:
 const ROOT_KEYS_MAP = {
@@ -384,10 +384,10 @@ function analyzeArrayContext(context: CompletionContext): ArrayContext | null {
     context.rootKeys
   );
 
-  // Enhanced nested root detection for deep nesting
+  // **FIXED**: Enhanced nested context detection
   const nestedContext = findNestedContext(argsArr, hostArray, currentRoot);
 
-  // Resolve model types in the relation chain
+  // **FIXED**: Better relation chain resolution
   const relationChain = nestedContext?.relationChain
     ? resolveRelationChain(nestedContext.relationChain, context)
     : [];
@@ -399,7 +399,7 @@ function analyzeArrayContext(context: CompletionContext): ArrayContext | null {
     nestedRoot: nestedContext?.relation,
     parentKey: nestedContext?.parentKey,
     nestedOperation: nestedContext?.operation,
-    relationChain, // NEW: Enhanced with resolved model types
+    relationChain,
   };
 }
 
@@ -439,23 +439,21 @@ function findNestedContext(
   hostArray: PhpArray,
   currentRoot?: RootKey
 ): NestedContext | null {
-  if (!currentRoot || !isArray(argsArr)) {
+  if (!currentRoot || !isArray(argsArr) || hostArray === argsArr) {
     return null;
   }
 
-  // Find the path from argsArr to hostArray
+  // Get the full path from root to current array
   const path = findArrayPath(argsArr, hostArray);
-  if (!path || path.length < 1) {
+  if (!path || path.length === 0) {
     return null;
   }
 
-  // Build the relation chain by walking through the path
-  const relationChain = buildRelationChain(path, currentRoot);
+  // Parse the path to build relation chain
+  const relationChain = parsePathToRelationChain(path, currentRoot);
 
-  // If we have at least one relation in the chain
   if (relationChain.length > 0) {
     const lastRelation = relationChain[relationChain.length - 1];
-
     return {
       relation: lastRelation.relationName,
       operation: lastRelation.operation,
@@ -464,26 +462,185 @@ function findNestedContext(
     };
   }
 
-  // Handle simple case where we're directly in a relation
-  if (path.length >= 2) {
-    const relationName = path[path.length - 2]; // The parent key
-    const operation = currentRoot as "select" | "include" | "where" | "omit";
+  return null;
+}
 
-    return {
-      relation: relationName,
+function parsePathToRelationChain(
+  path: string[],
+  rootOperation: RootKey
+): RelationChainItem[] {
+  const chain: RelationChainItem[] = [];
+
+  // Example paths:
+  // ["select", "userRole"] -> userRole relation, operation = "select" (parent operation)
+  // ["select", "userRole", "select"] -> userRole relation, operation = "select" (explicit)
+  // ["select", "userRole", "select", "menu"] -> menu relation in userRole.select
+  // ["select", "userRole", "select", "menu", "select"] -> menu relation, operation = "select"
+
+  let i = 1; // Skip the root operation (like "select")
+
+  while (i < path.length) {
+    const segment = path[i];
+
+    // Skip if this segment is an operation keyword
+    if (["select", "include", "where", "omit", "orderBy"].includes(segment)) {
+      i++;
+      continue;
+    }
+
+    // This must be a relation name
+    const relationName = segment;
+
+    // **FIXED**: Determine the operation context
+    let operation: "select" | "include" | "where" | "omit";
+
+    // Check if next segment is an operation
+    if (
+      i + 1 < path.length &&
+      ["select", "include", "where", "omit"].includes(path[i + 1])
+    ) {
+      operation = path[i + 1] as "select" | "include" | "where" | "omit";
+      i++; // Skip the operation in next iteration
+    } else {
+      // No explicit operation yet, use parent operation
+      operation = rootOperation as "select" | "include" | "where" | "omit";
+    }
+
+    chain.push({
+      relationName,
       operation,
-      parentKey: relationName,
-      relationChain: [
-        {
-          relationName,
-          operation,
-          modelType: "", // Will be resolved later
-        },
-      ],
-    };
+      modelType: "", // Will be resolved later
+    });
+
+    i++;
   }
 
-  return null;
+  return chain;
+}
+
+function buildRelationChainFromPath(
+  path: string[],
+  rootOperation: RootKey
+): RelationChainItem[] {
+  const chain: RelationChainItem[] = [];
+
+  // Path structure examples:
+  // ["select", "userRole"] -> userRole relation with select operation
+  // ["select", "userRole", "select"] -> userRole.select
+  // ["select", "userRole", "select", "menu"] -> userRole.select.menu
+  // ["select", "userRole", "select", "menu", "select"] -> userRole.select.menu.select
+
+  if (path.length < 2) {
+    return chain;
+  }
+
+  // Start from index 1 (skip root operation like "select")
+  for (let i = 1; i < path.length; i++) {
+    const segment = path[i];
+
+    // If this segment is an operation, skip it (it applies to the previous relation)
+    if (["select", "include", "where", "omit", "orderBy"].includes(segment)) {
+      continue;
+    }
+
+    // This is a relation name
+    const relationName = segment;
+
+    // Look ahead to see if there's an operation after this relation
+    let operation: "select" | "include" | "where" | "omit" =
+      rootOperation as any;
+    if (
+      i + 1 < path.length &&
+      ["select", "include", "where", "omit"].includes(path[i + 1])
+    ) {
+      operation = path[i + 1] as "select" | "include" | "where" | "omit";
+    }
+
+    chain.push({
+      relationName,
+      operation,
+      modelType: "", // Will be resolved later
+    });
+  }
+
+  return chain;
+}
+
+function determineFieldSuggestions(
+  context: CompletionContext,
+  arrayContext: ArrayContext
+): [string, FieldInfo][] {
+  const { fieldMap, modelMap } = context;
+  const { currentRoot, relationChain, nestedOperation, nestedRoot } =
+    arrayContext;
+
+  // **Case 1: Deep nested relations using the relation chain**
+  if (relationChain && relationChain.length > 0) {
+    let currentFields = fieldMap; // Start with base model
+    let targetFields = currentFields;
+
+    // Walk through the chain to find the target model
+    for (let i = 0; i < relationChain.length; i++) {
+      const relation = relationChain[i];
+      const relationInfo = currentFields.get(relation.relationName);
+
+      if (relationInfo) {
+        const targetModelName = relationInfo.type.toLowerCase();
+        const targetModel = modelMap.get(targetModelName);
+
+        if (targetModel) {
+          // Update the relation's model type
+          relation.modelType = relationInfo.type;
+          targetFields = targetModel;
+          currentFields = targetModel; // Move to next level for nested relations
+        }
+      }
+    }
+
+    // Return fields from the final target model
+    const allFields = [...targetFields.entries()];
+    const lastRelation = relationChain[relationChain.length - 1];
+    return filterFieldsByOperation(allFields, lastRelation.operation, modelMap);
+  }
+
+  // **Case 2: Simple nested relation (backward compatibility)**
+  if (nestedRoot && fieldMap.has(nestedRoot)) {
+    const relationInfo = fieldMap.get(nestedRoot);
+    if (relationInfo) {
+      const relationModelName = relationInfo.type.toLowerCase();
+      const relationFields = modelMap.get(relationModelName);
+      if (relationFields) {
+        const allFields = [...relationFields.entries()];
+        const operation = nestedOperation || currentRoot || "select";
+        return filterFieldsByOperation(allFields, operation, modelMap);
+      }
+    }
+  }
+
+  // **Case 3: Special cases**
+  if (currentRoot === "_count") {
+    return [
+      [
+        "select",
+        { type: "boolean", required: false, isList: false, nullable: true },
+      ],
+    ];
+  }
+
+  // **Case 4: Include at root level - only show relations**
+  if (currentRoot === "include") {
+    const allFields = [...fieldMap.entries()];
+    const relations = filterFieldsByOperation(allFields, "include", modelMap);
+    relations.push([
+      "_count",
+      { type: "boolean", required: false, isList: false, nullable: true },
+    ]);
+    return relations;
+  }
+
+  // **Case 5: Default - return base model fields**
+  const allFields = [...fieldMap.entries()];
+  return filterFieldsByOperation(allFields, currentRoot || "select", modelMap);
 }
 
 function buildRelationChain(
@@ -604,20 +761,42 @@ function generateCompletions(
   context: CompletionContext,
   arrayContext: ArrayContext
 ): vscode.CompletionItem[] {
-  const { currentRoot, entrySide } = arrayContext;
+  const { currentRoot, entrySide, relationChain } = arrayContext;
 
   // Root key completions (top-level array)
   if (shouldProvideRootKeys(context, arrayContext)) {
     return createRootKeyCompletions(context);
   }
 
-  // Special completions for specific contexts
+  // **All the relation logic is now here directly**
+  if (entrySide === "key" && relationChain && relationChain.length > 0) {
+    const path = findArrayPath(
+      context.callNode.arguments?.[0] as PhpArray,
+      arrayContext.hostArray
+    );
+
+    if (path) {
+      const lastSegment = path[path.length - 1];
+
+      if (["select", "include", "omit", "where"].includes(lastSegment)) {
+        return createFieldCompletions(context, arrayContext);
+      } else {
+        const lastRelation = relationChain[relationChain.length - 1];
+        return createRelationOperationCompletions(
+          context,
+          lastRelation.relationName,
+          lastRelation.modelType || "Unknown"
+        );
+      }
+    }
+  }
+
+  // Rest of the logic...
   const specialCompletions = handleSpecialCompletions(context, arrayContext);
   if (specialCompletions) {
     return specialCompletions;
   }
 
-  // Field completions
   if (shouldProvideFieldCompletions(currentRoot, entrySide)) {
     return createFieldCompletions(context, arrayContext);
   }
@@ -726,32 +905,6 @@ function handleSpecialCompletions(
   const { currentRoot, entrySide, nestedOperation, relationChain } =
     arrayContext;
 
-  // Handle deeply nested select within include/select chains
-  if (relationChain && relationChain.length > 0) {
-    const lastRelation = relationChain[relationChain.length - 1];
-    if (lastRelation.operation === "select" && entrySide === "key") {
-      return createFieldCompletions(context, arrayContext);
-    }
-  }
-
-  // Handle nested select within include
-  if (
-    currentRoot === "include" &&
-    nestedOperation === "select" &&
-    entrySide === "key"
-  ) {
-    return createFieldCompletions(context, arrayContext);
-  }
-
-  // Handle nested select within select (for relations)
-  if (
-    currentRoot === "select" &&
-    nestedOperation === "select" &&
-    entrySide === "key"
-  ) {
-    return createFieldCompletions(context, arrayContext);
-  }
-
   // OrderBy value completions
   if (currentRoot === "orderBy" && entrySide === "value") {
     return createOrderByValueCompletions(context);
@@ -765,15 +918,6 @@ function handleSpecialCompletions(
   // Where clause completions
   if (currentRoot === "where") {
     return createWhereCompletions(context, arrayContext);
-  }
-
-  // Select relation completions (enhanced)
-  const selectRelationCompletions = createSelectRelationCompletions(
-    context,
-    arrayContext
-  );
-  if (selectRelationCompletions) {
-    return selectRelationCompletions;
   }
 
   return null;
@@ -879,71 +1023,6 @@ function createCombinatorCompletions(
   });
 }
 
-function createSelectRelationCompletions(
-  context: CompletionContext,
-  arrayContext: ArrayContext
-): vscode.CompletionItem[] | null {
-  const { fieldMap, modelMap, pos, already, doc } = context;
-  const { currentRoot, entrySide, relationChain, nestedRoot } = arrayContext;
-
-  // Only provide completions when we're typing a key
-  if (entrySide !== "key") {
-    return null;
-  }
-
-  // Determine which fields we're working with based on relation chain
-  let workingFields = fieldMap;
-  let contextModelName = context.modelName;
-
-  // If we have a relation chain, use the target model's fields
-  if (relationChain && relationChain.length > 0) {
-    const targetModel = getTargetModelFromChain(relationChain, modelMap);
-    if (targetModel) {
-      workingFields = targetModel;
-      const lastRelation = relationChain[relationChain.length - 1];
-      contextModelName = lastRelation.modelType;
-    }
-  }
-
-  // Check if we're in a relation context (either through chain or simple nested)
-  const inRelationContext =
-    (relationChain && relationChain.length > 0) ||
-    (nestedRoot && workingFields.has(nestedRoot));
-
-  if (!inRelationContext) {
-    return null;
-  }
-
-  // If we have a nestedRoot but no chain, handle simple case
-  if (nestedRoot && !relationChain?.length && workingFields.has(nestedRoot)) {
-    const relationInfo = workingFields.get(nestedRoot)!;
-    const isRelation = Array.from(modelMap.keys()).includes(
-      relationInfo.type.toLowerCase()
-    );
-
-    if (isRelation) {
-      // Provide relation operations for this nested relation
-      return createRelationOperationCompletions(
-        context,
-        nestedRoot,
-        relationInfo.type
-      );
-    }
-  }
-
-  // For relation chains, provide operations for the current relation
-  if (relationChain && relationChain.length > 0) {
-    const lastRelation = relationChain[relationChain.length - 1];
-    return createRelationOperationCompletions(
-      context,
-      lastRelation.relationName,
-      lastRelation.modelType
-    );
-  }
-
-  return null;
-}
-
 function createRelationOperationCompletions(
   context: CompletionContext,
   relationName: string,
@@ -969,41 +1048,26 @@ function createRelationOperationCompletions(
     // Provide better snippets based on operation
     switch (op) {
       case "select":
+        item.insertText = new vscode.SnippetString(`${op}' => [\n\t$0\n]`);
+        item.documentation = new vscode.MarkdownString(
+          `**${op}** - Select specific fields from **${relationName}**`
+        );
+        break;
       case "include":
-      case "omit":
         item.insertText = new vscode.SnippetString(`${op}' => [\n\t$0\n]`);
-        break;
-      case "where":
-        item.insertText = new vscode.SnippetString(`${op}' => [\n\t$0\n]`);
-        break;
-      case "orderBy":
-        item.insertText = new vscode.SnippetString(
-          `${op}' => [\n\t'$1' => '$2'\n]`
+        item.documentation = new vscode.MarkdownString(
+          `**${op}** - Include related data from **${relationName}**`
         );
         break;
       default:
-        item.insertText = new vscode.SnippetString(`${op}' => $0`);
+        item.insertText = new vscode.SnippetString(`${op}' => [\n\t$0\n]`);
     }
 
     item.range = makeReplaceRange(doc, pos, already.length);
-    item.documentation = new vscode.MarkdownString(
-      `**${op}** operation for relation **${relationName}** (${relationModelType})`
-    );
 
-    // Add sort priority to commonly used operations
-    switch (op) {
-      case "select":
-        item.sortText = "0_select";
-        break;
-      case "include":
-        item.sortText = "0_include";
-        break;
-      case "where":
-        item.sortText = "1_where";
-        break;
-      default:
-        item.sortText = `2_${op}`;
-    }
+    // Add sort priority
+    item.sortText =
+      op === "select" ? "0_select" : op === "include" ? "0_include" : `1_${op}`;
 
     return item;
   });
@@ -1083,89 +1147,26 @@ function getUsedFieldNames(
   return usedFields;
 }
 
-function determineFieldSuggestions(
-  context: CompletionContext,
-  arrayContext: ArrayContext
+// **NEW FUNCTION**: Filter fields based on operation type
+function filterFieldsByOperation(
+  allFields: [string, FieldInfo][],
+  operation: string,
+  modelMap: ModelMap
 ): [string, FieldInfo][] {
-  const { fieldMap, modelMap } = context;
-  const { currentRoot, relationChain, nestedOperation } = arrayContext;
-
-  // Handle deeply nested relations using the relation chain
-  if (relationChain && relationChain.length > 0) {
-    const targetModel = getTargetModelFromChain(relationChain, modelMap);
-    if (targetModel) {
-      return [...targetModel.entries()];
-    }
-  }
-
-  // Handle simple nested cases (backward compatibility)
-  if (
-    currentRoot === "include" &&
-    arrayContext.nestedRoot &&
-    nestedOperation === "select"
-  ) {
-    const relationInfo = fieldMap.get(arrayContext.nestedRoot);
-    if (relationInfo) {
-      const relationModelName = relationInfo.type.toLowerCase();
-      const relationFields = modelMap.get(relationModelName);
-      if (relationFields) {
-        return [...relationFields.entries()];
-      }
-    }
-  }
-
-  // Handle nested relation selections in select blocks
-  if (
-    currentRoot === "select" &&
-    arrayContext.nestedRoot &&
-    nestedOperation === "select"
-  ) {
-    const relationInfo = fieldMap.get(arrayContext.nestedRoot);
-    if (relationInfo) {
-      const relationModelName = relationInfo.type.toLowerCase();
-      const relationFields = modelMap.get(relationModelName);
-      if (relationFields) {
-        return [...relationFields.entries()];
-      }
-    }
-  }
-
-  // Handle special cases
-  if (currentRoot === "_count") {
-    return [
-      [
-        "select",
-        { type: "boolean", required: false, isList: false, nullable: true },
-      ],
-    ];
-  }
-
-  if (currentRoot === "include") {
-    const relations = [...fieldMap.entries()].filter(([, info]) =>
+  if (operation === "include") {
+    // For include: only show relations (fields whose type is another model)
+    return allFields.filter(([, info]) =>
       Array.from(modelMap.keys()).includes(info.type.toLowerCase())
     );
-    relations.push([
-      "_count",
-      { type: "boolean", required: false, isList: false, nullable: true },
-    ]);
-    return relations;
   }
 
-  // Handle nested relation fields in select
-  if (
-    currentRoot === "select" &&
-    arrayContext.nestedRoot &&
-    fieldMap.has(arrayContext.nestedRoot)
-  ) {
-    const relationInfo = fieldMap.get(arrayContext.nestedRoot)!;
-    const relationMap = modelMap.get(relationInfo.type.toLowerCase());
-    if (relationMap) {
-      return [...relationMap.entries()];
-    }
+  if (operation === "select") {
+    // For select: show ALL fields (scalars + relations)
+    return allFields;
   }
 
-  // Default: return all fields
-  return [...fieldMap.entries()];
+  // For other operations (where, data, etc.): show all fields
+  return allFields;
 }
 
 function getTargetModelFromChain(
