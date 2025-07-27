@@ -599,28 +599,6 @@ function findCurrentRoot(
   return undefined;
 }
 
-function findNestedRoot(
-  argsArr: PhpArray,
-  hostArray: PhpArray,
-  currentRoot?: RootKey
-): string | undefined {
-  if (!currentRoot || !isArray(argsArr)) {
-    return undefined;
-  }
-
-  const rootEntry = (argsArr.items as Entry[]).find(
-    (e) =>
-      e.key?.kind === "string" &&
-      (e.key as any).value === currentRoot &&
-      isArray(e.value)
-  );
-
-  if (!rootEntry) {
-    return undefined;
-  }
-  return findParentKey(rootEntry.value as PhpArray, hostArray);
-}
-
 // ========== COMPLETION GENERATION ==========
 function generateCompletions(
   context: CompletionContext,
