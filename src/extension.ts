@@ -1790,19 +1790,19 @@ async function buildComponentCompletions(
 
   if (lt !== -1) {
     /* ── Case ① we are inside an opening tag -------------------------------- */
-    let head = lineText.slice(lt + 1); // text after the “<”
+    let head = lineText.slice(lt + 1); // text after the "<"
     if (head.startsWith("/")) {
       head = head.slice(1);
     } // ignore closing-slash
 
-    // any blank OR quote ⇒ we‘re past the tag name (attrs or value) – bail out
+    // any blank OR quote ⇒ we're past the tag name (attrs or value) – bail out
     if (/\s|['"]/.test(head)) {
       return [];
     }
   } else {
-    /* ── Case ② no “<” to the left – user typed “Acco|” first --------------- */
+    /* ── Case ② no "<" to the left – user typed "Acco|" first --------------- */
     // We allow this only if everything before the word is just whitespace.
-    // Otherwise we’d be in the middle of text/JS and shouldn’t offer tags.
+    // Otherwise we'd be in the middle of text/JS and shouldn't offer tags.
     if (!/^\s*$/.test(lineText.replace(/\w*$/, ""))) {
       return [];
     }
@@ -1813,7 +1813,11 @@ async function buildComponentCompletions(
   const useMap: Map<string, string> = parsePhpUseStatements(document.getText());
   const lessThan: number = line.lastIndexOf("<", position.character);
   let replaceRange: vscode.Range | undefined;
-  if (lessThan !== -1) {
+
+  // Check if there's already a '<' character present
+  const hasOpeningBracket = lessThan !== -1;
+
+  if (hasOpeningBracket) {
     replaceRange = new vscode.Range(
       new vscode.Position(position.line, lessThan),
       position
@@ -1826,7 +1830,11 @@ async function buildComponentCompletions(
       vscode.CompletionItemKind.Class
     );
     item.detail = `Component from ${fullClass}`;
-    item.insertText = new vscode.SnippetString(`<${shortName}`);
+
+    // Only include '<' if there isn't already one
+    item.insertText = new vscode.SnippetString(
+      hasOpeningBracket ? shortName : `<${shortName}`
+    );
     item.filterText = `<${shortName}`;
     item.range = replaceRange;
     completions.push(item);
@@ -1839,7 +1847,11 @@ async function buildComponentCompletions(
       vscode.CompletionItemKind.Class
     );
     compItem.detail = `Component (from class-log)`;
-    compItem.insertText = new vscode.SnippetString(`<${shortName}`);
+
+    // Only include '<' if there isn't already one
+    compItem.insertText = new vscode.SnippetString(
+      hasOpeningBracket ? shortName : `<${shortName}`
+    );
     compItem.command = {
       title: "Add import",
       command: ADD_IMPORT_COMMAND,
@@ -2215,6 +2227,8 @@ const blankMustaches = (txt: string) =>
 function sanitizeForDiagnosticsXML(raw: string): string {
   let text = raw;
 
+  text = preprocessFragmentShortSyntax(text);
+
   /* 0️⃣ NEW: hide JS inside <script> … </script>  */
   text = text.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gi, (full, body) => {
     // keep the tags, blank out only the body
@@ -2280,6 +2294,19 @@ function sanitizeForDiagnosticsXML(raw: string): string {
   text = text.replace(/&&|&/g, (match) => " ".repeat(match.length));
   return text;
 }
+
+const preprocessFragmentShortSyntax = (text: string): string => {
+  // Convert <></> to <Fragment></Fragment> but be careful about nesting
+  let result = text;
+
+  // Handle self-closing fragments: <> becomes <Fragment>
+  result = result.replace(/<>/g, "<Fragment>");
+
+  // Handle closing fragments: </> becomes </Fragment>
+  result = result.replace(/<\/>/g, "</Fragment>");
+
+  return result;
+};
 
 const sanitizePhpVariableAssignments = (text: string): string => {
   // Match PHP variable assignments that contain regex patterns

@@ -1,102 +1,214 @@
 # PHPX Tag Support
 
-**PHPX Tag Support** is a Visual Studio Code extension designed to enhance your Prisma PHP development workflow by adding custom tag support for PHPX. It provides features like hover information, definition lookup, diagnostic warnings for missing tag imports, and intelligent parsing of PHP `use` statements—including group imports and aliases. Additionally, it includes completion suggestions for PHPX tags and advanced diagnostics for XML attributes and tag pairs.
+**PHPX Tag Support** is a comprehensive Visual Studio Code extension designed to enhance your Prisma PHP development workflow. It provides intelligent tag support, auto-completion, diagnostics, and advanced integrations for PHPX components, Prisma operations, and JavaScript/TypeScript-style templating.
 
-## Features
+## 🚀 Key Features
 
-### Hover Provider
+### 🏷️ Component Management
 
-Hover over a PHPX tag (e.g., `<GoogleSearch />`) to see a tooltip displaying the full class imported via the corresponding `use` statement. If the tag is not found, a helpful message is displayed.
+- **Smart Auto-Import**: Press `Ctrl+.` on any unimported component to automatically add import statements
+- **Intelligent Import Grouping**: Automatically groups imports from the same namespace using curly brace syntax
+- **Component Discovery**: Automatically loads components from `class-log.json` for completion suggestions
+- **Dynamic Props Validation**: Validates component properties and their allowed values
 
-### Definition Provider
+### 📝 Code Generation
 
-Ctrl+Click (or F12) on a tag opens the Peek Definition view, showing the contents of the source file. The extension ensures that even single definitions use the peek view by updating VS Code’s configuration. It also supports resolving definitions using a `class-log.json` file or `use` imports.
+- **PHPX Class Template**: Type `phpxclass` to generate a complete PHPX component template with:
+  - Automatic namespace detection based on file location
+  - Proper class structure with `render()` method
+  - Built-in attribute and class merging support
 
-### Diagnostic Warnings
+### 🎯 Intelligent Completion
 
-The extension scans your PHP files for custom tags and flags any tag without a corresponding `use` import. It supports group imports, aliasing, and heredoc/nowdoc filtering to ensure accurate diagnostics. Additional validations include:
+#### Component Completion
 
-- Missing XML attribute values in "XML mode."
-- Unmatched or improperly closed tags.
+- **Tag Suggestions**: Start typing `<` to see available PHPX components
+- **Attribute Completion**: Get suggestions for component properties with type information
+- **Value Completion**: Smart completion for attribute values based on component documentation
 
-### Tag Completion Suggestions
+#### Event Handler Support
 
-Provides intelligent completion suggestions for PHPX tags based on `use` imports. Suggestions are triggered when typing `<` in PHP files.
+- **Function Completion**: Auto-complete PHP functions in `onXXX="..."` attributes
+- **Definition Lookup**: Navigate to function definitions with `Ctrl+Click`
 
-### Group Import & Alias Support
+#### Mustache Expression Support
 
-Handles PHP `use` statements like:
+- **Variable Completion**: Complete variables and object properties in `{{ }}` expressions
+- **Native JS Methods**: Access JavaScript string methods like `.substring()`, `.padStart()`, etc.
+- **Template Literals**: Full support for template literals with `${}` placeholder syntax
 
-```php
-use Lib\PHPX\PPIcons\{Search as GoogleSearch, Toggle};
-```
+### 🔍 Navigation & Information
 
-This allows you to use `<GoogleSearch />` and `<Toggle />` without additional configuration.
+#### Hover Information
 
-### Heredoc/Nowdoc Filtering
+- **Component Details**: Hover over tags to see their full import path
+- **Method Signatures**: Hover over PPHP methods to see their complete signatures
+- **Native JS Help**: Get documentation for JavaScript methods within mustache expressions
 
-To avoid false positives, the extension ignores tags found inside PHP heredoc/nowdoc blocks.
+#### Go to Definition
 
-## Installation
+- **Component Sources**: Navigate to component source files with `Ctrl+Click`
+- **Function Navigation**: Jump to PHP function definitions from event handlers
+- **Peek Definition**: Force peek view for better code exploration
+
+### 🛡️ Advanced Diagnostics
+
+#### XML & HTML Validation
+
+- **Tag Pair Matching**: Detect unclosed or mismatched HTML/XML tags
+- **Attribute Validation**: Ensure all attributes have proper values
+- **Fragment Syntax**: Support for React-style `<></>` fragment syntax
+
+#### Import & Usage Validation
+
+- **Missing Imports**: Automatically detect and flag components without imports
+- **Import Suggestions**: Get quick-fix suggestions to add missing imports
+- **Heredoc Support**: Validate components within PHP heredoc/nowdoc blocks
+
+#### JavaScript Expression Validation
+
+- **Syntax Checking**: Validate JavaScript expressions in `{{ }}` mustache blocks
+- **Assignment Prevention**: Warn against assignments in template expressions
+- **Type Safety**: Ensure expressions are valid JavaScript
+
+### ⚙️ PPHP Integration
+
+#### Method Support
+
+- **PPHP Class Methods**: Full completion and validation for `pphp.*` methods
+- **Local Store**: Support for `store.*` operations with PPHPLocalStore
+- **Search Params**: Integration with `searchParams.*` for URL parameter management
+
+#### Signature Help
+
+- **Parameter Information**: Get real-time parameter hints for PPHP method calls
+- **Argument Validation**: Ensure correct number and types of arguments
+
+### 🗃️ Prisma Integration
+
+- **Schema Validation**: Real-time validation of Prisma schema changes
+- **CRUD Operations**: Validate `create`, `read`, `update`, `delete`, `upsert` operations
+- **Advanced Queries**: Support for `groupBy` and `aggregate` operations
+- **Field Completion**: Auto-complete Prisma model fields and relationships
+
+### 🎨 Syntax Highlighting
+
+- **Mustache Expressions**: Syntax highlighting for `{{ }}` blocks
+- **Template Literals**: Proper coloring for template strings with placeholders
+- **Native Methods**: Color-coded JavaScript native methods and properties
+- **String & Number Literals**: Enhanced highlighting for different data types
+- **Curly Braces**: Visual emphasis on expression boundaries
+
+### 📁 File Management
+
+- **Real-time Updates**: Automatically refresh completions when files change
+- **Workspace Integration**: Seamless integration with Prisma PHP projects
+- **Class Log Monitoring**: Watch for changes in component definitions
+
+## 📋 Complete Feature List
+
+| Feature Category        | Capabilities                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------- |
+| **Auto-Import**         | • Quick fix with `Ctrl+.` • Smart import grouping • Alias support                     |
+| **Code Generation**     | • `phpxclass` snippet • Namespace auto-detection • Template scaffolding               |
+| **Component Support**   | • Tag completion • Props validation • Attribute suggestions                           |
+| **Navigation**          | • Go to definition • Peek definition • Function lookup                                |
+| **Diagnostics**         | • Missing imports • XML validation • Syntax errors • Type checking                    |
+| **Mustache Templating** | • Variable completion • JS method support • Template literals • Expression validation |
+| **PPHP Integration**    | • Method completion • Signature help • Parameter validation • Store management        |
+| **Prisma Support**      | • Schema validation • CRUD operations • Field completion • Query validation           |
+| **Syntax Highlighting** | • Expression coloring • Method highlighting • String/number literals • Brace matching |
+| **Event Handlers**      | • Function completion • Definition lookup • Parameter hints                           |
+| **File Watching**       | • Auto-refresh • Cache management • Real-time updates                                 |
+
+## 🛠️ Installation
 
 ### From the Marketplace
 
 Search for **PHPX Tag Support** in the Visual Studio Code Marketplace and click **Install**.
 
-### From a VSIX File
-
-Package the extension into a `.vsix` file (using `vsce package`) and install it via:
+### From VSIX File
 
 ```bash
 code --install-extension phpx-tag-support-0.0.1.vsix
 ```
 
-## Usage
+## 🚀 Usage Examples
 
-### Hover Over Tags
+### Creating a New Component
 
-Hover over a tag like `<GoogleSearch />` in your PHP file to see information about its corresponding import.
+1. Type `phpxclass` in a new PHP file
+2. The extension auto-detects the namespace based on your file location
+3. Complete PHPX component template is generated
 
-### Peek Definition
+### Auto-Importing Components
 
-Ctrl+Click (or F12) on a tag opens the inline Peek Definition view. Alternatively, use the command palette command **PHPX: Peek Tag Definition** (`phpx-tag-support.peekTagDefinition`) to manually open the peek view.
+1. Type `<ComponentName` in your PHP file
+2. Press `Ctrl+.` when you see the "Missing import" warning
+3. Choose from available import options
+4. Import is automatically added and grouped appropriately
 
-### Diagnostics
+### Using Mustache Expressions
 
-If a tag is missing its import, a warning (e.g., “⚠️ Missing import for component `<Toggle />`”) will be shown inline. Additional diagnostics include:
-
-- Warnings for missing XML attribute values.
-- Errors for unmatched or improperly closed tags.
-
-### Completion Suggestions
-
-Start typing `<` in a PHP file to see suggestions for available PHPX tags based on your `use` imports.
-
-## Extension Commands
-
-- **PHPX Tag Support: Hover Provider**  
-   Command: `phpx-tag-support.hoverProvider`  
-   Displays a "Hello World" message (example command).
-
-- **PHPX Tag Support: Peek Tag Definition**  
-   Command: `phpx-tag-support.peekTagDefinition`  
-   Opens the built-in Peek Definition view for the current tag.
-
-## Configuration
-
-This extension automatically updates the following settings to force Peek Definition for Go to Definition:
-
-```json
-"editor.gotoLocation.single": "peek",
-"editor.gotoLocation.multiple": "peek"
+```php
+<div class="user-info">
+    {{ user.name.substring(0, 10) }}
+    {{ `Hello ${user.name}!` }}
+    {{ store.getValue('theme') }}
+</div>
 ```
 
-You can disable or modify this behavior in your VS Code settings if preferred.
+### Event Handler Completion
 
-## Contributing
+```php
+<Button onClick="handleClick" onSubmit="validateForm">
+    Click me
+</Button>
+```
 
-Contributions are welcome! Fork this repository and submit a pull request with your changes. For bugs or feature requests, please use the issue tracker.
+## ⚙️ Configuration
 
-## License
+The extension automatically configures VS Code for optimal PHPX development:
+
+```json
+{
+  "editor.gotoLocation.single": "peek",
+  "editor.gotoLocation.multiple": "peek",
+  "phpx-tag-support.sourceRoot": "src"
+}
+```
+
+## 📁 Project Structure
+
+Your Prisma PHP project should include:
+
+- `prisma-php.json` (project identifier)
+- `settings/class-log.json` (component definitions)
+- `settings/prisma-schema.json` (Prisma integration)
+- `.pphp/phpx-mustache.d.ts` (TypeScript definitions for mustache variables)
+
+## 🎯 Commands
+
+| Command                 | Shortcut     | Description                      |
+| ----------------------- | ------------ | -------------------------------- |
+| **Add Import**          | `Ctrl+.`     | Auto-import missing components   |
+| **Peek Tag Definition** | `F12`        | Show component definition inline |
+| **Go to Definition**    | `Ctrl+Click` | Navigate to source file          |
+
+## 🤝 Contributing
+
+Contributions are welcome! This extension supports a wide range of features for modern PHP development with PHPX.
+
+### Development Setup
+
+1. Clone the repository
+2. Run `npm install`
+3. Open in VS Code and press `F5` to launch extension development host
+
+## 📄 License
 
 This project is licensed under the MIT License. See the [LICENSE](./LICENSE) file for details.
+
+---
+
+**🔥 Pro Tip**: This extension works best in Prisma PHP projects with properly configured `class-log.json` and TypeScript definition files for maximum IntelliSense support!
