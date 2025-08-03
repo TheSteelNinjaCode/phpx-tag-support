@@ -1351,16 +1351,27 @@ function createFieldCompletions(
   }
 
   return Array.from(fieldsToUse.entries()).map(([fieldName, fieldInfo]) => {
+    // **FIXED: Restore proper type display like in "before" code**
+    const typeStr = `${fieldInfo.type}${fieldInfo.isList ? "[]" : ""}`;
+    const optional = fieldInfo.nullable;
+
+    const label: vscode.CompletionItemLabel = {
+      label: optional ? `${fieldName}?` : fieldName,
+      detail: `: ${typeStr}`,
+    };
+
     const item = new vscode.CompletionItem(
-      fieldName,
+      label,
       vscode.CompletionItemKind.Field
     );
 
-    // Use only the properties that exist on FieldInfo
-    item.detail = fieldInfo.type || "Field";
-    item.documentation = `Field of type ${fieldInfo.type || "unknown"}`;
     item.sortText = `1_${fieldName}`;
     item.insertText = new vscode.SnippetString(`${fieldName}' => $0`);
+    item.documentation = new vscode.MarkdownString(
+      `**Type**: \`${typeStr}\`\n\n- **Required**: ${!fieldInfo.nullable}\n- **Nullable**: ${
+        fieldInfo.nullable
+      }`
+    );
     item.range = makeReplaceRange(doc, pos, already.length);
 
     return item;
