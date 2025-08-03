@@ -132,6 +132,7 @@ const FILTER_OPERATORS = [
   "equals",
   "not",
 ] as const;
+const RELATION_OPERATORS = ["every", "none", "some"] as const;
 // ① add this helper somewhere accessible
 function isEntry(node: any): node is Entry {
   return node.kind === "entry";
@@ -786,63 +787,41 @@ function generateCompletions(
   context: CompletionContext,
   arrayContext: ArrayContext
 ): vscode.CompletionItem[] {
-  const { currentRoot, entrySide, relationChain } = arrayContext;
+  const { currentRoot, entrySide, parentKey } = arrayContext;
 
   // Root key completions (top-level array)
   if (shouldProvideRootKeys(context, arrayContext)) {
     return createRootKeyCompletions(context);
   }
 
-  // **Enhanced _count context handling**
-  if (entrySide === "key") {
-    const path = findArrayPath(
-      context.callNode.arguments?.[0] as PhpArray,
-      arrayContext.hostArray
-    );
-
-    if (path && isCountContext(path)) {
-      const countIndex = path.indexOf("_count");
-
-      // If we're directly inside _count (like _count: { | })
-      if (countIndex === path.length - 1) {
-        return createCountOperationCompletions(context);
-      }
-
-      // If we're inside _count -> select (like _count: { select: { | } })
-      if (countIndex < path.length - 1) {
-        const operation = path[countIndex + 1];
-        if (operation === "select") {
-          // **IMPORTANT: This should only show relation fields, not _count**
-          return createFieldCompletions(context, arrayContext);
-        }
-      }
-    }
+  if (
+    entrySide === "key" &&
+    parentKey &&
+    RELATION_OPERATORS.includes(parentKey as any)
+  ) {
+    return createFieldCompletions(context, arrayContext);
   }
 
-  // **Enhanced relation logic**
-  if (entrySide === "key" && relationChain && relationChain.length > 0) {
-    const path = findArrayPath(
-      context.callNode.arguments?.[0] as PhpArray,
-      arrayContext.hostArray
-    );
-
-    if (path) {
-      const lastSegment = path[path.length - 1];
-
-      if (["select", "include", "omit", "where"].includes(lastSegment)) {
-        return createFieldCompletions(context, arrayContext);
-      } else {
-        const lastRelation = relationChain[relationChain.length - 1];
-        return createRelationOperationCompletions(
+  // Where clause completions
+  if (entrySide === "key" && currentRoot === "where") {
+    // Check if we're in a relation field context
+    const parentField = getParentFieldName(context, arrayContext);
+    if (parentField && context.fieldMap.has(parentField)) {
+      const fieldInfo = context.fieldMap.get(parentField)!;
+      if (isRelationField(fieldInfo, context.modelMap)) {
+        // We're inside a relation field's where clause - show relation operators
+        return createRelationOperatorCompletions(
           context,
-          lastRelation.relationName,
-          lastRelation.modelType || "Unknown"
+          parentField,
+          fieldInfo
         );
       }
     }
+
+    // Otherwise, use the standard where completions
+    return createWhereCompletions(context, arrayContext);
   }
 
-  // Rest of the logic...
   const specialCompletions = handleSpecialCompletions(context, arrayContext);
   if (specialCompletions) {
     return specialCompletions;
@@ -855,31 +834,60 @@ function generateCompletions(
   return [];
 }
 
-function createCountOperationCompletions(
-  context: CompletionContext
-): vscode.CompletionItem[] {
-  const { pos, already, doc } = context;
+/**
+ * Gets the immediate parent field name for the current array context
+ */
+function getParentFieldName(
+  context: CompletionContext,
+  arrayContext: ArrayContext
+): string | null {
+  const { callNode } = context;
+  const { hostArray } = arrayContext;
 
-  // Operations available for _count
-  const countOps = ["select"] as const;
+  const argsArray = callNode.arguments?.[0] as PhpArray;
+  if (!argsArray) {
+    return null;
+  }
 
-  return countOps.map((op) => {
-    const item = new vscode.CompletionItem(
-      op,
-      vscode.CompletionItemKind.Keyword
-    );
+  // Look for the parent entry that contains our host array
+  function findParentField(
+    arr: PhpArray,
+    target: PhpArray,
+    currentPath: string[] = []
+  ): string | null {
+    for (const item of arr.items as Entry[]) {
+      if (!item.key || item.key.kind !== "string") {
+        continue;
+      }
 
-    item.insertText = new vscode.SnippetString(`${op}' => [\n\t$0\n]`);
-    item.documentation = new vscode.MarkdownString(
-      `**${op}** - ${
-        op === "select" ? "Select specific relations to count" : op
-      }`
-    );
-    item.range = makeReplaceRange(doc, pos, already.length);
-    item.sortText = `0_${op}`; // Prioritize these completions
+      const keyName = (item.key as any).value as string;
+      const newPath = [...currentPath, keyName];
 
-    return item;
-  });
+      if (item.value === target) {
+        // Found our target - return the last non-operator field in the path
+        for (let i = newPath.length - 1; i >= 0; i--) {
+          const segment = newPath[i];
+          if (
+            !["where", "AND", "OR", "NOT", "every", "none", "some"].includes(
+              segment
+            )
+          ) {
+            return segment;
+          }
+        }
+      }
+
+      if (isArray(item.value)) {
+        const result = findParentField(item.value as PhpArray, target, newPath);
+        if (result) {
+          return result;
+        }
+      }
+    }
+    return null;
+  }
+
+  return findParentField(argsArray, hostArray);
 }
 
 function shouldProvideRootKeys(
@@ -1037,7 +1045,7 @@ function createWhereCompletions(
   context: CompletionContext,
   arrayContext: ArrayContext
 ): vscode.CompletionItem[] {
-  const { fieldMap, pos, already, doc } = context;
+  const { fieldMap, pos, already, doc, modelMap } = context;
   const { hostArray, parentKey } = arrayContext;
 
   // Top-level WHERE: columns + combinators
@@ -1053,8 +1061,21 @@ function createWhereCompletions(
     return createFieldCompletions(context, arrayContext);
   }
 
-  // Inside field filter: only operators
-  return FILTER_OPERATORS.map((operator) => {
+  // **FIXED: Check if we're inside a relation field**
+  const relationContext = getRelationContext(context, arrayContext);
+  if (relationContext) {
+    const { fieldName, fieldInfo } = relationContext;
+
+    if (isRelationField(fieldInfo, modelMap)) {
+      // We're in a relation field - suggest relation operators
+      return createRelationOperatorCompletions(context, fieldName, fieldInfo);
+    }
+  }
+
+  // Inside field filter: only operators (existing logic)
+  return FILTER_OPERATORS.filter(
+    (op) => !RELATION_OPERATORS.includes(op as any) // Don't show relation operators for scalar fields
+  ).map((operator) => {
     const item = new vscode.CompletionItem(
       operator,
       vscode.CompletionItemKind.Keyword
@@ -1062,6 +1083,127 @@ function createWhereCompletions(
     item.sortText = `2_${operator}`;
     item.insertText = new vscode.SnippetString(`${operator}' => $0`);
     item.range = makeReplaceRange(doc, pos, already.length);
+    return item;
+  });
+}
+
+function isRelationField(fieldInfo: FieldInfo, modelMap: ModelMap): boolean {
+  if (!fieldInfo) {
+    return false;
+  }
+
+  // Check if the field type exists as a model in our modelMap
+  return modelMap.has(fieldInfo.type.toLowerCase());
+}
+
+function getRelationContext(
+  context: CompletionContext,
+  arrayContext: ArrayContext
+): { fieldName: string; fieldInfo: FieldInfo } | null {
+  const { fieldMap, callNode } = context;
+  const { hostArray } = arrayContext;
+
+  const argsArray = callNode.arguments?.[0] as PhpArray;
+  if (!argsArray) {
+    return null;
+  }
+
+  // Find the path from root to current array
+  function findPathToArray(
+    arr: PhpArray,
+    target: PhpArray,
+    path: string[] = []
+  ): string[] | null {
+    if (arr === target) {
+      return path;
+    }
+
+    for (const item of arr.items as Entry[]) {
+      if (!item.key || item.key.kind !== "string") {
+        continue;
+      }
+
+      const keyName = (item.key as any).value as string;
+      const newPath = [...path, keyName];
+
+      if (isArray(item.value)) {
+        const result = findPathToArray(item.value as PhpArray, target, newPath);
+        if (result) {
+          return result;
+        }
+      }
+    }
+    return null;
+  }
+
+  const path = findPathToArray(argsArray, hostArray);
+  if (!path || path.length < 2) {
+    return null;
+  }
+
+  // Look for the relation field name - skip operators
+  for (let i = path.length - 1; i >= 0; i--) {
+    const segment = path[i];
+
+    // Skip all Prisma operators and relation operators
+    if (
+      [
+        "where",
+        "AND",
+        "OR",
+        "NOT",
+        "every",
+        "none",
+        "some",
+        "include",
+        "select",
+        "omit",
+      ].includes(segment)
+    ) {
+      continue;
+    }
+
+    // Check if this segment is a field in our model
+    const fieldInfo = fieldMap.get(segment);
+    if (fieldInfo) {
+      return { fieldName: segment, fieldInfo };
+    }
+  }
+
+  return null;
+}
+
+function createRelationOperatorCompletions(
+  context: CompletionContext,
+  fieldName: string,
+  fieldInfo: FieldInfo
+): vscode.CompletionItem[] {
+  const { pos, already, doc } = context;
+
+  return RELATION_OPERATORS.map((operator) => {
+    const item = new vscode.CompletionItem(
+      operator,
+      vscode.CompletionItemKind.Keyword
+    );
+
+    item.sortText = `1_${operator}`; // Higher priority than regular operators
+    item.insertText = new vscode.SnippetString(`${operator}' => [\n\t$0\n]`);
+    item.range = makeReplaceRange(doc, pos, already.length);
+
+    // Add documentation
+    const descriptions = {
+      every: `All related ${fieldInfo.type} records must match the condition`,
+      none: `No related ${fieldInfo.type} records should match the condition`,
+      some: `At least one related ${fieldInfo.type} record must match the condition`,
+    };
+
+    item.documentation = new vscode.MarkdownString(
+      `**${operator}** - ${descriptions[operator]}\n\n` +
+        `Use this to filter ${fieldName} relation where ${descriptions[
+          operator
+        ].toLowerCase()}.`
+    );
+
     return item;
   });
 }
@@ -1185,47 +1327,66 @@ function createFieldCompletions(
   context: CompletionContext,
   arrayContext: ArrayContext
 ): vscode.CompletionItem[] {
-  const { currentRoot } = arrayContext;
-  const fieldSuggestions = determineFieldSuggestions(context, arrayContext);
+  const { fieldMap, pos, already, doc, modelMap } = context;
+  const { parentKey } = arrayContext;
 
-  // Get already used field names in the current array context
-  const usedFields = getUsedFieldNames(context, arrayContext);
+  let fieldsToUse = fieldMap;
 
-  // Filter out already used fields
-  const availableFields = fieldSuggestions.filter(
-    ([name]) => !usedFields.has(name)
-  );
-
-  if (currentRoot === "where") {
-    return createWhereFieldCompletions(context, availableFields);
-  }
-
-  return createStandardFieldCompletions(context, availableFields);
-}
-
-function getUsedFieldNames(
-  context: CompletionContext,
-  arrayContext: ArrayContext
-): Set<string> {
-  const { hostArray } = arrayContext;
-  const usedFields = new Set<string>();
-
-  if (!hostArray) {
-    return usedFields;
-  }
-
-  // Check all entries in the current array context
-  for (const item of hostArray.items as Entry[]) {
-    if (item.key?.kind === "string") {
-      const keyName = (item.key as any).value as string;
-      usedFields.add(keyName);
+  // **NEW: Check if we're inside a relation operator context**
+  if (parentKey && RELATION_OPERATORS.includes(parentKey as any)) {
+    // We're inside every/none/some - get the relation context
+    const relationContext = getRelationContext(context, arrayContext);
+    if (
+      relationContext &&
+      isRelationField(relationContext.fieldInfo, modelMap)
+    ) {
+      const relatedFields = getRelatedModelFields(
+        relationContext.fieldInfo,
+        modelMap
+      );
+      if (relatedFields) {
+        fieldsToUse = relatedFields; // Use related model's fields instead
+      }
     }
   }
 
-  return usedFields;
+  return Array.from(fieldsToUse.entries()).map(([fieldName, fieldInfo]) => {
+    const item = new vscode.CompletionItem(
+      fieldName,
+      vscode.CompletionItemKind.Field
+    );
+
+    // Use only the properties that exist on FieldInfo
+    item.detail = fieldInfo.type || "Field";
+    item.documentation = `Field of type ${fieldInfo.type || "unknown"}`;
+    item.sortText = `1_${fieldName}`;
+    item.insertText = new vscode.SnippetString(`${fieldName}' => $0`);
+    item.range = makeReplaceRange(doc, pos, already.length);
+
+    return item;
+  });
 }
 
-// **NEW FUNCTION**: Filter fields based on operation type
+function getRelatedModelFields(
+  fieldInfo: FieldInfo,
+  modelMap: Map<string, any>
+): Map<string, FieldInfo> | null {
+  if (!fieldInfo.type) {
+    return null;
+  }
+
+  // Extract the related model name from the field type
+  // This might be something like "User" or "User[]" depending on your schema
+  const relatedModelName = fieldInfo.type.replace(/\[\]$/, ""); // Remove array notation if present
+  const relatedModel = modelMap.get(relatedModelName);
+
+  if (!relatedModel || !relatedModel.fields) {
+    return null;
+  }
+
+  return relatedModel.fields;
+}
+
 function filterFieldsByOperation(
   allFields: [string, FieldInfo][],
   operation: string,
@@ -2276,7 +2437,8 @@ export async function validateReadCall(
       whereEntry.value, // Node of the inner array literal
       fields,
       call.model,
-      diags
+      diags,
+      modelMap
     );
 
     validateSelectIncludeEntries(
@@ -2299,7 +2461,8 @@ function validateWhereArray(
   node: Node,
   fields: Map<string, FieldInfo>,
   model: string,
-  out: vscode.Diagnostic[]
+  out: vscode.Diagnostic[],
+  modelMap?: ModelMap
 ) {
   if (node.kind !== "array") {
     return;
@@ -2315,7 +2478,7 @@ function validateWhereArray(
     // 1) skip top-level Prisma combinators (AND, OR, NOT), but recurse into them
     if (PRISMA_OPERATORS.has(key) && ["AND", "OR", "NOT"].includes(key)) {
       if (item.value && isArray(item.value)) {
-        validateWhereArray(doc, item.value, fields, model, out);
+        validateWhereArray(doc, item.value, fields, model, out, modelMap);
       }
       continue;
     }
@@ -2333,58 +2496,19 @@ function validateWhereArray(
       continue;
     }
 
-    // 3) handle nested filter object: [ 'contains' => $search, … ]
+    // 3) handle nested filter object
     if (isArray(item.value)) {
-      for (const opEntry of (item.value as PhpArray).items as Entry[]) {
-        if (!opEntry.key || opEntry.key.kind !== "string") {
-          continue;
-        }
-        const op = (opEntry.key as any).value as string;
-        const opRange = locToRange(doc, opEntry.key.loc!);
-
-        if (!PRISMA_OPERATORS.has(op)) {
-          out.push(
-            new vscode.Diagnostic(
-              opRange,
-              `Invalid filter operator "${op}" for "${key}".`,
-              vscode.DiagnosticSeverity.Error
-            )
-          );
-          continue;
-        }
-
-        // get the raw text of the operator’s value
-        const valRange = locToRange(doc, opEntry.value.loc!);
-        const raw = doc.getText(valRange).trim();
-
-        // special-case array-valued filters
-        if ((op === "in" || op === "notIn") && !/^\[.*\]$/.test(raw)) {
-          out.push(
-            new vscode.Diagnostic(
-              opRange,
-              `Filter "${op}" for "${key}" expects an array, but got "${raw}".`,
-              vscode.DiagnosticSeverity.Error
-            )
-          );
-          continue;
-        }
-
-        // everything else: use your existing isValidPhpType to check type
-        // (e.g. "contains" on a String field must be a string or a var)
-        if (!isValidPhpType(raw, info)) {
-          out.push(
-            new vscode.Diagnostic(
-              opRange,
-              `Filter "${op}" for "${key}" expects type ${info.type}, but received "${raw}".`,
-              vscode.DiagnosticSeverity.Error
-            )
-          );
-        }
+      // **NEW: Check if this is a relation field with relation operators**
+      if (modelMap && isRelationField(info, modelMap)) {
+        validateRelationWhereArray(doc, item.value, info, key, out, modelMap);
+      } else {
+        // Regular scalar field validation
+        validateScalarWhereArray(doc, item.value, info, key, out);
       }
       continue;
     }
 
-    // 4) all other cases: e.g. simple equals => 123
+    // 4) simple equals case (existing logic)
     const valueRange = locToRange(doc, item.value.loc!);
     const rawExpr = doc.getText(valueRange).trim();
     if (!isValidPhpType(rawExpr, info)) {
@@ -2393,6 +2517,146 @@ function validateWhereArray(
         new vscode.Diagnostic(
           keyRange,
           `"${key}" expects ${expected}, but received "${rawExpr}".`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    }
+  }
+}
+
+function validateRelationWhereArray(
+  doc: vscode.TextDocument,
+  arrayNode: Node,
+  relationInfo: FieldInfo,
+  relationName: string,
+  out: vscode.Diagnostic[],
+  modelMap: ModelMap
+) {
+  if (!isArray(arrayNode)) {
+    return;
+  }
+
+  const relationModelName = relationInfo.type.toLowerCase();
+  const relationFields = modelMap.get(relationModelName);
+
+  if (!relationFields) {
+    return; // Can't validate if we don't have the related model schema
+  }
+
+  for (const entry of (arrayNode as PhpArray).items as Entry[]) {
+    if (!entry.key || entry.key.kind !== "string") {
+      continue;
+    }
+
+    const operator = (entry.key as any).value as string;
+    const opRange = locToRange(doc, entry.key.loc!);
+
+    // Check if it's a valid relation operator
+    if (RELATION_OPERATORS.includes(operator as any)) {
+      // Validate the nested where conditions
+      if (isArray(entry.value)) {
+        validateWhereArray(
+          doc,
+          entry.value,
+          relationFields,
+          relationInfo.type,
+          out,
+          modelMap
+        );
+      } else {
+        out.push(
+          new vscode.Diagnostic(
+            opRange,
+            `Relation operator "${operator}" requires a nested where condition array.`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      }
+    } else if (
+      FILTER_OPERATORS.includes(operator as any) &&
+      !RELATION_OPERATORS.includes(operator as any)
+    ) {
+      // Regular scalar operators on relation fields are not allowed
+      out.push(
+        new vscode.Diagnostic(
+          opRange,
+          `Cannot use scalar operator "${operator}" on relation field "${relationName}". Use "every", "none", or "some" instead.`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    } else {
+      out.push(
+        new vscode.Diagnostic(
+          opRange,
+          `Invalid operator "${operator}" for relation field "${relationName}".`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    }
+  }
+}
+
+function validateScalarWhereArray(
+  doc: vscode.TextDocument,
+  arrayNode: Node,
+  fieldInfo: FieldInfo,
+  fieldName: string,
+  out: vscode.Diagnostic[]
+) {
+  if (!isArray(arrayNode)) {
+    return;
+  }
+
+  for (const opEntry of (arrayNode as PhpArray).items as Entry[]) {
+    if (!opEntry.key || opEntry.key.kind !== "string") {
+      continue;
+    }
+    const op = (opEntry.key as any).value as string;
+    const opRange = locToRange(doc, opEntry.key.loc!);
+
+    // Don't allow relation operators on scalar fields
+    if (RELATION_OPERATORS.includes(op as any)) {
+      out.push(
+        new vscode.Diagnostic(
+          opRange,
+          `Cannot use relation operator "${op}" on scalar field "${fieldName}". Relation operators are only for relation fields.`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      continue;
+    }
+
+    if (!PRISMA_OPERATORS.has(op)) {
+      out.push(
+        new vscode.Diagnostic(
+          opRange,
+          `Invalid filter operator "${op}" for "${fieldName}".`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      continue;
+    }
+
+    // Existing validation logic for scalar operators...
+    const valRange = locToRange(doc, opEntry.value.loc!);
+    const raw = doc.getText(valRange).trim();
+
+    if ((op === "in" || op === "notIn") && !/^\[.*\]$/.test(raw)) {
+      out.push(
+        new vscode.Diagnostic(
+          opRange,
+          `Filter "${op}" for "${fieldName}" expects an array, but got "${raw}".`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      continue;
+    }
+
+    if (!isValidPhpType(raw, fieldInfo)) {
+      out.push(
+        new vscode.Diagnostic(
+          opRange,
+          `Filter "${op}" for "${fieldName}" expects type ${fieldInfo.type}, but received "${raw}".`,
           vscode.DiagnosticSeverity.Error
         )
       );
@@ -2494,7 +2758,14 @@ export async function validateUpdateCall(
         )
       );
     } else {
-      validateWhereArray(doc, whereEntry.value, fields, modelName, diagnostics);
+      validateWhereArray(
+        doc,
+        whereEntry.value,
+        fields,
+        modelName,
+        diagnostics,
+        modelMap
+      );
     }
 
     // ── validate DATA
@@ -2589,7 +2860,14 @@ export async function validateUpdateCall(
     }
 
     // ── finally, select/include sanity
-    validateWhereArray(doc, whereEntry.value, fields, modelName, diagnostics);
+    validateWhereArray(
+      doc,
+      whereEntry.value,
+      fields,
+      modelName,
+      diagnostics,
+      modelMap
+    );
     validateSelectIncludeEntries(
       doc,
       arg0,
@@ -2694,7 +2972,14 @@ export async function validateDeleteCall(
     }
 
     // validate the where filters
-    validateWhereArray(doc, whereEntry.value, fields, modelName, diagnostics);
+    validateWhereArray(
+      doc,
+      whereEntry.value,
+      fields,
+      modelName,
+      diagnostics,
+      modelMap
+    );
 
     // still forbid mixing select/include
     validateSelectIncludeEntries(
@@ -2811,7 +3096,14 @@ export async function validateUpsertCall(
         )
       );
     } else {
-      validateWhereArray(doc, whereEntry.value, fields, modelName, diagnostics);
+      validateWhereArray(
+        doc,
+        whereEntry.value,
+        fields,
+        modelName,
+        diagnostics,
+        modelMap
+      );
     }
 
     // ── validate UPDATE ──
@@ -3093,7 +3385,8 @@ export async function validateGroupByCall(
           whereEntry.value,
           fields,
           modelName,
-          diagnostics
+          diagnostics,
+          modelMap
         );
       }
     }
