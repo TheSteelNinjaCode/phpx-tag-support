@@ -1157,9 +1157,40 @@ function createWhereCompletions(
   arrayContext: ArrayContext
 ): vscode.CompletionItem[] {
   const { fieldMap, pos, already, doc, modelMap } = context;
-  const { hostArray, parentKey } = arrayContext;
+  const { hostArray, parentKey, entrySide } = arrayContext;
 
-  // Top-level WHERE: columns + combinators
+  // **CRITICAL FIX: Check entrySide FIRST before anything else**
+  if (entrySide === "value") {
+    // Get the current field context based on the array path
+    const path = findArrayPath(
+      context.callNode.arguments?.[0] as PhpArray,
+      arrayContext.hostArray
+    );
+
+    if (path && path.length >= 2) {
+      const lastSegment = path[path.length - 1];
+
+      // **ONLY** show completions for specific operator value positions
+      // Check if we're DIRECTLY in a filter operator value position
+      if (FILTER_OPERATORS.includes(lastSegment as any)) {
+        return createFilterValueCompletions(context, lastSegment);
+      }
+
+      // Check if we're DIRECTLY in a relation operator value position
+      // The key fix: only show field completions if the LAST segment is a relation operator
+      if (RELATION_OPERATORS.includes(lastSegment as any)) {
+        return createFieldCompletions(context, arrayContext);
+      }
+    }
+
+    // **CRITICAL: For ANY other value position (including scalar fields), return empty array**
+    // This specifically handles cases like 'title' => | inside relation contexts
+    return [];
+  }
+
+  // **NOW we can safely handle key-side logic**
+
+  // Top-level WHERE: columns + combinators (but only on KEY side)
   if (isTopLevelWhere(context, arrayContext)) {
     return [
       ...createFieldCompletions(context, arrayContext),
@@ -1172,7 +1203,7 @@ function createWhereCompletions(
     return createFieldCompletions(context, arrayContext);
   }
 
-  // **NEW: Get the current field context based on the array path**
+  // Get the current field context based on the array path
   const path = findArrayPath(
     context.callNode.arguments?.[0] as PhpArray,
     arrayContext.hostArray
@@ -1180,7 +1211,6 @@ function createWhereCompletions(
 
   if (path && path.length >= 2) {
     // Find the actual field we're completing for
-    // Walk through the path to find the current field context
     let currentFieldName: string | null = null;
     let currentFields = context.fieldMap;
     let currentFieldInfo: FieldInfo | null = null;
@@ -1191,6 +1221,11 @@ function createWhereCompletions(
       if (
         ["where", "AND", "OR", "NOT", "every", "none", "some"].includes(segment)
       ) {
+        continue;
+      }
+
+      // Also skip filter operators in path traversal
+      if (FILTER_OPERATORS.includes(segment as any)) {
         continue;
       }
 
@@ -1213,7 +1248,6 @@ function createWhereCompletions(
 
     // If we found a field, determine what operators to show
     if (currentFieldName && currentFieldInfo) {
-      // **FIXED: Check if this is a relation field or scalar field**
       if (isRelationField(currentFieldInfo, modelMap)) {
         // Relation field - show relation operators
         return createRelationOperatorCompletions(
@@ -1258,29 +1292,124 @@ function createWhereCompletions(
         });
       }
     }
-  }
 
-  // Fallback to the original logic
-  const relationContext = getRelationContext(context, arrayContext);
-  if (relationContext) {
-    const { fieldName, fieldInfo } = relationContext;
+    // Fallback to the original logic for key side
+    const relationContext = getRelationContext(context, arrayContext);
+    if (relationContext) {
+      const { fieldName, fieldInfo } = relationContext;
 
-    if (isRelationField(fieldInfo, modelMap)) {
-      return createRelationOperatorCompletions(context, fieldName, fieldInfo);
+      if (isRelationField(fieldInfo, modelMap)) {
+        return createRelationOperatorCompletions(context, fieldName, fieldInfo);
+      }
     }
+
+    // Default fallback - show filter operators only (no relation operators in generic case)
+    return FILTER_OPERATORS.filter(
+      (op) => !RELATION_OPERATORS.includes(op as any)
+    ).map((operator) => {
+      const item = new vscode.CompletionItem(
+        operator,
+        vscode.CompletionItemKind.Keyword
+      );
+      item.sortText = `2_${operator}`;
+      item.insertText = new vscode.SnippetString(`${operator}' => $0`);
+      item.range = makeReplaceRange(doc, pos, already.length);
+      return item;
+    });
   }
 
-  // Default fallback - show filter operators
-  return FILTER_OPERATORS.filter(
-    (op) => !RELATION_OPERATORS.includes(op as any)
-  ).map((operator) => {
+  return [];
+}
+
+function createFilterValueCompletions(
+  context: CompletionContext,
+  operator: string
+): vscode.CompletionItem[] {
+  const { pos, already, doc } = context;
+
+  // For different operators, suggest appropriate value types
+  const valueSuggestions: Record<
+    string,
+    Array<{ value: string; description: string }>
+  > = {
+    contains: [
+      { value: "'text'", description: "Text to search for" },
+      { value: "$variable", description: "Variable containing search text" },
+    ],
+    startsWith: [
+      { value: "'prefix'", description: "Text that field should start with" },
+      { value: "$variable", description: "Variable containing prefix" },
+    ],
+    endsWith: [
+      { value: "'suffix'", description: "Text that field should end with" },
+      { value: "$variable", description: "Variable containing suffix" },
+    ],
+    equals: [
+      { value: "'value'", description: "Exact value to match" },
+      { value: "$variable", description: "Variable containing the value" },
+      { value: "null", description: "Match null values" },
+    ],
+    not: [
+      { value: "'value'", description: "Value that should not match" },
+      { value: "$variable", description: "Variable containing excluded value" },
+      { value: "null", description: "Match non-null values" },
+    ],
+    in: [
+      {
+        value: "['value1', 'value2']",
+        description: "Array of possible values",
+      },
+      { value: "$array", description: "Array variable containing values" },
+    ],
+    notIn: [
+      {
+        value: "['value1', 'value2']",
+        description: "Array of excluded values",
+      },
+      {
+        value: "$array",
+        description: "Array variable containing excluded values",
+      },
+    ],
+    lt: [
+      { value: "100", description: "Number less than this value" },
+      { value: "$variable", description: "Variable containing the limit" },
+    ],
+    lte: [
+      { value: "100", description: "Number less than or equal to this value" },
+      { value: "$variable", description: "Variable containing the limit" },
+    ],
+    gt: [
+      { value: "100", description: "Number greater than this value" },
+      { value: "$variable", description: "Variable containing the limit" },
+    ],
+    gte: [
+      {
+        value: "100",
+        description: "Number greater than or equal to this value",
+      },
+      { value: "$variable", description: "Variable containing the limit" },
+    ],
+  };
+
+  const suggestions = valueSuggestions[operator] || [
+    { value: "'value'", description: "Enter a value" },
+    { value: "$variable", description: "Variable containing the value" },
+  ];
+
+  return suggestions.map((suggestion, index) => {
     const item = new vscode.CompletionItem(
-      operator,
-      vscode.CompletionItemKind.Keyword
+      suggestion.value,
+      vscode.CompletionItemKind.Value
     );
-    item.sortText = `2_${operator}`;
-    item.insertText = new vscode.SnippetString(`${operator}' => $0`);
+
+    item.insertText = suggestion.value;
+    item.documentation = new vscode.MarkdownString(
+      `**${operator}** value - ${suggestion.description}`
+    );
+    item.sortText = `${index}_${suggestion.value}`;
     item.range = makeReplaceRange(doc, pos, already.length);
+
     return item;
   });
 }
