@@ -936,7 +936,18 @@ function createRelatedModelFieldCompletions(
 ): vscode.CompletionItem[] {
   const { pos, already, doc } = context;
 
-  return Array.from(relatedFields.entries()).map(([fieldName, fieldInfo]) => {
+  // **NEW: Get array context for filtering**
+  const arrayContext = analyzeArrayContext(context);
+  const usedKeys = arrayContext
+    ? getUsedFieldKeys(context, arrayContext)
+    : new Set<string>();
+
+  // **Filter out already used fields**
+  const availableFields = Array.from(relatedFields.entries()).filter(
+    ([fieldName]) => !usedKeys.has(fieldName)
+  );
+
+  return availableFields.map(([fieldName, fieldInfo]) => {
     const typeStr = `${fieldInfo.type}${fieldInfo.isList ? "[]" : ""}`;
     const optional = fieldInfo.nullable;
 
@@ -1423,7 +1434,13 @@ function createFieldCompletions(
   // **USE determineFieldSuggestions to get the correct fields**
   const fieldSuggestions = determineFieldSuggestions(context, arrayContext);
 
-  return fieldSuggestions.map(([fieldName, fieldInfo]) => {
+  // **NEW: Filter out already used field keys**
+  const usedKeys = getUsedFieldKeys(context, arrayContext);
+  const availableFields = fieldSuggestions.filter(
+    ([fieldName]) => !usedKeys.has(fieldName)
+  );
+
+  return availableFields.map(([fieldName, fieldInfo]) => {
     // **ENHANCED: Proper type display like in working version**
     const typeStr = `${fieldInfo.type}${fieldInfo.isList ? "[]" : ""}`;
     const optional = fieldInfo.nullable;
@@ -1459,6 +1476,28 @@ function createFieldCompletions(
 
     return item;
   });
+}
+
+function getUsedFieldKeys(
+  context: CompletionContext,
+  arrayContext: ArrayContext
+): Set<string> {
+  const usedKeys = new Set<string>();
+  const { hostArray } = arrayContext;
+
+  if (!hostArray || !hostArray.items) {
+    return usedKeys;
+  }
+
+  // Check all entries in the current array context
+  for (const item of hostArray.items as Entry[]) {
+    if (item.key?.kind === "string") {
+      const keyName = (item.key as any).value as string;
+      usedKeys.add(keyName);
+    }
+  }
+
+  return usedKeys;
 }
 
 function filterFieldsByOperation(
