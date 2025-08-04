@@ -1172,20 +1172,107 @@ function createWhereCompletions(
     return createFieldCompletions(context, arrayContext);
   }
 
-  // **FIXED: Check if we're inside a relation field**
+  // **NEW: Get the current field context based on the array path**
+  const path = findArrayPath(
+    context.callNode.arguments?.[0] as PhpArray,
+    arrayContext.hostArray
+  );
+
+  if (path && path.length >= 2) {
+    // Find the actual field we're completing for
+    // Walk through the path to find the current field context
+    let currentFieldName: string | null = null;
+    let currentFields = context.fieldMap;
+    let currentFieldInfo: FieldInfo | null = null;
+
+    // Walk through the path to find the current field context
+    for (const segment of path) {
+      // Skip operators
+      if (
+        ["where", "AND", "OR", "NOT", "every", "none", "some"].includes(segment)
+      ) {
+        continue;
+      }
+
+      // Check if this segment is a field
+      const fieldInfo = currentFields.get(segment);
+      if (fieldInfo) {
+        currentFieldName = segment;
+        currentFieldInfo = fieldInfo;
+
+        // If it's a relation field, get the related model's fields for the next iteration
+        if (isRelationField(fieldInfo, modelMap)) {
+          const relatedModelName = fieldInfo.type.toLowerCase();
+          const relatedFields = modelMap.get(relatedModelName);
+          if (relatedFields) {
+            currentFields = relatedFields;
+          }
+        }
+      }
+    }
+
+    // If we found a field, determine what operators to show
+    if (currentFieldName && currentFieldInfo) {
+      // **FIXED: Check if this is a relation field or scalar field**
+      if (isRelationField(currentFieldInfo, modelMap)) {
+        // Relation field - show relation operators
+        return createRelationOperatorCompletions(
+          context,
+          currentFieldName,
+          currentFieldInfo
+        );
+      } else {
+        // Scalar field - show filter operators
+        return FILTER_OPERATORS.map((operator) => {
+          const item = new vscode.CompletionItem(
+            operator,
+            vscode.CompletionItemKind.Keyword
+          );
+          item.sortText = `2_${operator}`;
+          item.insertText = new vscode.SnippetString(`${operator}' => $0`);
+          item.range = makeReplaceRange(doc, pos, already.length);
+
+          // Add documentation for each operator
+          const descriptions: Record<string, string> = {
+            contains: "Field contains the specified string",
+            startsWith: "Field starts with the specified string",
+            endsWith: "Field ends with the specified string",
+            equals: "Field equals the specified value",
+            not: "Field does not equal the specified value",
+            in: "Field value is in the specified array",
+            notIn: "Field value is not in the specified array",
+            lt: "Field is less than the specified value",
+            lte: "Field is less than or equal to the specified value",
+            gt: "Field is greater than the specified value",
+            gte: "Field is greater than or equal to the specified value",
+          };
+
+          item.documentation = new vscode.MarkdownString(
+            `**${operator}** - ${
+              descriptions[operator] ||
+              `Filter operator for ${currentFieldName}`
+            }`
+          );
+
+          return item;
+        });
+      }
+    }
+  }
+
+  // Fallback to the original logic
   const relationContext = getRelationContext(context, arrayContext);
   if (relationContext) {
     const { fieldName, fieldInfo } = relationContext;
 
     if (isRelationField(fieldInfo, modelMap)) {
-      // We're in a relation field - suggest relation operators
       return createRelationOperatorCompletions(context, fieldName, fieldInfo);
     }
   }
 
-  // Inside field filter: only operators (existing logic)
+  // Default fallback - show filter operators
   return FILTER_OPERATORS.filter(
-    (op) => !RELATION_OPERATORS.includes(op as any) // Don't show relation operators for scalar fields
+    (op) => !RELATION_OPERATORS.includes(op as any)
   ).map((operator) => {
     const item = new vscode.CompletionItem(
       operator,
