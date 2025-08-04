@@ -615,9 +615,46 @@ function determineFieldSuggestions(
       // For _count -> select, show only relations (not scalar fields) and NOT _count itself
       const allFields = [...fieldMap.entries()];
       const relations = filterFieldsByOperation(allFields, "include", modelMap);
-
-      // **IMPORTANT: Don't add _count here since we're already inside _count**
       return relations;
+    }
+  }
+
+  // **NEW: Enhanced path-based relation detection**
+  const path = findArrayPath(
+    context.callNode.arguments?.[0] as PhpArray,
+    arrayContext.hostArray
+  );
+
+  if (path && path.length >= 2) {
+    // Try to find relation field in the path
+    let targetFields = fieldMap;
+    let currentModelFields = fieldMap;
+
+    for (let i = 1; i < path.length; i++) {
+      const segment = path[i];
+
+      // Skip operation keywords
+      if (["select", "include", "where", "omit", "orderBy"].includes(segment)) {
+        continue;
+      }
+
+      // Check if this segment is a relation field
+      const relationInfo = currentModelFields.get(segment);
+      if (relationInfo && isRelationField(relationInfo, modelMap)) {
+        const relatedModelName = relationInfo.type.toLowerCase();
+        const relatedFields = modelMap.get(relatedModelName);
+        if (relatedFields) {
+          targetFields = relatedFields;
+          currentModelFields = relatedFields;
+        }
+      }
+    }
+
+    // If we found a different target model, return its fields
+    if (targetFields !== fieldMap) {
+      const allFields = [...targetFields.entries()];
+      const operation = currentRoot || "select";
+      return filterFieldsByOperation(allFields, operation, modelMap);
     }
   }
 
@@ -682,12 +719,6 @@ function determineFieldSuggestions(
 
   // **Case 4: Include at root level - only show relations**
   if (currentRoot === "include") {
-    // **CHECK: Make sure we're not inside a nested _count context**
-    const path = findArrayPath(
-      context.callNode.arguments?.[0] as PhpArray,
-      arrayContext.hostArray
-    );
-
     // If we're inside _count, don't add _count again
     if (path && isCountContext(path)) {
       const allFields = [...fieldMap.entries()];
@@ -783,7 +814,6 @@ function findCurrentRoot(
   return undefined;
 }
 
-// ========== COMPLETION GENERATION ==========
 function generateCompletions(
   context: CompletionContext,
   arrayContext: ArrayContext
@@ -795,81 +825,84 @@ function generateCompletions(
     return createRootKeyCompletions(context);
   }
 
-  // **FIXED: Simple relation context detection for include/select blocks**
-  if (
-    entrySide === "key" &&
-    ["include", "select"].includes(currentRoot as string)
-  ) {
+  if (entrySide === "key") {
     const path = findArrayPath(
       context.callNode.arguments?.[0] as PhpArray,
       arrayContext.hostArray
     );
 
     if (path && path.length >= 2) {
-      const [rootOp, relationField] = path;
-      if (["include", "select"].includes(rootOp) && relationField) {
-        // Check if this is a valid relation field
-        const fieldInfo = context.fieldMap.get(relationField);
-        if (fieldInfo && isRelationField(fieldInfo, context.modelMap)) {
+      const lastSegment = path[path.length - 1];
+      const secondLastSegment = path.length >= 2 ? path[path.length - 2] : null;
+
+      // **FIXED: Check if we're directly inside a relation that needs operations**
+      if (
+        secondLastSegment &&
+        ["include", "select"].includes(secondLastSegment)
+      ) {
+        const relationField = lastSegment;
+        const relationInfo = context.fieldMap.get(relationField);
+
+        if (relationInfo && isRelationField(relationInfo, context.modelMap)) {
+          // We're at 'include' => ['user' => [cursor]] - show OPERATIONS
           return createRelationOperationCompletions(
             context,
             relationField,
-            fieldInfo.type
+            relationInfo.type
           );
         }
       }
-    }
-  }
 
-  // **NEW: Handle relation operator contexts (every/some/none)**
-  if (entrySide === "key") {
-    const path = findArrayPath(
-      context.callNode.arguments?.[0] as PhpArray,
-      arrayContext.hostArray
-    );
+      // **Check if we're inside a relation's operation that needs fields**
+      if (path.length >= 3) {
+        const operation = path[path.length - 1]; // e.g., 'select'
+        const relationField = path[path.length - 2]; // e.g., 'user'
+        const parentOperation = path[path.length - 3]; // e.g., 'include'
 
-    if (path && path.length >= 3) {
-      // Check if we're inside a relation operator
-      const lastSegment = path[path.length - 1];
-      if (RELATION_OPERATORS.includes(lastSegment as any)) {
-        // We're inside every/some/none - find the relation field
-        const relationField = path[path.length - 2];
-        const fieldInfo = context.fieldMap.get(relationField);
+        if (
+          ["select", "include", "where", "omit"].includes(operation) &&
+          ["include", "select"].includes(parentOperation)
+        ) {
+          const relationInfo = context.fieldMap.get(relationField);
 
-        if (fieldInfo && isRelationField(fieldInfo, context.modelMap)) {
-          // Get the related model's fields
-          const relatedModelName = fieldInfo.type.toLowerCase();
-          const relatedFields = context.modelMap.get(relatedModelName);
-
-          if (relatedFields) {
-            // Create field completions for the related model
-            return createRelatedModelFieldCompletions(context, relatedFields);
+          if (relationInfo && isRelationField(relationInfo, context.modelMap)) {
+            // We're at 'include' => ['user' => ['select' => [cursor]]] - show FIELDS
+            return createFieldCompletions(context, arrayContext);
           }
         }
       }
     }
-  }
 
-  // **Enhanced _count context handling**
-  if (entrySide === "key") {
-    const path = findArrayPath(
-      context.callNode.arguments?.[0] as PhpArray,
-      arrayContext.hostArray
-    );
-
+    // Handle _count context
     if (path && isCountContext(path)) {
       const countIndex = path.indexOf("_count");
 
-      // If we're directly inside _count (like _count: { | })
       if (countIndex === path.length - 1) {
         return createCountOperationCompletions(context);
       }
 
-      // If we're inside _count -> select (like _count: { select: { | } })
       if (countIndex < path.length - 1) {
         const operation = path[countIndex + 1];
         if (operation === "select") {
           return createFieldCompletions(context, arrayContext);
+        }
+      }
+    }
+
+    // Handle relation operator contexts (every/some/none)
+    if (path && path.length >= 3) {
+      const lastSegment = path[path.length - 1];
+      if (RELATION_OPERATORS.includes(lastSegment as any)) {
+        const relationField = path[path.length - 2];
+        const fieldInfo = context.fieldMap.get(relationField);
+
+        if (fieldInfo && isRelationField(fieldInfo, context.modelMap)) {
+          const relatedModelName = fieldInfo.type.toLowerCase();
+          const relatedFields = context.modelMap.get(relatedModelName);
+
+          if (relatedFields) {
+            return createRelatedModelFieldCompletions(context, relatedFields);
+          }
         }
       }
     }
@@ -1385,34 +1418,17 @@ function createFieldCompletions(
   context: CompletionContext,
   arrayContext: ArrayContext
 ): vscode.CompletionItem[] {
-  const { fieldMap, pos, already, doc, modelMap } = context;
-  const { parentKey } = arrayContext;
+  const { pos, already, doc } = context;
 
-  let fieldsToUse = fieldMap;
+  // **USE determineFieldSuggestions to get the correct fields**
+  const fieldSuggestions = determineFieldSuggestions(context, arrayContext);
 
-  // **NEW: Check if we're inside a relation operator context**
-  if (parentKey && RELATION_OPERATORS.includes(parentKey as any)) {
-    // We're inside every/none/some - get the relation context
-    const relationContext = getRelationContext(context, arrayContext);
-    if (
-      relationContext &&
-      isRelationField(relationContext.fieldInfo, modelMap)
-    ) {
-      const relatedFields = getRelatedModelFields(
-        relationContext.fieldInfo,
-        modelMap
-      );
-      if (relatedFields) {
-        fieldsToUse = relatedFields; // Use related model's fields instead
-      }
-    }
-  }
-
-  return Array.from(fieldsToUse.entries()).map(([fieldName, fieldInfo]) => {
-    // **FIXED: Restore proper type display like in "before" code**
+  return fieldSuggestions.map(([fieldName, fieldInfo]) => {
+    // **ENHANCED: Proper type display like in working version**
     const typeStr = `${fieldInfo.type}${fieldInfo.isList ? "[]" : ""}`;
     const optional = fieldInfo.nullable;
 
+    // **ENHANCED: Use CompletionItemLabel with detail for better display**
     const label: vscode.CompletionItemLabel = {
       label: optional ? `${fieldName}?` : fieldName,
       detail: `: ${typeStr}`,
@@ -1423,37 +1439,26 @@ function createFieldCompletions(
       vscode.CompletionItemKind.Field
     );
 
+    // **ENHANCED: Add proper sorting**
     item.sortText = `1_${fieldName}`;
+
+    // **ENHANCED: Add snippet insert text**
     item.insertText = new vscode.SnippetString(`${fieldName}' => $0`);
+
+    // **ENHANCED: Better documentation with more details**
     item.documentation = new vscode.MarkdownString(
       `**Type**: \`${typeStr}\`\n\n- **Required**: ${!fieldInfo.nullable}\n- **Nullable**: ${
         fieldInfo.nullable
-      }`
+      }\n- **List**: ${fieldInfo.isList ? "Yes" : "No"}`
     );
-    item.range = makeReplaceRange(doc, pos, already.length);
+
+    // **ENHANCED: Add proper range replacement if available**
+    if (doc && pos && typeof already !== "undefined") {
+      item.range = makeReplaceRange(doc, pos, already.length);
+    }
 
     return item;
   });
-}
-
-function getRelatedModelFields(
-  fieldInfo: FieldInfo,
-  modelMap: Map<string, any>
-): Map<string, FieldInfo> | null {
-  if (!fieldInfo.type) {
-    return null;
-  }
-
-  // Extract the related model name from the field type
-  // This might be something like "User" or "User[]" depending on your schema
-  const relatedModelName = fieldInfo.type.replace(/\[\]$/, ""); // Remove array notation if present
-  const relatedModel = modelMap.get(relatedModelName);
-
-  if (!relatedModel || !relatedModel.fields) {
-    return null;
-  }
-
-  return relatedModel.fields;
 }
 
 function filterFieldsByOperation(
@@ -1787,10 +1792,6 @@ function validateIncludeBlock(
   }
 }
 
-/**
- * Within a PhpArray literal, find both "select" and "include" entries
- * and run `validateSelectIncludeBlock` on them.
- */
 export function validateSelectIncludeEntries(
   doc: TextDocument,
   arr: PhpArray,
@@ -1892,9 +1893,6 @@ const PRISMA_OPERATORS = new Set([
   "not",
 ]);
 
-/**
- * Encapsulate your big switch(...) in one place.
- */
 function isValidPhpType(expr: string, info: FieldInfo): boolean {
   /**
    * For Boolean fields we allow any number of leading “!” operators,
@@ -2023,11 +2021,6 @@ function isDynamicKey(key?: Node | null): boolean {
   );
 }
 
-/**
- * Checks for simultaneous use of `select` and `include` at the top level
- * of a PhpArray literal. If both are found, pushes an Error diagnostic
- * on each key and returns true.
- */
 function validateSelectIncludeExclusivity(
   arr: PhpArray,
   doc: vscode.TextDocument,
@@ -2066,9 +2059,6 @@ function validateSelectIncludeExclusivity(
   return true;
 }
 
-/**
- * Validates an orderBy => [ 'field' => 'asc'|'desc', … ] block
- */
 function validateOrderByEntries(
   doc: vscode.TextDocument,
   arr: PhpArray,
