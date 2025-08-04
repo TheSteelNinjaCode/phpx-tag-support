@@ -70,6 +70,21 @@ const ROOT_KEYS_MAP = {
     "distinct",
   ] as const,
 };
+const FILTER_OPERATORS = [
+  "contains",
+  "startsWith",
+  "endsWith",
+  "in",
+  "notIn",
+  "lt",
+  "lte",
+  "gt",
+  "gte",
+  "equals",
+  "not",
+] as const;
+const RELATION_OPERATORS = ["every", "none", "some"] as const;
+
 type PrismaOp = keyof typeof ROOT_KEYS_MAP;
 type RootKey = (typeof ROOT_KEYS_MAP)[PrismaOp][number];
 
@@ -119,20 +134,6 @@ interface RelationChainItem {
   modelType: string; // The target model type
 }
 
-const FILTER_OPERATORS = [
-  "contains",
-  "startsWith",
-  "endsWith",
-  "in",
-  "notIn",
-  "lt",
-  "lte",
-  "gt",
-  "gte",
-  "equals",
-  "not",
-] as const;
-const RELATION_OPERATORS = ["every", "none", "some"] as const;
 // ① add this helper somewhere accessible
 function isEntry(node: any): node is Entry {
   return node.kind === "entry";
@@ -787,41 +788,94 @@ function generateCompletions(
   context: CompletionContext,
   arrayContext: ArrayContext
 ): vscode.CompletionItem[] {
-  const { currentRoot, entrySide, parentKey } = arrayContext;
+  const { currentRoot, entrySide, relationChain } = arrayContext;
 
   // Root key completions (top-level array)
   if (shouldProvideRootKeys(context, arrayContext)) {
     return createRootKeyCompletions(context);
   }
 
+  // **FIXED: Simple relation context detection for include/select blocks**
   if (
     entrySide === "key" &&
-    parentKey &&
-    RELATION_OPERATORS.includes(parentKey as any)
+    ["include", "select"].includes(currentRoot as string)
   ) {
-    return createFieldCompletions(context, arrayContext);
-  }
+    const path = findArrayPath(
+      context.callNode.arguments?.[0] as PhpArray,
+      arrayContext.hostArray
+    );
 
-  // Where clause completions
-  if (entrySide === "key" && currentRoot === "where") {
-    // Check if we're in a relation field context
-    const parentField = getParentFieldName(context, arrayContext);
-    if (parentField && context.fieldMap.has(parentField)) {
-      const fieldInfo = context.fieldMap.get(parentField)!;
-      if (isRelationField(fieldInfo, context.modelMap)) {
-        // We're inside a relation field's where clause - show relation operators
-        return createRelationOperatorCompletions(
-          context,
-          parentField,
-          fieldInfo
-        );
+    if (path && path.length >= 2) {
+      const [rootOp, relationField] = path;
+      if (["include", "select"].includes(rootOp) && relationField) {
+        // Check if this is a valid relation field
+        const fieldInfo = context.fieldMap.get(relationField);
+        if (fieldInfo && isRelationField(fieldInfo, context.modelMap)) {
+          return createRelationOperationCompletions(
+            context,
+            relationField,
+            fieldInfo.type
+          );
+        }
       }
     }
-
-    // Otherwise, use the standard where completions
-    return createWhereCompletions(context, arrayContext);
   }
 
+  // **NEW: Handle relation operator contexts (every/some/none)**
+  if (entrySide === "key") {
+    const path = findArrayPath(
+      context.callNode.arguments?.[0] as PhpArray,
+      arrayContext.hostArray
+    );
+
+    if (path && path.length >= 3) {
+      // Check if we're inside a relation operator
+      const lastSegment = path[path.length - 1];
+      if (RELATION_OPERATORS.includes(lastSegment as any)) {
+        // We're inside every/some/none - find the relation field
+        const relationField = path[path.length - 2];
+        const fieldInfo = context.fieldMap.get(relationField);
+
+        if (fieldInfo && isRelationField(fieldInfo, context.modelMap)) {
+          // Get the related model's fields
+          const relatedModelName = fieldInfo.type.toLowerCase();
+          const relatedFields = context.modelMap.get(relatedModelName);
+
+          if (relatedFields) {
+            // Create field completions for the related model
+            return createRelatedModelFieldCompletions(context, relatedFields);
+          }
+        }
+      }
+    }
+  }
+
+  // **Enhanced _count context handling**
+  if (entrySide === "key") {
+    const path = findArrayPath(
+      context.callNode.arguments?.[0] as PhpArray,
+      arrayContext.hostArray
+    );
+
+    if (path && isCountContext(path)) {
+      const countIndex = path.indexOf("_count");
+
+      // If we're directly inside _count (like _count: { | })
+      if (countIndex === path.length - 1) {
+        return createCountOperationCompletions(context);
+      }
+
+      // If we're inside _count -> select (like _count: { select: { | } })
+      if (countIndex < path.length - 1) {
+        const operation = path[countIndex + 1];
+        if (operation === "select") {
+          return createFieldCompletions(context, arrayContext);
+        }
+      }
+    }
+  }
+
+  // Rest of the logic...
   const specialCompletions = handleSpecialCompletions(context, arrayContext);
   if (specialCompletions) {
     return specialCompletions;
@@ -834,60 +888,73 @@ function generateCompletions(
   return [];
 }
 
-/**
- * Gets the immediate parent field name for the current array context
- */
-function getParentFieldName(
+function isRelationField(fieldInfo: FieldInfo, modelMap: ModelMap): boolean {
+  if (!fieldInfo) {
+    return false;
+  }
+
+  // Check if the field type exists as a model in our modelMap
+  return modelMap.has(fieldInfo.type.toLowerCase());
+}
+
+function createRelatedModelFieldCompletions(
   context: CompletionContext,
-  arrayContext: ArrayContext
-): string | null {
-  const { callNode } = context;
-  const { hostArray } = arrayContext;
+  relatedFields: Map<string, FieldInfo>
+): vscode.CompletionItem[] {
+  const { pos, already, doc } = context;
 
-  const argsArray = callNode.arguments?.[0] as PhpArray;
-  if (!argsArray) {
-    return null;
-  }
+  return Array.from(relatedFields.entries()).map(([fieldName, fieldInfo]) => {
+    const typeStr = `${fieldInfo.type}${fieldInfo.isList ? "[]" : ""}`;
+    const optional = fieldInfo.nullable;
 
-  // Look for the parent entry that contains our host array
-  function findParentField(
-    arr: PhpArray,
-    target: PhpArray,
-    currentPath: string[] = []
-  ): string | null {
-    for (const item of arr.items as Entry[]) {
-      if (!item.key || item.key.kind !== "string") {
-        continue;
-      }
+    const label: vscode.CompletionItemLabel = {
+      label: optional ? `${fieldName}?` : fieldName,
+      detail: `: ${typeStr}`,
+    };
 
-      const keyName = (item.key as any).value as string;
-      const newPath = [...currentPath, keyName];
+    const item = new vscode.CompletionItem(
+      label,
+      vscode.CompletionItemKind.Field
+    );
 
-      if (item.value === target) {
-        // Found our target - return the last non-operator field in the path
-        for (let i = newPath.length - 1; i >= 0; i--) {
-          const segment = newPath[i];
-          if (
-            !["where", "AND", "OR", "NOT", "every", "none", "some"].includes(
-              segment
-            )
-          ) {
-            return segment;
-          }
-        }
-      }
+    item.sortText = `1_${fieldName}`;
+    item.insertText = new vscode.SnippetString(`${fieldName}' => $0`);
+    item.documentation = new vscode.MarkdownString(
+      `**Type**: \`${typeStr}\`\n\n- **Required**: ${!fieldInfo.nullable}\n- **Nullable**: ${
+        fieldInfo.nullable
+      }`
+    );
+    item.range = makeReplaceRange(doc, pos, already.length);
 
-      if (isArray(item.value)) {
-        const result = findParentField(item.value as PhpArray, target, newPath);
-        if (result) {
-          return result;
-        }
-      }
-    }
-    return null;
-  }
+    return item;
+  });
+}
 
-  return findParentField(argsArray, hostArray);
+function createCountOperationCompletions(
+  context: CompletionContext
+): vscode.CompletionItem[] {
+  const { pos, already, doc } = context;
+
+  // Operations available for _count
+  const countOps = ["select"] as const;
+
+  return countOps.map((op) => {
+    const item = new vscode.CompletionItem(
+      op,
+      vscode.CompletionItemKind.Keyword
+    );
+
+    item.insertText = new vscode.SnippetString(`${op}' => [\n\t$0\n]`);
+    item.documentation = new vscode.MarkdownString(
+      `**${op}** - ${
+        op === "select" ? "Select specific relations to count" : op
+      }`
+    );
+    item.range = makeReplaceRange(doc, pos, already.length);
+    item.sortText = `0_${op}`; // Prioritize these completions
+
+    return item;
+  });
 }
 
 function shouldProvideRootKeys(
@@ -1085,15 +1152,6 @@ function createWhereCompletions(
     item.range = makeReplaceRange(doc, pos, already.length);
     return item;
   });
-}
-
-function isRelationField(fieldInfo: FieldInfo, modelMap: ModelMap): boolean {
-  if (!fieldInfo) {
-    return false;
-  }
-
-  // Check if the field type exists as a model in our modelMap
-  return modelMap.has(fieldInfo.type.toLowerCase());
 }
 
 function getRelationContext(
@@ -1419,82 +1477,6 @@ function filterFieldsByOperation(
   return allFields;
 }
 
-function getTargetModelFromChain(
-  relationChain: RelationChainItem[],
-  modelMap: ModelMap
-): Map<string, FieldInfo> | null {
-  if (relationChain.length === 0) {
-    return null;
-  }
-
-  // Get the last relation in the chain - that's our target model
-  const lastRelation = relationChain[relationChain.length - 1];
-  return modelMap.get(lastRelation.modelType.toLowerCase()) || null;
-}
-
-function createWhereFieldCompletions(
-  context: CompletionContext,
-  suggestions: [string, FieldInfo][]
-): vscode.CompletionItem[] {
-  const { pos, already, doc } = context;
-
-  return suggestions.map(([name, info]) => {
-    const typeStr = `${info.type}${info.isList ? "[]" : ""}`;
-    const optional = info.nullable;
-
-    const label: vscode.CompletionItemLabel = {
-      label: optional ? `${name}?` : name,
-      detail: `: ${typeStr}`,
-    };
-
-    const item = new vscode.CompletionItem(
-      label,
-      vscode.CompletionItemKind.Field
-    );
-
-    item.sortText = `0_${name}`;
-    item.insertText = new vscode.SnippetString(`${name}' => $0`);
-    item.documentation = new vscode.MarkdownString(
-      `**Type**: \`${typeStr}\`\n\n- **Required**: ${!info.nullable}\n- **Nullable**: ${
-        info.nullable
-      }`
-    );
-    item.range = makeReplaceRange(doc, pos, already.length);
-    return item;
-  });
-}
-
-function createStandardFieldCompletions(
-  context: CompletionContext,
-  suggestions: [string, FieldInfo][]
-): vscode.CompletionItem[] {
-  const { pos, already, doc } = context;
-
-  return suggestions.map(([name, info]) => {
-    const typeStr = `${info.type}${info.isList ? "[]" : ""}`;
-    const optional = info.nullable;
-
-    const label: vscode.CompletionItemLabel = {
-      label: optional ? `${name}?` : name,
-      detail: `: ${typeStr}`,
-    };
-
-    const item = new vscode.CompletionItem(
-      label,
-      vscode.CompletionItemKind.Field
-    );
-
-    item.insertText = new vscode.SnippetString(`${name}' => $0`);
-    item.documentation = new vscode.MarkdownString(
-      `**Type**: \`${typeStr}\`\n\n- **Required**: ${!info.nullable}\n- **Nullable**: ${
-        info.nullable
-      }`
-    );
-    item.range = makeReplaceRange(doc, pos, already.length);
-    return item;
-  });
-}
-
 export interface FieldInfo {
   type: string; // "String" | "Int" | ...
   required: boolean;
@@ -1577,11 +1559,6 @@ const phpDataTypes: Record<string, string[]> = {
   Enum: ["enum", "string"],
 };
 
-/**
- * Walk a “key => rawValue” block and push diagnostics for
- *  • unknown columns
- *  • type mismatches
- */
 function validateFieldAssignments(
   doc: vscode.TextDocument,
   literal: string,
