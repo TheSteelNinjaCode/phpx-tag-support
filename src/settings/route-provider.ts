@@ -142,7 +142,7 @@ export class RouteProvider {
 
   public isValidRoute(url: string): boolean {
     // Parse URL to separate path from query parameters
-    const { pathname } = this.parseUrl(url);
+    const { pathname, searchParams } = this.parseUrl(url);
 
     // Check static routes first
     const staticRoute = this.routes.find(
@@ -152,13 +152,44 @@ export class RouteProvider {
       return true;
     }
 
-    // Check dynamic routes
-    return this.routes.some((route) => {
+    // Check dynamic routes against the pathname
+    const pathMatches = this.routes.some((route) => {
       if (!route.isDynamic) {
         return false;
       }
       return route.pattern.test(pathname);
     });
+
+    if (pathMatches) {
+      return true;
+    }
+
+    // NEW: Check if query parameters can satisfy dynamic route parameters
+    // For example: /blog?id=123 should match /blog/{id} route
+    return this.routes.some((route) => {
+      if (!route.isDynamic) {
+        return false;
+      }
+
+      // Check if this is a base path match with query parameters
+      const basePath = this.getBasePath(route.url);
+      if (pathname === basePath) {
+        // Check if all required dynamic segments can be satisfied by query parameters
+        return route.dynamicSegments.every((paramName) => {
+          return searchParams.has(paramName);
+        });
+      }
+
+      return false;
+    });
+  }
+
+  /**
+   * Get the base path of a dynamic route (without the dynamic segments)
+   * Example: /blog/{id} -> /blog
+   */
+  private getBasePath(routeUrl: string): string {
+    return routeUrl.split("{")[0].replace(/\/$/, "") || "/";
   }
 
   /**
@@ -197,7 +228,7 @@ export class RouteProvider {
 
   public getRouteByUrl(url: string): RouteInfo | undefined {
     // Parse URL to separate path from query parameters
-    const { pathname } = this.parseUrl(url);
+    const { pathname, searchParams } = this.parseUrl(url);
 
     // Check static routes first
     const staticRoute = this.routes.find(
@@ -207,12 +238,33 @@ export class RouteProvider {
       return staticRoute;
     }
 
-    // Check dynamic routes
-    return this.routes.find((route) => {
+    // Check dynamic routes against pathname
+    const pathMatchRoute = this.routes.find((route) => {
       if (!route.isDynamic) {
         return false;
       }
       return route.pattern.test(pathname);
+    });
+
+    if (pathMatchRoute) {
+      return pathMatchRoute;
+    }
+
+    // NEW: Check if query parameters can match dynamic route
+    return this.routes.find((route) => {
+      if (!route.isDynamic) {
+        return false;
+      }
+
+      const basePath = this.getBasePath(route.url);
+      if (pathname === basePath) {
+        // Check if all required dynamic segments can be satisfied by query parameters
+        return route.dynamicSegments.every((paramName) => {
+          return searchParams.has(paramName);
+        });
+      }
+
+      return false;
     });
   }
 
@@ -232,7 +284,7 @@ export class RouteProvider {
       return { route: staticRoute, params: {}, queryParams: searchParams };
     }
 
-    // Check dynamic routes
+    // Check dynamic routes with path parameters
     for (const route of this.routes) {
       if (!route.isDynamic) {
         continue;
@@ -254,6 +306,41 @@ export class RouteProvider {
         });
 
         return { route, params, queryParams: searchParams };
+      }
+    }
+
+    // NEW: Check dynamic routes with query parameters
+    // For example: /blog?id=123 should match /blog/{id} route
+    for (const route of this.routes) {
+      if (!route.isDynamic) {
+        continue;
+      }
+
+      const basePath = this.getBasePath(route.url);
+      if (pathname === basePath) {
+        // Check if all required dynamic segments can be satisfied by query parameters
+        const canSatisfyAllParams = route.dynamicSegments.every((paramName) => {
+          return searchParams.has(paramName);
+        });
+
+        if (canSatisfyAllParams) {
+          const params: Record<string, string | string[]> = {};
+
+          // Extract parameters from query string
+          route.dynamicSegments.forEach((paramName) => {
+            const value = searchParams.get(paramName);
+            if (value !== null) {
+              // For catch-all parameters, split by comma or slash
+              if (route.path.includes(`[...${paramName}]`)) {
+                params[paramName] = value.split(/[,\/]/).filter(Boolean);
+              } else {
+                params[paramName] = value;
+              }
+            }
+          });
+
+          return { route, params, queryParams: searchParams };
+        }
       }
     }
 
@@ -331,26 +418,53 @@ export class RouteProvider {
 
   private generateExamples(route: RouteInfo): string[] {
     const examples: string[] = [];
-    const baseUrl = route.url.replace(/\{[^}]+\}/g, "");
 
-    if (route.path.includes("[id]")) {
-      examples.push(baseUrl.replace("{id}", "123"));
-      examples.push(baseUrl.replace("{id}", "abc"));
+    // Generate examples by replacing each dynamic segment
+    route.dynamicSegments.forEach((paramName) => {
+      if (route.path.includes(`[...${paramName}]`)) {
+        // Catch-all route examples
+        const basePath = route.url.replace(`{...${paramName}}`, "");
+        examples.push(`${basePath}category`);
+        examples.push(`${basePath}category/subcategory`);
+        examples.push(`${basePath}category/subcategory/item`);
+      } else {
+        // Single dynamic segment examples
+        const basePath = route.url.replace(`{${paramName}}`, "");
+
+        if (paramName === "id") {
+          examples.push(`${basePath}123`);
+          examples.push(`${basePath}456`);
+          examples.push(`${basePath}abc`);
+        } else if (paramName === "slug") {
+          examples.push(`${basePath}my-post`);
+          examples.push(`${basePath}another-article`);
+          examples.push(`${basePath}sample-page`);
+        } else {
+          // Generic examples for other parameter names
+          examples.push(`${basePath}a`);
+          examples.push(`${basePath}b`);
+          examples.push(`${basePath}c`);
+        }
+      }
+    });
+
+    // If no specific examples were generated, create generic ones
+    if (examples.length === 0) {
+      let genericExample = route.url;
+      route.dynamicSegments.forEach((paramName) => {
+        if (route.path.includes(`[...${paramName}]`)) {
+          genericExample = genericExample.replace(
+            `{...${paramName}}`,
+            "example"
+          );
+        } else {
+          genericExample = genericExample.replace(`{${paramName}}`, "example");
+        }
+      });
+      examples.push(genericExample);
     }
 
-    if (route.path.includes("[slug]")) {
-      examples.push(baseUrl.replace("{slug}", "my-post"));
-      examples.push(baseUrl.replace("{slug}", "another-article"));
-    }
-
-    if (route.path.includes("[...")) {
-      const basePath = baseUrl.replace("{...", "").replace("}", "");
-      examples.push(`${basePath}category`);
-      examples.push(`${basePath}category/subcategory`);
-      examples.push(`${basePath}category/subcategory/item`);
-    }
-
-    return examples.length ? examples : [route.url];
+    return examples.slice(0, 3); // Limit to 3 examples
   }
 }
 
