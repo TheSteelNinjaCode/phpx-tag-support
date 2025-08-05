@@ -37,11 +37,11 @@ import {
 import { validateStateTupleUsage } from "./analysis/state";
 import { rebuildMustacheStub } from "./analysis/mustache-stub";
 import {
-  RouteProvider,
   HrefCompletionProvider,
-  HrefHoverProvider,
-  HrefDiagnosticProvider,
   HrefDefinitionProvider,
+  HrefDiagnosticProvider,
+  HrefHoverProvider,
+  RouteProvider,
 } from "./settings/route-provider";
 
 /* ────────────────────────────────────────────────────────────── *

@@ -6,6 +6,9 @@ interface RouteInfo {
   path: string;
   url: string;
   filePath: string;
+  isDynamic: boolean;
+  dynamicSegments: string[];
+  pattern: RegExp;
 }
 
 export class RouteProvider {
@@ -21,9 +24,6 @@ export class RouteProvider {
     this.loadRoutes();
   }
 
-  /**
-   * Load routes from files-list.json
-   */
   private loadRoutes(): void {
     try {
       if (!fs.existsSync(this.filesListPath)) {
@@ -41,9 +41,6 @@ export class RouteProvider {
     }
   }
 
-  /**
-   * Extract routes from file paths - only index.php files inside app directory
-   */
   private extractRoutesFromFiles(files: string[]): RouteInfo[] {
     const routes: RouteInfo[] = [];
 
@@ -59,98 +56,256 @@ export class RouteProvider {
       }
     });
 
-    // Sort routes by URL for better organization
-    return routes.sort((a, b) => a.url.localeCompare(b.url));
+    // Sort static routes first, then dynamic
+    return routes.sort((a, b) => {
+      if (a.isDynamic && !b.isDynamic) {
+        return 1;
+      }
+      if (!a.isDynamic && b.isDynamic) {
+        return -1;
+      }
+      return a.url.localeCompare(b.url);
+    });
   }
 
-  /**
-   * Convert file path to route information
-   * Example: "./src/app/dashboard/index.php" → { path: "/dashboard", url: "/dashboard", filePath: "..." }
-   */
   private convertFilePathToRoute(filePath: string): RouteInfo | null {
+    // Handle root case: ./src/app/index.php
+    if (filePath.endsWith("/app/index.php")) {
+      return {
+        path: "/",
+        url: "/",
+        filePath: filePath,
+        isDynamic: false,
+        dynamicSegments: [],
+        pattern: /^\/$/,
+      };
+    }
+
     // Extract the part after /app/ and before /index.php
     const appMatch = filePath.match(/\/app\/(.*)\/index\.php$/);
-
     if (!appMatch) {
-      // Handle root case: ./src/app/index.php
-      if (filePath.endsWith("/app/index.php")) {
-        return {
-          path: "/",
-          url: "/",
-          filePath: filePath,
-        };
-      }
       return null;
     }
 
     const routePath = appMatch[1];
-    const url = `/${routePath}`;
+    const segments = routePath.split("/");
+
+    const dynamicSegments: string[] = [];
+    let isDynamic = false;
+    let urlPattern = "";
+    let displayUrl = "";
+
+    segments.forEach((segment, index) => {
+      if (segment.startsWith("[") && segment.endsWith("]")) {
+        isDynamic = true;
+        const paramName = segment.slice(1, -1);
+
+        if (paramName.startsWith("...")) {
+          // Catch-all route: [...slug]
+          const cleanParam = paramName.substring(3);
+          dynamicSegments.push(cleanParam);
+          urlPattern += "/(.+)"; // Matches one or more segments
+          displayUrl += `/{...${cleanParam}}`;
+        } else {
+          // Single dynamic segment: [slug]
+          dynamicSegments.push(paramName);
+          urlPattern += "/([^/]+)"; // Matches single segment
+          displayUrl += `/{${paramName}}`;
+        }
+      } else {
+        // Static segment
+        urlPattern += `/${segment}`;
+        displayUrl += `/${segment}`;
+      }
+    });
+
+    const pattern = new RegExp(`^${urlPattern}$`);
+    const url = isDynamic ? displayUrl : `/${routePath}`;
 
     return {
       path: routePath,
       url: url,
       filePath: filePath,
+      isDynamic: isDynamic,
+      dynamicSegments: dynamicSegments,
+      pattern: pattern,
     };
   }
 
-  /**
-   * Get all available routes
-   */
   public getRoutes(): RouteInfo[] {
     return this.routes;
   }
 
-  /**
-   * Get route URLs for completion
-   */
   public getRouteUrls(): string[] {
     return this.routes.map((route) => route.url);
   }
 
-  /**
-   * Validate if a URL exists as a route
-   */
   public isValidRoute(url: string): boolean {
-    return this.routes.some((route) => route.url === url);
+    // Check static routes first
+    const staticRoute = this.routes.find(
+      (route) => !route.isDynamic && route.url === url
+    );
+    if (staticRoute) {
+      return true;
+    }
+
+    // Check dynamic routes
+    return this.routes.some((route) => {
+      if (!route.isDynamic) {
+        return false;
+      }
+      return route.pattern.test(url);
+    });
   }
 
-  /**
-   * Get route info by URL
-   */
   public getRouteByUrl(url: string): RouteInfo | undefined {
-    return this.routes.find((route) => route.url === url);
+    // Check static routes first
+    const staticRoute = this.routes.find(
+      (route) => !route.isDynamic && route.url === url
+    );
+    if (staticRoute) {
+      return staticRoute;
+    }
+
+    // Check dynamic routes
+    return this.routes.find((route) => {
+      if (!route.isDynamic) {
+        return false;
+      }
+      return route.pattern.test(url);
+    });
   }
 
-  /**
-   * Refresh routes from files-list.json
-   */
+  public getMatchingRoute(
+    url: string
+  ): { route: RouteInfo; params: Record<string, string | string[]> } | null {
+    // Check static routes first
+    const staticRoute = this.routes.find(
+      (route) => !route.isDynamic && route.url === url
+    );
+    if (staticRoute) {
+      return { route: staticRoute, params: {} };
+    }
+
+    // Check dynamic routes
+    for (const route of this.routes) {
+      if (!route.isDynamic) {
+        continue;
+      }
+
+      const match = route.pattern.exec(url);
+      if (match) {
+        const params: Record<string, string | string[]> = {};
+
+        route.dynamicSegments.forEach((paramName, index) => {
+          const value = match[index + 1];
+
+          // Handle catch-all parameters (they capture everything as segments)
+          if (route.path.includes(`[...${paramName}]`)) {
+            params[paramName] = value.split("/").filter(Boolean);
+          } else {
+            params[paramName] = value;
+          }
+        });
+
+        return { route, params };
+      }
+    }
+
+    return null;
+  }
+
   public refresh(): void {
     this.loadRoutes();
   }
 
-  /**
-   * Create completion items for href attributes
-   */
   public createHrefCompletionItems(): vscode.CompletionItem[] {
-    return this.routes.map((route) => {
+    const items: vscode.CompletionItem[] = [];
+
+    this.routes.forEach((route) => {
       const item = new vscode.CompletionItem(
         route.url,
-        vscode.CompletionItemKind.Reference
+        route.isDynamic
+          ? vscode.CompletionItemKind.Snippet
+          : vscode.CompletionItemKind.Reference
       );
 
-      item.detail = `Route: ${route.url}`;
-      item.documentation = new vscode.MarkdownString(
-        `**Route:** \`${route.url}\`\n\n**File:** \`${route.filePath}\``
-      );
+      if (route.isDynamic) {
+        item.detail = `Dynamic Route: ${route.url}`;
+        item.documentation = new vscode.MarkdownString(
+          `**Dynamic Route:** \`${route.url}\`\n\n` +
+            `**Parameters:** ${route.dynamicSegments
+              .map((s) => `\`${s}\``)
+              .join(", ")}\n\n` +
+            `**File:** \`${route.filePath}\`\n\n` +
+            `**Examples:**\n` +
+            `${this.generateExamples(route)
+              .map((ex) => `- \`${ex}\``)
+              .join("\n")}`
+        );
+        item.insertText = this.createSnippetText(route);
+      } else {
+        item.detail = `Static Route: ${route.url}`;
+        item.documentation = new vscode.MarkdownString(
+          `**Route:** \`${route.url}\`\n\n**File:** \`${route.filePath}\``
+        );
+        item.insertText = route.url;
+      }
 
-      // Insert just the URL
-      item.insertText = route.url;
+      // Sorting: static routes first, then dynamic
+      item.sortText = route.isDynamic
+        ? `2_${route.url}`
+        : route.url === "/"
+        ? "0_/"
+        : `1_${route.url}`;
 
-      // Add sorting priority - home route first
-      item.sortText = route.url === "/" ? "0_/" : `1_${route.url}`;
-
-      return item;
+      items.push(item);
     });
+
+    return items;
+  }
+
+  private createSnippetText(route: RouteInfo): vscode.SnippetString {
+    let snippet = route.url;
+    let tabIndex = 1;
+
+    route.dynamicSegments.forEach((param) => {
+      if (route.path.includes(`[...${param}]`)) {
+        snippet = snippet.replace(
+          `{...${param}}`,
+          `\${${tabIndex}:${param}/more}`
+        );
+      } else {
+        snippet = snippet.replace(`{${param}}`, `\${${tabIndex}:${param}}`);
+      }
+      tabIndex++;
+    });
+
+    return new vscode.SnippetString(snippet);
+  }
+
+  private generateExamples(route: RouteInfo): string[] {
+    const examples: string[] = [];
+    const baseUrl = route.url.replace(/\{[^}]+\}/g, "");
+
+    if (route.path.includes("[id]")) {
+      examples.push(baseUrl.replace("{id}", "123"));
+      examples.push(baseUrl.replace("{id}", "abc"));
+    }
+
+    if (route.path.includes("[slug]")) {
+      examples.push(baseUrl.replace("{slug}", "my-post"));
+      examples.push(baseUrl.replace("{slug}", "another-article"));
+    }
+
+    if (route.path.includes("[...")) {
+      const basePath = baseUrl.replace("{...", "").replace("}", "");
+      examples.push(`${basePath}category`);
+      examples.push(`${basePath}category/subcategory`);
+      examples.push(`${basePath}category/subcategory/item`);
+    }
+
+    return examples.length ? examples : [route.url];
   }
 }
 
@@ -196,9 +351,127 @@ export class HrefCompletionProvider implements vscode.CompletionItemProvider {
   }
 }
 
-/**
- * Hover provider for href attributes
- */
+// Updated diagnostic provider
+export class HrefDiagnosticProvider {
+  constructor(private routeProvider: RouteProvider) {}
+
+  validateDocument(document: vscode.TextDocument): vscode.Diagnostic[] {
+    const diagnostics: vscode.Diagnostic[] = [];
+    const text = document.getText();
+
+    const hrefRegex = /href\s*=\s*"([^"]*)"/g;
+    let match;
+
+    while ((match = hrefRegex.exec(text)) !== null) {
+      const hrefValue = match[1];
+
+      if (this.isExternalOrSpecialUrl(hrefValue)) {
+        continue;
+      }
+
+      if (!this.routeProvider.isValidRoute(hrefValue)) {
+        const start = document.positionAt(
+          match.index + match[0].indexOf(hrefValue)
+        );
+        const end = document.positionAt(
+          match.index + match[0].indexOf(hrefValue) + hrefValue.length
+        );
+
+        const suggestions = this.getSuggestions(hrefValue);
+        const message = suggestions.length
+          ? `Route "${hrefValue}" not found. Did you mean: ${suggestions.join(
+              ", "
+            )}?`
+          : `Route "${hrefValue}" not found. Available routes: ${this.routeProvider
+              .getRouteUrls()
+              .slice(0, 5)
+              .join(", ")}${
+              this.routeProvider.getRoutes().length > 5 ? "..." : ""
+            }`;
+
+        diagnostics.push(
+          new vscode.Diagnostic(
+            new vscode.Range(start, end),
+            message,
+            vscode.DiagnosticSeverity.Warning
+          )
+        );
+      }
+    }
+
+    return diagnostics;
+  }
+
+  private getSuggestions(invalidUrl: string): string[] {
+    const routes = this.routeProvider.getRoutes();
+    const suggestions: string[] = [];
+
+    // Find similar static routes
+    routes
+      .filter((route) => !route.isDynamic)
+      .forEach((route) => {
+        if (this.isSimilar(invalidUrl, route.url)) {
+          suggestions.push(route.url);
+        }
+      });
+
+    // Add dynamic route patterns that might match
+    routes
+      .filter((route) => route.isDynamic)
+      .forEach((route) => {
+        const basePath = route.url.split("{")[0];
+        if (invalidUrl.startsWith(basePath)) {
+          suggestions.push(route.url);
+        }
+      });
+
+    return suggestions.slice(0, 3);
+  }
+
+  private isSimilar(str1: string, str2: string): boolean {
+    const distance = this.levenshteinDistance(str1, str2);
+    return distance <= Math.max(str1.length, str2.length) * 0.4;
+  }
+
+  private levenshteinDistance(str1: string, str2: string): number {
+    const matrix = Array(str2.length + 1)
+      .fill(null)
+      .map(() => Array(str1.length + 1).fill(null));
+
+    for (let i = 0; i <= str1.length; i++) {
+      matrix[0][i] = i;
+    }
+    for (let j = 0; j <= str2.length; j++) {
+      matrix[j][0] = j;
+    }
+
+    for (let j = 1; j <= str2.length; j++) {
+      for (let i = 1; i <= str1.length; i++) {
+        const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1;
+        matrix[j][i] = Math.min(
+          matrix[j][i - 1] + 1,
+          matrix[j - 1][i] + 1,
+          matrix[j - 1][i - 1] + indicator
+        );
+      }
+    }
+
+    return matrix[str2.length][str1.length];
+  }
+
+  private isExternalOrSpecialUrl(url: string): boolean {
+    return (
+      url.startsWith("http://") ||
+      url.startsWith("https://") ||
+      url.startsWith("mailto:") ||
+      url.startsWith("tel:") ||
+      url.startsWith("#") ||
+      url === ""
+    );
+  }
+}
+
+// Updated hover provider
 export class HrefHoverProvider implements vscode.HoverProvider {
   constructor(private routeProvider: RouteProvider) {}
 
@@ -209,30 +482,36 @@ export class HrefHoverProvider implements vscode.HoverProvider {
     const line = document.lineAt(position.line).text;
     const cursorOffset = position.character;
 
-    // Check if we're hovering over an href value
     const hrefValue = this.getHrefValue(line, cursorOffset);
     if (!hrefValue) {
       return;
     }
 
-    const route = this.routeProvider.getRouteByUrl(hrefValue);
-    if (!route) {
+    const matchResult = this.routeProvider.getMatchingRoute(hrefValue);
+    if (!matchResult) {
       return;
     }
 
+    const { route, params } = matchResult;
     const md = new vscode.MarkdownString();
-    md.appendCodeblock(`href="${route.url}"`, "html");
+
+    md.appendCodeblock(`href="${hrefValue}"`, "html");
     md.appendMarkdown(`\n\n**Route:** \`${route.url}\``);
+
+    if (route.isDynamic && Object.keys(params).length > 0) {
+      md.appendMarkdown(`\n\n**Parameters:**`);
+      Object.entries(params).forEach(([key, value]) => {
+        const displayValue = Array.isArray(value) ? value.join("/") : value;
+        md.appendMarkdown(`\n- \`${key}\`: ${displayValue}`);
+      });
+    }
+
     md.appendMarkdown(`\n\n**File:** \`${route.filePath}\``);
 
     return new vscode.Hover(md);
   }
 
-  /**
-   * Extract href value at cursor position
-   */
   private getHrefValue(line: string, cursorOffset: number): string | null {
-    // Find href attributes in the line
     const hrefRegex = /href\s*=\s*"([^"]*)"/g;
     let match;
 
@@ -246,64 +525,6 @@ export class HrefHoverProvider implements vscode.HoverProvider {
     }
 
     return null;
-  }
-}
-
-/**
- * Diagnostic provider for invalid href routes
- */
-export class HrefDiagnosticProvider {
-  constructor(private routeProvider: RouteProvider) {}
-
-  validateDocument(document: vscode.TextDocument): vscode.Diagnostic[] {
-    const diagnostics: vscode.Diagnostic[] = [];
-    const text = document.getText();
-
-    // Find all href attributes
-    const hrefRegex = /href\s*=\s*"([^"]*)"/g;
-    let match;
-
-    while ((match = hrefRegex.exec(text)) !== null) {
-      const hrefValue = match[1];
-
-      // Skip external URLs, mailto, tel, etc.
-      if (this.isExternalOrSpecialUrl(hrefValue)) {
-        continue;
-      }
-
-      // Check if it's a valid internal route
-      if (!this.routeProvider.isValidRoute(hrefValue)) {
-        const start = document.positionAt(
-          match.index + match[0].indexOf(hrefValue)
-        );
-        const end = document.positionAt(
-          match.index + match[0].indexOf(hrefValue) + hrefValue.length
-        );
-
-        diagnostics.push(
-          new vscode.Diagnostic(
-            new vscode.Range(start, end),
-            `Route "${hrefValue}" not found. Available routes: ${this.routeProvider
-              .getRouteUrls()
-              .join(", ")}`,
-            vscode.DiagnosticSeverity.Warning
-          )
-        );
-      }
-    }
-
-    return diagnostics;
-  }
-
-  private isExternalOrSpecialUrl(url: string): boolean {
-    return (
-      url.startsWith("http://") ||
-      url.startsWith("https://") ||
-      url.startsWith("mailto:") ||
-      url.startsWith("tel:") ||
-      url.startsWith("#") ||
-      url === ""
-    );
   }
 }
 
