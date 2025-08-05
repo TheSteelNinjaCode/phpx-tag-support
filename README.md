@@ -79,6 +79,25 @@
 - **Local Store**: Support for `store.*` operations with PPHPLocalStore
 - **Search Params**: Integration with `searchParams.*` for URL parameter management
 
+## 🎯 Enumerated Props – strict list vs. list + `*` wildcard
+
+PHPX Tag Support reads `@property` annotations to learn which **string literals** are valid for a prop.
+
+| Annotation style                                                     | Extension behaviour                                                                                                                           | When to use it                                                                                           |
+| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `/** @property string $color = success\|warning\|error */`    | **Strict enum** – attribute must be one of the listed tokens.Any other string is flagged as an error.                                 | The set of legal options is finite and you want the linter to be uncompromising (variants, sizes, etc.). |
+| `/** @property string $color = success\|warning\|error\|* */` | **Enum + wildcard** – the three presets appear first in IntelliSense, but **any other non-empty string** is also accepted (no red underline). | You have common presets yet still need flexibility (custom CSS colours, dynamic slugs, etc.).            |
+
+### 📌 Component Example
+
+```php
+class Badge extends PHPX
+{
+    /** @property string $color = success|warning|error|* */
+    public string $color = 'success';
+}
+```
+
 #### Signature Help
 
 - **Parameter Information**: Get real-time parameter hints for PPHP method calls

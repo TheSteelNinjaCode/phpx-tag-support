@@ -1,8 +1,7 @@
-import { Node } from "php-parser";
 import * as fs from "fs";
 import * as vscode from "vscode";
-import { phpEngine } from "../util/php-engine";
 import { getComponentsFromClassLog } from "../extension";
+import { phpEngine } from "../util/php-engine";
 
 /**
  * php‑parser uses bit‑flags for visibility.  Public = 4.
@@ -27,15 +26,31 @@ interface PropMeta {
 
 type Cached = { mtime: number; props: PropMeta[] };
 
-function isAllowed(meta: any, value: string): boolean {
-  // If no allowed values specified, only check if value matches the type
+function isAllowed(meta: PropMeta, value: string): boolean {
+  if (!value.trim()) {
+    return false;
+  } // empty still illegal
+
+  // No enum at all → only simple type check
   if (!meta.allowed) {
     return isValidType(meta.type, value);
   }
 
-  // If allowed values are specified, check against them
-  const allowedValues = meta.allowed.split("|").map((v: string) => v.trim());
-  return allowedValues.includes(value);
+  const parts = meta.allowed.split("|").map((v) => v.trim());
+  const hasWildcard = parts.includes("*");
+
+  // 1) value matches an explicit token → OK
+  if (parts.includes(value)) {
+    return true;
+  }
+
+  // 2) wildcard means fall back to type-check
+  if (hasWildcard) {
+    return isValidType(meta.type, value);
+  }
+
+  // 3) strict enum: reject
+  return false;
 }
 
 function isValidType(type: string, value: string): boolean {
@@ -643,7 +658,7 @@ export function buildDynamicAttrItems(
          * 3. Detail text (shown in completion dropdown)
          * ─────────────────────────────────────────────────────────── */
         const reqFlag = optional ? "(optional)" : "(required)";
-        const allowedInfo = finalAllowed ? ` ∈ {${finalAllowed}}` : "";
+        const allowedInfo = finalAllowed ? ` {${finalAllowed}}` : "";
 
         item.detail = def
           ? `${reqFlag} : ${type}${allowedInfo} = ${def}`
