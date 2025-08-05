@@ -25,6 +25,16 @@
       {
         "command": "phpx-tag-support.peekTagDefinition",
         "title": "PHPX: Peek Tag Definition"
+      },
+      {
+        "command": "phpx-tag-support.refreshRoutes",
+        "title": "Refresh Routes",
+        "category": "PHPX"
+      },
+      {
+        "command": "phpx-tag-support.showRoutes",
+        "title": "Show All Available Routes",
+        "category": "PHPX"
       }
     ]
   },

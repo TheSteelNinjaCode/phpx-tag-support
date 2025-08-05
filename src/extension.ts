@@ -36,6 +36,13 @@ import {
 } from "./settings/prisma-provider";
 import { validateStateTupleUsage } from "./analysis/state";
 import { rebuildMustacheStub } from "./analysis/mustache-stub";
+import {
+  RouteProvider,
+  HrefCompletionProvider,
+  HrefHoverProvider,
+  HrefDiagnosticProvider,
+  HrefDefinitionProvider,
+} from "./settings/route-provider";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                    *
@@ -1162,6 +1169,125 @@ export async function activate(context: vscode.ExtensionContext) {
     },
     null,
     context.subscriptions
+  );
+
+  // ── Initialize Route Provider ──────────────────────────────────
+  const routeProvider = new RouteProvider(wsFolder);
+  const hrefCompletionProvider = new HrefCompletionProvider(routeProvider);
+  const hrefHoverProvider = new HrefHoverProvider(routeProvider);
+  const hrefDiagnosticProvider = new HrefDiagnosticProvider(routeProvider);
+  const hrefDefinitionProvider = new HrefDefinitionProvider(
+    routeProvider,
+    wsFolder
+  );
+
+  // ── Register Route-related Providers ───────────────────────────
+
+  // 1. Completion provider for href attributes
+  context.subscriptions.push(
+    vscode.languages.registerCompletionItemProvider(
+      { language: "php", scheme: "file" },
+      hrefCompletionProvider,
+      '"',
+      "'",
+      "/"
+    )
+  );
+
+  // 2. Hover provider for href values
+  context.subscriptions.push(
+    vscode.languages.registerHoverProvider(
+      { language: "php", scheme: "file" },
+      hrefHoverProvider
+    )
+  );
+
+  // 3. Definition provider for href values (Ctrl+Click navigation) 👈 NEW
+  context.subscriptions.push(
+    vscode.languages.registerDefinitionProvider(
+      { language: "php", scheme: "file" },
+      hrefDefinitionProvider
+    )
+  );
+
+  // 4. Function to validate routes in document
+  const hrefDiagnostics =
+    vscode.languages.createDiagnosticCollection("phpx-href");
+  const validateRoutes = (document: vscode.TextDocument) => {
+    if (document.languageId !== "php") {
+      return;
+    }
+
+    const diagnostics = hrefDiagnosticProvider.validateDocument(document);
+    hrefDiagnostics.set(document.uri, diagnostics);
+  };
+
+  // 5. Watch for changes to files-list.json
+  const filesListPattern = new vscode.RelativePattern(
+    wsFolder,
+    "settings/files-list.json"
+  );
+  const filesListWatcher =
+    vscode.workspace.createFileSystemWatcher(filesListPattern);
+
+  const refreshRoutes = () => {
+    routeProvider.refresh();
+    console.log("🔄 Routes refreshed from files-list.json");
+
+    // Re-validate all open documents
+    vscode.workspace.textDocuments.forEach(validateRoutes);
+  };
+
+  filesListWatcher.onDidChange(refreshRoutes);
+  filesListWatcher.onDidCreate(refreshRoutes);
+  filesListWatcher.onDidDelete(refreshRoutes);
+
+  context.subscriptions.push(filesListWatcher);
+
+  // 6. Validate routes on document events
+  vscode.workspace.onDidChangeTextDocument(
+    (e) => validateRoutes(e.document),
+    null,
+    context.subscriptions
+  );
+
+  vscode.workspace.onDidSaveTextDocument(
+    validateRoutes,
+    null,
+    context.subscriptions
+  );
+
+  vscode.window.onDidChangeActiveTextEditor(
+    (editor) => {
+      if (editor) {
+        validateRoutes(editor.document);
+      }
+    },
+    null,
+    context.subscriptions
+  );
+
+  // 7. Command to refresh routes manually
+  context.subscriptions.push(
+    vscode.commands.registerCommand("phpx-tag-support.refreshRoutes", () => {
+      refreshRoutes();
+      vscode.window.showInformationMessage("Routes refreshed!");
+    })
+  );
+
+  // 8. Command to show all available routes
+  context.subscriptions.push(
+    vscode.commands.registerCommand("phpx-tag-support.showRoutes", () => {
+      const routes = routeProvider.getRoutes();
+      const routeList = routes
+        .map((route) => `• ${route.url} → ${route.filePath}`)
+        .join("\n");
+
+      vscode.window.showInformationMessage(
+        `Available Routes (${routes.length}):\n\n${routeList}`,
+        { modal: true }
+      );
+    })
   );
 }
 

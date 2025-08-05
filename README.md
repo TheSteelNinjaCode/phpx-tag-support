@@ -2,6 +2,8 @@
 
 **PHPX Tag Support** is a comprehensive Visual Studio Code extension designed to enhance your Prisma PHP development workflow. It provides intelligent tag support, auto-completion, diagnostics, and advanced integrations for PHPX components, Prisma operations, and JavaScript/TypeScript-style templating.
 
+---
+
 ## 🚀 Key Features
 
 ### 🏷️ Component Management
@@ -11,6 +13,8 @@
 - **Component Discovery**: Automatically loads components from `class-log.json` for completion suggestions
 - **Dynamic Props Validation**: Validates component properties and their allowed values
 
+---
+
 ### 📝 Code Generation
 
 - **PHPX Class Template**: Type `phpxclass` to generate a complete PHPX component template with:
@@ -18,77 +22,126 @@
   - Proper class structure with `render()` method
   - Built-in attribute and class merging support
 
+---
+
 ### 🎯 Intelligent Completion
 
-#### Component Completion
+- **Component Completion**
 
-- **Tag Suggestions**: Start typing `<` to see available PHPX components
-- **Attribute Completion**: Get suggestions for component properties with type information
-- **Value Completion**: Smart completion for attribute values based on component documentation
+  - Tag Suggestions: Start typing `<` to see available PHPX components
+  - Attribute Completion: Get suggestions for component properties with type information
+  - Value Completion: Smart completion for attribute values based on component documentation
 
-#### Event Handler Support
+- **Event Handler Support**
 
-- **Function Completion**: Auto-complete PHP functions in `onXXX="..."` attributes
-- **Definition Lookup**: Navigate to function definitions with `Ctrl+Click`
+  - Function Completion: Auto-complete PHP functions in `onXXX="..."` attributes
+  - Definition Lookup: Navigate to function definitions with `Ctrl+Click`
 
-#### Mustache Expression Support
+- **Mustache Expression Support**
+  - Variable Completion: Complete variables and object properties in `{{ }}` expressions
+  - Native JS Methods: Access JavaScript string methods like `.substring()`, `.padStart()`, etc.
+  - Template Literals: Full support for template literals with `${}` placeholder syntax
 
-- **Variable Completion**: Complete variables and object properties in `{{ }}` expressions
-- **Native JS Methods**: Access JavaScript string methods like `.substring()`, `.padStart()`, etc.
-- **Template Literals**: Full support for template literals with `${}` placeholder syntax
+---
+
+### 🗺️ Route Management
+
+#### Intelligent Route Completion
+
+- **Auto-Complete Routes**: Get intelligent suggestions for internal routes in `href=""` attributes
+- **Real-Time Validation**: Automatically validate route URLs against your actual routes
+- **File Path Integration**: Uses `files-list.json` for route detection
+
+#### Route Discovery
+
+- Scans all `index.php` files in your `/app/` directory
+- Converts paths to clean URLs:
+  - `./src/app/index.php` → `/`
+  - `./src/app/dashboard/index.php` → `/dashboard`
+  - `./src/app/users/profile/index.php` → `/users/profile`
+
+#### Smart Link Validation
+
+- Invalid Route Detection: Warns about broken links
+- External URL Support: Ignores `https://`, `mailto:`, `tel:`, `#` links
+- Live Updates: Watches `files-list.json` for changes
+
+#### Route Navigation
+
+- **Go to Route File**: `Ctrl+Click` on `href` to open `index.php`
+- **Hover Details**: Shows file path and route info
+- **Route Explorer**: Use "Show All Available Routes"
+- **Manual Refresh**: Use "Refresh Routes" command
+
+#### 📌 Route Example
+
+```html
+<!-- ✅ Auto-completed internal routes -->
+<a href="/">Home</a>
+<a href="/dashboard">Dashboard</a>
+<a href="/users/profile">User Profile</a>
+
+<!-- ❌ Invalid route (shows warning) -->
+<a href="/non-existent-page">Broken Link</a>
+
+<!-- ✅ External -->
+<a href="https://example.com">External Site</a>
+<a href="mailto:user@example.com">Send Email</a>
+<a href="#section">Page Anchor</a>
+```
+
+---
 
 ### 🔍 Navigation & Information
 
-#### Hover Information
+- **Hover Information**
 
-- **Component Details**: Hover over tags to see their full import path
-- **Method Signatures**: Hover over PPHP methods to see their complete signatures
-- **Native JS Help**: Get documentation for JavaScript methods within mustache expressions
+  - View component imports, JS method docs, and method signatures
 
-#### Go to Definition
+- **Go to Definition**
+  - Jump to component/function definitions
+  - Supports peek view
 
-- **Component Sources**: Navigate to component source files with `Ctrl+Click`
-- **Function Navigation**: Jump to PHP function definitions from event handlers
-- **Peek Definition**: Force peek view for better code exploration
+---
 
 ### 🛡️ Advanced Diagnostics
 
 #### XML & HTML Validation
 
-- **Tag Pair Matching**: Detect unclosed or mismatched HTML/XML tags
-- **Attribute Validation**: Ensure all attributes have proper values
-- **Fragment Syntax**: Support for React-style `<></>` fragment syntax
+- Tag Pair Matching
+- Attribute Validation
+- Support for fragment syntax (`<>...</>`)
 
 #### Import & Usage Validation
 
-- **Missing Imports**: Automatically detect and flag components without imports
-- **Import Suggestions**: Get quick-fix suggestions to add missing imports
-- **Heredoc Support**: Validate components within PHP heredoc/nowdoc blocks
+- Missing Imports
+- Quick-fix suggestions
+- Heredoc support
 
 #### JavaScript Expression Validation
 
-- **Syntax Checking**: Validate JavaScript expressions in `{{ }}` mustache blocks
-- **Assignment Prevention**: Warn against assignments in template expressions
-- **Type Safety**: Ensure expressions are valid JavaScript
+- Syntax Checking
+- Assignment Prevention
+- Type Safety
+
+---
 
 ### ⚙️ PPHP Integration
 
-#### Method Support
+- **Method Support**
+  - Completion for `pphp._`, `store._`, `searchParams._`
+  - Signature Help and Argument Hints
 
-- **PPHP Class Methods**: Full completion and validation for `pphp.*` methods
-- **Local Store**: Support for `store.*` operations with PPHPLocalStore
-- **Search Params**: Integration with `searchParams.*` for URL parameter management
+---
 
-## 🎯 Enumerated Props – strict list vs. list + `*` wildcard
+### 🎯 Enumerated Props – strict list vs. list + `*` wildcard
 
-PHPX Tag Support reads `@property` annotations to learn which **string literals** are valid for a prop.
+| Annotation style                                              | Extension behaviour                                      | When to use it                        |
+| ------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------- |
+| `/** @property string $color = success\|warning\|error */`    | **Strict enum** – attribute must match one of the tokens | For finite sets like variants         |
+| `/** @property string $color = success\|warning\|error\|* */` | **Enum + wildcard** – suggests presets but allows custom | For extensible values like CSS colors |
 
-| Annotation style                                                     | Extension behaviour                                                                                                                           | When to use it                                                                                           |
-| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `/** @property string $color = success\|warning\|error */`    | **Strict enum** – attribute must be one of the listed tokens.Any other string is flagged as an error.                                 | The set of legal options is finite and you want the linter to be uncompromising (variants, sizes, etc.). |
-| `/** @property string $color = success\|warning\|error\|* */` | **Enum + wildcard** – the three presets appear first in IntelliSense, but **any other non-empty string** is also accepted (no red underline). | You have common presets yet still need flexibility (custom CSS colours, dynamic slugs, etc.).            |
-
-### 📌 Component Example
+#### 📌 Component Example
 
 ```php
 class Badge extends PHPX
@@ -98,53 +151,59 @@ class Badge extends PHPX
 }
 ```
 
-#### Signature Help
-
-- **Parameter Information**: Get real-time parameter hints for PPHP method calls
-- **Argument Validation**: Ensure correct number and types of arguments
+---
 
 ### 🗃️ Prisma Integration
 
-- **Schema Validation**: Real-time validation of Prisma schema changes
-- **CRUD Operations**: Validate `create`, `read`, `update`, `delete`, `upsert` operations
-- **Advanced Queries**: Support for `groupBy` and `aggregate` operations
-- **Field Completion**: Auto-complete Prisma model fields and relationships
+- **Schema Validation**
+- **CRUD Support**: create, read, update, delete, upsert
+- **Advanced Queries**: groupBy, aggregate
+- **Field Completion**: model fields & relations
+
+---
 
 ### 🎨 Syntax Highlighting
 
-- **Mustache Expressions**: Syntax highlighting for `{{ }}` blocks
-- **Template Literals**: Proper coloring for template strings with placeholders
-- **Native Methods**: Color-coded JavaScript native methods and properties
-- **String & Number Literals**: Enhanced highlighting for different data types
-- **Curly Braces**: Visual emphasis on expression boundaries
+- Mustache Expressions (`{{ }}`)
+- Template Literals (`${}`)
+- JS Native Methods
+- String/Number Literals
+- Curly Braces Highlighting
+
+---
 
 ### 📁 File Management
 
-- **Real-time Updates**: Automatically refresh completions when files change
-- **Workspace Integration**: Seamless integration with Prisma PHP projects
-- **Class Log Monitoring**: Watch for changes in component definitions
+- Real-time Updates on File Changes
+- Project Integration with `class-log.json`
+- Monitors file changes for auto-refresh
+
+---
 
 ## 📋 Complete Feature List
 
-| Feature Category        | Capabilities                                                                          |
-| ----------------------- | ------------------------------------------------------------------------------------- |
-| **Auto-Import**         | • Quick fix with `Ctrl+.` • Smart import grouping • Alias support                     |
-| **Code Generation**     | • `phpxclass` snippet • Namespace auto-detection • Template scaffolding               |
-| **Component Support**   | • Tag completion • Props validation • Attribute suggestions                           |
-| **Navigation**          | • Go to definition • Peek definition • Function lookup                                |
-| **Diagnostics**         | • Missing imports • XML validation • Syntax errors • Type checking                    |
-| **Mustache Templating** | • Variable completion • JS method support • Template literals • Expression validation |
-| **PPHP Integration**    | • Method completion • Signature help • Parameter validation • Store management        |
-| **Prisma Support**      | • Schema validation • CRUD operations • Field completion • Query validation           |
-| **Syntax Highlighting** | • Expression coloring • Method highlighting • String/number literals • Brace matching |
-| **Event Handlers**      | • Function completion • Definition lookup • Parameter hints                           |
-| **File Watching**       | • Auto-refresh • Cache management • Real-time updates                                 |
+| Feature Category    | Capabilities                                |
+| ------------------- | ------------------------------------------- |
+| Auto-Import         | Ctrl+., grouped imports, alias support      |
+| Code Generation     | `phpxclass`, namespace detection            |
+| Component Support   | Tag, props, attributes                      |
+| Route Management    | Autocomplete, validation, refresh           |
+| Navigation          | Go to definition, peek, Ctrl+Click          |
+| Diagnostics         | Imports, XML/JS validation                  |
+| Mustache Templating | Variable, method, and expression validation |
+| PPHP Integration    | Methods, store, searchParams                |
+| Prisma Support      | Schema, CRUD, queries                       |
+| Syntax Highlighting | Expressions, strings, JS methods            |
+| Event Handlers      | Completion, lookup, hints                   |
+| File Watching       | Refresh, cache, updates                     |
+
+---
 
 ## 🛠️ Installation
 
 ### From the Marketplace
 
-Search for **PHPX Tag Support** in the Visual Studio Code Marketplace and click **Install**.
+Search for `PHPX Tag Support` in the **VS Code Marketplace** and click **Install**.
 
 ### From VSIX File
 
@@ -152,28 +211,26 @@ Search for **PHPX Tag Support** in the Visual Studio Code Marketplace and click 
 code --install-extension phpx-tag-support-0.0.1.vsix
 ```
 
+---
+
 ## 🚀 Usage Examples
 
 ### Creating a New Component
 
-1. Type `phpxclass` in a new PHP file
-2. The extension auto-detects the namespace based on your file location
-3. Complete PHPX component template is generated
+- Type `phpxclass` in a new file
+- Generates full component scaffold
 
 ### Auto-Importing Components
 
-1. Type `<ComponentName` in your PHP file
-2. Press `Ctrl+.` when you see the "Missing import" warning
-3. Choose from available import options
-4. Import is automatically added and grouped appropriately
+- Type `<ComponentName`
+- Press `Ctrl+.` to auto-import
 
 ### Using Mustache Expressions
 
-```php
+```html
 <div class="user-info">
-    {{ user.name.substring(0, 10) }}
-    {{ `Hello ${user.name}!` }}
-    {{ store.getValue('theme') }}
+  {{ user.name.substring(0, 10) }} {{ `Hello ${user.name}!` }} {{
+  store.getValue('theme') }}
 </div>
 ```
 
@@ -185,9 +242,27 @@ code --install-extension phpx-tag-support-0.0.1.vsix
 </Button>
 ```
 
-## ⚙️ Configuration
+### Route Management
 
-The extension automatically configures VS Code for optimal PHPX development:
+```html
+<nav class="menu">
+  <a href="/">Home</a>
+  <!-- ✅ -->
+  <a href="/dashboard">Dashboard</a>
+  <!-- ✅ -->
+  <a href="/users">Users</a>
+  <!-- ✅ -->
+  <a href="/invalid">Invalid</a>
+  <!-- ❌ -->
+</nav>
+
+<a href="/orm/group-by">Group By</a>
+<!-- Ctrl+Click -->
+```
+
+---
+
+## ⚙️ Configuration
 
 ```json
 {
@@ -197,22 +272,32 @@ The extension automatically configures VS Code for optimal PHPX development:
 }
 ```
 
+---
+
 ## 📁 Project Structure
 
-Your Prisma PHP project should include:
+Ensure your Prisma PHP project includes:
 
-- `prisma-php.json` (project identifier)
-- `settings/class-log.json` (component definitions)
-- `settings/prisma-schema.json` (Prisma integration)
-- `.pphp/phpx-mustache.d.ts` (TypeScript definitions for mustache variables)
+- `prisma-php.json` – project identifier
+- `settings/class-log.json` – component definitions
+- `settings/files-list.json` – route definitions
+- `settings/prisma-schema.json` – Prisma integration
+- `.pphp/phpx-mustache.d.ts` – TypeScript for Mustache
+
+---
 
 ## 🎯 Commands
 
-| Command                 | Shortcut     | Description                      |
-| ----------------------- | ------------ | -------------------------------- |
-| **Add Import**          | `Ctrl+.`     | Auto-import missing components   |
-| **Peek Tag Definition** | `F12`        | Show component definition inline |
-| **Go to Definition**    | `Ctrl+Click` | Navigate to source file          |
+| Command             | Shortcut     | Description                    |
+| ------------------- | ------------ | ------------------------------ |
+| Add Import          | Ctrl+.       | Auto-import missing components |
+| Peek Tag Definition | F12          | Show tag definition inline     |
+| Go to Definition    | Ctrl+Click   | Navigate to source file        |
+| Go to Route File    | Ctrl+Click   | Navigate to route's index.php  |
+| Refresh Routes      | Ctrl+Shift+P | Manually refresh route cache   |
+| Show All Routes     | Ctrl+Shift+P | Display all available routes   |
+
+---
 
 ## 🤝 Contributing
 
@@ -220,14 +305,22 @@ Contributions are welcome! This extension supports a wide range of features for 
 
 ### Development Setup
 
-1. Clone the repository
-2. Run `npm install`
-3. Open in VS Code and press `F5` to launch extension development host
+```bash
+git clone https://github.com/your-repo/phpx-tag-support.git
+cd phpx-tag-support
+npm install
+```
 
-## 📄 License
-
-This project is licensed under the MIT License. See the [LICENSE](./LICENSE) file for details.
+- Open in **VS Code**
+- Press `F5` to launch the extension development host
 
 ---
 
-**🔥 Pro Tip**: This extension works best in Prisma PHP projects with properly configured `class-log.json` and TypeScript definition files for maximum IntelliSense support!
+## 📄 License
+
+Licensed under the **MIT License**.  
+See the [LICENSE](./LICENSE) file for details.
+
+---
+
+🔥 **Pro Tip:** This extension works best in Prisma PHP projects with properly configured `class-log.json`, `files-list.json`, and TypeScript definitions for maximum IntelliSense support!
