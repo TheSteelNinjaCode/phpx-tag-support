@@ -9,6 +9,7 @@ interface RouteInfo {
   isDynamic: boolean;
   dynamicSegments: string[];
   pattern: RegExp;
+  routeGroups: string[];
 }
 
 export class RouteProvider {
@@ -78,6 +79,7 @@ export class RouteProvider {
         isDynamic: false,
         dynamicSegments: [],
         pattern: /^\/$/,
+        routeGroups: [], // No route groups for root
       };
     }
 
@@ -91,11 +93,20 @@ export class RouteProvider {
     const segments = routePath.split("/");
 
     const dynamicSegments: string[] = [];
+    const routeGroups: string[] = []; // Track route groups
     let isDynamic = false;
     let urlPattern = "";
     let displayUrl = "";
 
     segments.forEach((segment, index) => {
+      // Skip route groups (segments wrapped in parentheses)
+      if (segment.startsWith("(") && segment.endsWith(")")) {
+        // Extract and store the route group name
+        const groupName = segment.slice(1, -1);
+        routeGroups.push(groupName);
+        return; // Skip this segment for URL generation
+      }
+
       if (segment.startsWith("[") && segment.endsWith("]")) {
         isDynamic = true;
         const paramName = segment.slice(1, -1);
@@ -120,7 +131,7 @@ export class RouteProvider {
     });
 
     const pattern = new RegExp(`^${urlPattern}$`);
-    const url = isDynamic ? displayUrl : `/${routePath}`;
+    const url = isDynamic ? displayUrl : displayUrl || "/";
 
     return {
       path: routePath,
@@ -129,6 +140,7 @@ export class RouteProvider {
       isDynamic: isDynamic,
       dynamicSegments: dynamicSegments,
       pattern: pattern,
+      routeGroups: routeGroups, // Include route groups
     };
   }
 
@@ -351,7 +363,7 @@ export class RouteProvider {
     this.loadRoutes();
   }
 
-  public createHrefCompletionItems(): vscode.CompletionItem[] {
+  createHrefCompletionItems(): vscode.CompletionItem[] {
     const items: vscode.CompletionItem[] = [];
 
     this.routes.forEach((route) => {
@@ -362,10 +374,18 @@ export class RouteProvider {
           : vscode.CompletionItemKind.Reference
       );
 
+      // Create route groups display text
+      const groupsText =
+        route.routeGroups.length > 0
+          ? ` ${route.routeGroups.map((g) => `(${g})`).join(" ")}`
+          : "";
+
       if (route.isDynamic) {
-        item.detail = `Dynamic Route: ${route.url}`;
+        item.detail = `Dynamic Route: ${route.url}${groupsText}`;
         item.documentation = new vscode.MarkdownString(
-          `**Dynamic Route:** \`${route.url}\`\n\n` +
+          `**Dynamic Route:** \`${route.url}\`${
+            groupsText ? ` ${groupsText}` : ""
+          }\n\n` +
             `**Parameters:** ${route.dynamicSegments
               .map((s) => `\`${s}\``)
               .join(", ")}\n\n` +
@@ -377,9 +397,11 @@ export class RouteProvider {
         );
         item.insertText = this.createSnippetText(route);
       } else {
-        item.detail = `Static Route: ${route.url}`;
+        item.detail = `Static Route: ${route.url}${groupsText}`;
         item.documentation = new vscode.MarkdownString(
-          `**Route:** \`${route.url}\`\n\n**File:** \`${route.filePath}\``
+          `**Route:** \`${route.url}\`${
+            groupsText ? ` ${groupsText}` : ""
+          }\n\n**File:** \`${route.filePath}\``
         );
         item.insertText = route.url;
       }
@@ -613,7 +635,18 @@ export class HrefHoverProvider implements vscode.HoverProvider {
     const md = new vscode.MarkdownString();
 
     md.appendCodeblock(`href="${hrefValue}"`, "html");
-    md.appendMarkdown(`\n\n**Route:** \`${route.url}\``);
+
+    // Show route groups if they exist
+    if (route.routeGroups.length > 0) {
+      const routeType = route.isDynamic ? "Dynamic" : "Static";
+      const groupsText = route.routeGroups.map((g) => `(${g})`).join(" ");
+      md.appendMarkdown(
+        `\n\n**${routeType} Route:** \`${route.url}\` ${groupsText}`
+      );
+    } else {
+      const routeType = route.isDynamic ? "Dynamic Route" : "Route";
+      md.appendMarkdown(`\n\n**${routeType}:** \`${route.url}\``);
+    }
 
     if (route.isDynamic && Object.keys(params).length > 0) {
       md.appendMarkdown(`\n\n**Parameters:**`);
