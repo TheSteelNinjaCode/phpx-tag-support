@@ -141,9 +141,12 @@ export class RouteProvider {
   }
 
   public isValidRoute(url: string): boolean {
+    // Parse URL to separate path from query parameters
+    const { pathname } = this.parseUrl(url);
+
     // Check static routes first
     const staticRoute = this.routes.find(
-      (route) => !route.isDynamic && route.url === url
+      (route) => !route.isDynamic && route.url === pathname
     );
     if (staticRoute) {
       return true;
@@ -154,14 +157,51 @@ export class RouteProvider {
       if (!route.isDynamic) {
         return false;
       }
-      return route.pattern.test(url);
+      return route.pattern.test(pathname);
     });
   }
 
+  /**
+   * Parse URL to separate pathname, search params, and hash
+   */
+  private parseUrl(url: string): {
+    pathname: string;
+    search: string;
+    hash: string;
+    searchParams: URLSearchParams;
+  } {
+    try {
+      // Handle relative URLs by adding a dummy base
+      const fullUrl = url.startsWith("/") ? `http://dummy${url}` : url;
+      const parsed = new URL(fullUrl);
+
+      return {
+        pathname: parsed.pathname,
+        search: parsed.search,
+        hash: parsed.hash,
+        searchParams: parsed.searchParams,
+      };
+    } catch {
+      // Fallback parsing for malformed URLs
+      const [pathname, rest] = url.split("?", 2);
+      const [search, hash] = rest ? rest.split("#", 2) : ["", ""];
+
+      return {
+        pathname: pathname || "/",
+        search: search ? `?${search}` : "",
+        hash: hash ? `#${hash}` : "",
+        searchParams: new URLSearchParams(search || ""),
+      };
+    }
+  }
+
   public getRouteByUrl(url: string): RouteInfo | undefined {
+    // Parse URL to separate path from query parameters
+    const { pathname } = this.parseUrl(url);
+
     // Check static routes first
     const staticRoute = this.routes.find(
-      (route) => !route.isDynamic && route.url === url
+      (route) => !route.isDynamic && route.url === pathname
     );
     if (staticRoute) {
       return staticRoute;
@@ -172,19 +212,24 @@ export class RouteProvider {
       if (!route.isDynamic) {
         return false;
       }
-      return route.pattern.test(url);
+      return route.pattern.test(pathname);
     });
   }
 
-  public getMatchingRoute(
-    url: string
-  ): { route: RouteInfo; params: Record<string, string | string[]> } | null {
+  public getMatchingRoute(url: string): {
+    route: RouteInfo;
+    params: Record<string, string | string[]>;
+    queryParams: URLSearchParams;
+  } | null {
+    // Parse URL to separate path from query parameters
+    const { pathname, searchParams } = this.parseUrl(url);
+
     // Check static routes first
     const staticRoute = this.routes.find(
-      (route) => !route.isDynamic && route.url === url
+      (route) => !route.isDynamic && route.url === pathname
     );
     if (staticRoute) {
-      return { route: staticRoute, params: {} };
+      return { route: staticRoute, params: {}, queryParams: searchParams };
     }
 
     // Check dynamic routes
@@ -193,7 +238,7 @@ export class RouteProvider {
         continue;
       }
 
-      const match = route.pattern.exec(url);
+      const match = route.pattern.exec(pathname);
       if (match) {
         const params: Record<string, string | string[]> = {};
 
@@ -208,7 +253,7 @@ export class RouteProvider {
           }
         });
 
-        return { route, params };
+        return { route, params, queryParams: searchParams };
       }
     }
 
@@ -306,48 +351,6 @@ export class RouteProvider {
     }
 
     return examples.length ? examples : [route.url];
-  }
-}
-
-/**
- * Completion provider for href attributes in anchor tags
- */
-export class HrefCompletionProvider implements vscode.CompletionItemProvider {
-  constructor(private routeProvider: RouteProvider) {}
-
-  provideCompletionItems(
-    document: vscode.TextDocument,
-    position: vscode.Position
-  ): vscode.CompletionItem[] {
-    const line = document.lineAt(position.line).text;
-    const cursorOffset = position.character;
-
-    // Check if we're inside an href attribute
-    const hrefContext = this.getHrefContext(line, cursorOffset);
-    if (!hrefContext) {
-      return [];
-    }
-
-    // Return route completions
-    return this.routeProvider.createHrefCompletionItems();
-  }
-
-  /**
-   * Check if cursor is inside href="..." attribute
-   */
-  private getHrefContext(line: string, cursorOffset: number): boolean {
-    const beforeCursor = line.substring(0, cursorOffset);
-    const afterCursor = line.substring(cursorOffset);
-
-    // Look for href=" before cursor
-    const hrefMatch = /href\s*=\s*"([^"]*)$/.exec(beforeCursor);
-    if (!hrefMatch) {
-      return false;
-    }
-
-    // Make sure there's a closing quote after cursor
-    const nextQuoteIndex = afterCursor.indexOf('"');
-    return nextQuoteIndex !== -1;
   }
 }
 
@@ -492,7 +495,7 @@ export class HrefHoverProvider implements vscode.HoverProvider {
       return;
     }
 
-    const { route, params } = matchResult;
+    const { route, params, queryParams } = matchResult;
     const md = new vscode.MarkdownString();
 
     md.appendCodeblock(`href="${hrefValue}"`, "html");
@@ -503,6 +506,14 @@ export class HrefHoverProvider implements vscode.HoverProvider {
       Object.entries(params).forEach(([key, value]) => {
         const displayValue = Array.isArray(value) ? value.join("/") : value;
         md.appendMarkdown(`\n- \`${key}\`: ${displayValue}`);
+      });
+    }
+
+    // Show query parameters if they exist
+    if (queryParams.size > 0) {
+      md.appendMarkdown(`\n\n**Query Parameters:**`);
+      queryParams.forEach((value, key) => {
+        md.appendMarkdown(`\n- \`${key}\`: ${value}`);
       });
     }
 
@@ -525,6 +536,48 @@ export class HrefHoverProvider implements vscode.HoverProvider {
     }
 
     return null;
+  }
+}
+
+/**
+ * Completion provider for href attributes in anchor tags
+ */
+export class HrefCompletionProvider implements vscode.CompletionItemProvider {
+  constructor(private routeProvider: RouteProvider) {}
+
+  provideCompletionItems(
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): vscode.CompletionItem[] {
+    const line = document.lineAt(position.line).text;
+    const cursorOffset = position.character;
+
+    // Check if we're inside an href attribute
+    const hrefContext = this.getHrefContext(line, cursorOffset);
+    if (!hrefContext) {
+      return [];
+    }
+
+    // Return route completions
+    return this.routeProvider.createHrefCompletionItems();
+  }
+
+  /**
+   * Check if cursor is inside href="..." attribute
+   */
+  private getHrefContext(line: string, cursorOffset: number): boolean {
+    const beforeCursor = line.substring(0, cursorOffset);
+    const afterCursor = line.substring(cursorOffset);
+
+    // Look for href=" before cursor
+    const hrefMatch = /href\s*=\s*"([^"]*)$/.exec(beforeCursor);
+    if (!hrefMatch) {
+      return false;
+    }
+
+    // Make sure there's a closing quote after cursor
+    const nextQuoteIndex = afterCursor.indexOf('"');
+    return nextQuoteIndex !== -1;
   }
 }
 
