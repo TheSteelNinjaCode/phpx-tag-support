@@ -41,6 +41,10 @@ import {
   HrefDefinitionProvider,
   HrefDiagnosticProvider,
   HrefHoverProvider,
+  PhpRedirectCompletionProvider,
+  PhpRedirectDefinitionProvider,
+  PhpRedirectDiagnosticProvider,
+  PhpRedirectHoverProvider,
   RouteProvider,
 } from "./settings/route-provider";
 
@@ -1181,6 +1185,19 @@ export async function activate(context: vscode.ExtensionContext) {
     wsFolder
   );
 
+  // PHP redirect providers
+  const phpRedirectDiagnosticProvider = new PhpRedirectDiagnosticProvider(
+    routeProvider
+  );
+  const phpRedirectHoverProvider = new PhpRedirectHoverProvider(routeProvider);
+  const phpRedirectCompletionProvider = new PhpRedirectCompletionProvider(
+    routeProvider
+  );
+  const phpRedirectDefinitionProvider = new PhpRedirectDefinitionProvider(
+    routeProvider,
+    wsFolder
+  );
+
   // ── Register Route-related Providers ───────────────────────────
 
   // 1. Completion provider for href attributes
@@ -1266,6 +1283,91 @@ export async function activate(context: vscode.ExtensionContext) {
     null,
     context.subscriptions
   );
+
+  // Combined diagnostic collection for both href and PHP redirects
+  const phpRoutesDiagnosticCollection =
+    vscode.languages.createDiagnosticCollection("routes");
+
+  // Function to update diagnostics for a document
+  const updateDiagnostics = (document: vscode.TextDocument) => {
+    if (!document) {
+      return;
+    }
+
+    const diagnostics: vscode.Diagnostic[] = [];
+
+    // Check for href diagnostics in HTML/PHP files
+    if (document.languageId === "html" || document.languageId === "php") {
+      diagnostics.push(...hrefDiagnosticProvider.validateDocument(document));
+    }
+
+    // Check for PHP redirect diagnostics in PHP files
+    if (document.languageId === "php") {
+      diagnostics.push(
+        ...phpRedirectDiagnosticProvider.validateDocument(document)
+      );
+    }
+
+    phpRoutesDiagnosticCollection.set(document.uri, diagnostics);
+  };
+
+  // Register href providers for HTML and PHP files
+  const htmlPhpSelector = [
+    { scheme: "file", language: "html" },
+    { scheme: "file", language: "php" },
+  ];
+
+  // Register PHP-only providers
+  const phpSelector = { scheme: "file", language: "php" };
+
+  // Register all providers
+  context.subscriptions.push(
+    // Href providers (HTML + PHP)
+    vscode.languages.registerHoverProvider(htmlPhpSelector, hrefHoverProvider),
+    vscode.languages.registerCompletionItemProvider(
+      htmlPhpSelector,
+      hrefCompletionProvider
+    ),
+    vscode.languages.registerDefinitionProvider(
+      htmlPhpSelector,
+      hrefDefinitionProvider
+    ),
+
+    // PHP redirect providers (PHP only)
+    vscode.languages.registerHoverProvider(
+      phpSelector,
+      phpRedirectHoverProvider
+    ),
+    vscode.languages.registerCompletionItemProvider(
+      phpSelector,
+      phpRedirectCompletionProvider
+    ),
+    vscode.languages.registerDefinitionProvider(
+      phpSelector,
+      phpRedirectDefinitionProvider
+    ),
+
+    // Diagnostic collection
+    phpRoutesDiagnosticCollection,
+
+    // Document change listeners
+    vscode.workspace.onDidOpenTextDocument(updateDiagnostics),
+    vscode.workspace.onDidChangeTextDocument((event) => {
+      updateDiagnostics(event.document);
+    }),
+    vscode.workspace.onDidSaveTextDocument(updateDiagnostics),
+
+    // Refresh routes command
+    vscode.commands.registerCommand("routes.refresh", () => {
+      routeProvider.refresh();
+      // Re-validate all open documents
+      vscode.workspace.textDocuments.forEach(updateDiagnostics);
+      vscode.window.showInformationMessage("Routes refreshed successfully!");
+    })
+  );
+
+  // Initial validation for already open documents
+  vscode.workspace.textDocuments.forEach(updateDiagnostics);
 
   // 7. Command to refresh routes manually
   context.subscriptions.push(
