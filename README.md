@@ -90,6 +90,42 @@
 <a href="#section">Page Anchor</a>
 ```
 
+#### PHP Redirect Support
+
+- **`Request::redirect('')` Intelligence**: Full IntelliSense support for PHP redirect calls
+- **Route Validation**: Real-time validation of redirect URLs
+- **Auto-Complete**: Intelligent completion with dynamic route snippets
+- **Go-to-Definition**: Navigate directly to route files from redirect calls
+- **Hover Information**: View route details, parameters, and file paths
+
+### PHP Redirect Calls
+
+```php
+<?php
+use Lib\Request;
+
+// ✅ Static routes with auto-completion
+Request::redirect('/');
+Request::redirect('/about');
+Request::redirect('/contact');
+
+Request::redirect('/users/profile'); // ✅ With hover info
+// Ctrl+Click to navigate to route file
+
+// ✅ Dynamic routes with parameter snippets
+Request::redirect('/blog/my-post-slug');
+Request::redirect('/user/123');
+Request::redirect('/products/category/subcategory');
+
+// ❌ Invalid route (shows warning with suggestions)
+Request::redirect('/non-existent-route');
+
+// ✅ External URLs (ignored by validation)
+Request::redirect('https://external-site.com');
+// ✅ Mailto links (ignored by validation)
+Request::redirect('mailto:user@example.com');
+```
+
 ---
 
 ### 🔍 Navigation & Information
@@ -318,9 +354,13 @@ npm install
 
 ## 📄 License
 
-Licensed under the **MIT License**.  
+Licensed under the **MIT License**.
 See the [LICENSE](./LICENSE) file for details.
 
 ---
 
 🔥 **Pro Tip:** This extension works best in Prisma PHP projects with properly configured `class-log.json`, `files-list.json`, and TypeScript definitions for maximum IntelliSense support!
+
+```
+
+```

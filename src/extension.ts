@@ -45,6 +45,10 @@ import {
   PhpRedirectDefinitionProvider,
   PhpRedirectDiagnosticProvider,
   PhpRedirectHoverProvider,
+  PphpScriptRedirectCompletionProvider,
+  PphpScriptRedirectDefinitionProvider,
+  PphpScriptRedirectDiagnosticProvider,
+  PphpScriptRedirectHoverProvider,
   RouteProvider,
 } from "./settings/route-provider";
 
@@ -1198,6 +1202,17 @@ export async function activate(context: vscode.ExtensionContext) {
     wsFolder
   );
 
+  // PPHP Script redirect providers (for pphp.redirect() calls)
+  const pphpScriptRedirectDiagnosticProvider =
+    new PphpScriptRedirectDiagnosticProvider(routeProvider);
+  const pphpScriptRedirectHoverProvider = new PphpScriptRedirectHoverProvider(
+    routeProvider
+  );
+  const pphpScriptRedirectCompletionProvider =
+    new PphpScriptRedirectCompletionProvider(routeProvider);
+  const pphpScriptRedirectDefinitionProvider =
+    new PphpScriptRedirectDefinitionProvider(routeProvider, wsFolder);
+
   // ── Register Route-related Providers ───────────────────────────
 
   // 1. Completion provider for href attributes
@@ -1308,6 +1323,10 @@ export async function activate(context: vscode.ExtensionContext) {
       );
     }
 
+    diagnostics.push(
+      ...pphpScriptRedirectDiagnosticProvider.validateDocument(document)
+    );
+
     phpRoutesDiagnosticCollection.set(document.uri, diagnostics);
   };
 
@@ -1364,6 +1383,27 @@ export async function activate(context: vscode.ExtensionContext) {
       vscode.workspace.textDocuments.forEach(updateDiagnostics);
       vscode.window.showInformationMessage("Routes refreshed successfully!");
     })
+  );
+
+  // Register PPHP Script redirect providers (PHP files only, but looking for JavaScript-style calls)
+  context.subscriptions.push(
+    // Hover provider for pphp.redirect() values
+    vscode.languages.registerHoverProvider(
+      phpSelector,
+      pphpScriptRedirectHoverProvider
+    ),
+
+    // Completion provider for pphp.redirect() values
+    vscode.languages.registerCompletionItemProvider(
+      phpSelector,
+      pphpScriptRedirectCompletionProvider
+    ),
+
+    // Definition provider for pphp.redirect() values (Ctrl+Click navigation)
+    vscode.languages.registerDefinitionProvider(
+      phpSelector,
+      pphpScriptRedirectDefinitionProvider
+    )
   );
 
   // Initial validation for already open documents
@@ -2139,6 +2179,8 @@ use Lib\\\\PHPX\\\\PHPX;
 
 class ${classNamePlaceholder} extends PHPX
 {
+    public ?string $class = '';
+
     public function __construct(array \\$props = [])
     {
         parent::__construct(\\$props);
@@ -2147,7 +2189,7 @@ class ${classNamePlaceholder} extends PHPX
     public function render(): string
     {
         \\$attributes = \\$this->getAttributes();
-        \\$class      = \\$this->getMergeClasses();
+        \\$class = \\$this->getMergeClasses(\\$this->class);
 
         return <<<HTML
         <div class="{\\$class}" {\\$attributes}>

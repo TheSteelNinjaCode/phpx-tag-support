@@ -1228,3 +1228,437 @@ export class PhpRedirectDefinitionProvider
     return null;
   }
 }
+
+export class PphpScriptRedirectDiagnosticProvider {
+  constructor(private routeProvider: RouteProvider) {}
+
+  validateDocument(document: vscode.TextDocument): vscode.Diagnostic[] {
+    const diagnostics: vscode.Diagnostic[] = [];
+    const text = document.getText();
+
+    // Match pphp.redirect('...') and pphp.redirect("...")
+    const redirectRegex = /pphp\.redirect\s*\(\s*['"]([^'"]*)['"]\s*\)/g;
+    let match;
+
+    while ((match = redirectRegex.exec(text)) !== null) {
+      const redirectValue = match[1];
+
+      if (this.isExternalOrSpecialUrl(redirectValue)) {
+        continue;
+      }
+
+      if (!this.routeProvider.isValidRoute(redirectValue)) {
+        const start = document.positionAt(
+          match.index + match[0].indexOf(redirectValue)
+        );
+        const end = document.positionAt(
+          match.index + match[0].indexOf(redirectValue) + redirectValue.length
+        );
+
+        const suggestions = this.getSuggestions(redirectValue);
+        const message = suggestions.length
+          ? `Route "${redirectValue}" not found. Did you mean: ${suggestions.join(
+              ", "
+            )}?`
+          : `Route "${redirectValue}" not found. Available routes: ${this.routeProvider
+              .getRouteUrls()
+              .slice(0, 5)
+              .join(", ")}${
+              this.routeProvider.getRoutes().length > 5 ? "..." : ""
+            }`;
+
+        diagnostics.push(
+          new vscode.Diagnostic(
+            new vscode.Range(start, end),
+            message,
+            vscode.DiagnosticSeverity.Warning
+          )
+        );
+      }
+    }
+
+    return diagnostics;
+  }
+
+  private getSuggestions(invalidUrl: string): string[] {
+    const routes = this.routeProvider.getRoutes();
+    const suggestions: string[] = [];
+
+    // Find similar static routes
+    routes
+      .filter((route) => !route.isDynamic)
+      .forEach((route) => {
+        if (this.isSimilar(invalidUrl, route.url)) {
+          suggestions.push(route.url);
+        }
+      });
+
+    // Add dynamic route patterns that might match
+    routes
+      .filter((route) => route.isDynamic)
+      .forEach((route) => {
+        const basePath = route.url.split("{")[0];
+        if (invalidUrl.startsWith(basePath)) {
+          suggestions.push(route.url);
+        }
+      });
+
+    return suggestions.slice(0, 3);
+  }
+
+  private isSimilar(str1: string, str2: string): boolean {
+    const distance = this.levenshteinDistance(str1, str2);
+    return distance <= Math.max(str1.length, str2.length) * 0.4;
+  }
+
+  private levenshteinDistance(str1: string, str2: string): number {
+    const matrix = Array(str2.length + 1)
+      .fill(null)
+      .map(() => Array(str1.length + 1).fill(null));
+
+    for (let i = 0; i <= str1.length; i++) {
+      matrix[0][i] = i;
+    }
+    for (let j = 0; j <= str2.length; j++) {
+      matrix[j][0] = j;
+    }
+
+    for (let j = 1; j <= str2.length; j++) {
+      for (let i = 1; i <= str1.length; i++) {
+        const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1;
+        matrix[j][i] = Math.min(
+          matrix[j][i - 1] + 1,
+          matrix[j - 1][i] + 1,
+          matrix[j - 1][i - 1] + indicator
+        );
+      }
+    }
+
+    return matrix[str2.length][str1.length];
+  }
+
+  private isExternalOrSpecialUrl(url: string): boolean {
+    return (
+      url.startsWith("http://") ||
+      url.startsWith("https://") ||
+      url.startsWith("mailto:") ||
+      url.startsWith("tel:") ||
+      url.startsWith("#") ||
+      url === ""
+    );
+  }
+}
+
+export class PphpScriptRedirectHoverProvider implements vscode.HoverProvider {
+  constructor(private routeProvider: RouteProvider) {}
+
+  provideHover(
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): vscode.ProviderResult<vscode.Hover> {
+    const line = document.lineAt(position.line).text;
+    const cursorOffset = position.character;
+
+    const redirectValue = this.getRedirectValue(line, cursorOffset);
+    if (!redirectValue) {
+      return;
+    }
+
+    const matchResult = this.routeProvider.getMatchingRoute(redirectValue);
+    if (!matchResult) {
+      return;
+    }
+
+    const { route, params, queryParams } = matchResult;
+    const md = new vscode.MarkdownString();
+
+    md.appendCodeblock(`pphp.redirect('${redirectValue}')`, "javascript");
+
+    // Show route groups if they exist
+    if (route.routeGroups.length > 0) {
+      const routeType = route.isDynamic ? "Dynamic" : "Static";
+      const groupsText = route.routeGroups.map((g) => `(${g})`).join(" ");
+      md.appendMarkdown(
+        `\n\n**${routeType} Route:** \`${route.url}\` ${groupsText}`
+      );
+    } else {
+      const routeType = route.isDynamic ? "Dynamic Route" : "Route";
+      md.appendMarkdown(`\n\n**${routeType}:** \`${route.url}\``);
+    }
+
+    if (route.isDynamic && Object.keys(params).length > 0) {
+      md.appendMarkdown(`\n\n**Parameters:**`);
+      Object.entries(params).forEach(([key, value]) => {
+        const displayValue = Array.isArray(value) ? value.join("/") : value;
+        md.appendMarkdown(`\n- \`${key}\`: ${displayValue}`);
+      });
+    }
+
+    // Show query parameters if they exist
+    if (queryParams.size > 0) {
+      md.appendMarkdown(`\n\n**Query Parameters:**`);
+      queryParams.forEach((value, key) => {
+        md.appendMarkdown(`\n- \`${key}\`: ${value}`);
+      });
+    }
+
+    md.appendMarkdown(`\n\n**File:** \`${route.filePath}\``);
+
+    return new vscode.Hover(md);
+  }
+
+  private getRedirectValue(line: string, cursorOffset: number): string | null {
+    const redirectRegex = /pphp\.redirect\s*\(\s*['"]([^'"]*)['"]\s*\)/g;
+    let match;
+
+    while ((match = redirectRegex.exec(line)) !== null) {
+      const start = match.index + match[0].indexOf(match[1]);
+      const end = start + match[1].length;
+
+      if (cursorOffset >= start && cursorOffset <= end) {
+        return match[1];
+      }
+    }
+
+    return null;
+  }
+}
+
+export class PphpScriptRedirectCompletionProvider
+  implements vscode.CompletionItemProvider
+{
+  constructor(private routeProvider: RouteProvider) {}
+
+  provideCompletionItems(
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): vscode.CompletionItem[] {
+    const line = document.lineAt(position.line).text;
+    const cursorOffset = position.character;
+
+    // Check if we're inside a pphp.redirect() call
+    const redirectContext = this.getRedirectContext(line, cursorOffset);
+    if (!redirectContext) {
+      return [];
+    }
+
+    // Return route completions with JavaScript-specific formatting
+    return this.createPphpScriptRedirectCompletionItems();
+  }
+
+  /**
+   * Check if cursor is inside pphp.redirect('...') call
+   */
+  private getRedirectContext(line: string, cursorOffset: number): boolean {
+    const beforeCursor = line.substring(0, cursorOffset);
+    const afterCursor = line.substring(cursorOffset);
+
+    // Look for pphp.redirect(' or pphp.redirect(" before cursor
+    const redirectMatch = /pphp\.redirect\s*\(\s*['"]([^'"]*)$/.exec(
+      beforeCursor
+    );
+    if (!redirectMatch) {
+      return false;
+    }
+
+    // Make sure there's a closing quote after cursor
+    const nextQuoteIndex = afterCursor.search(/['"]/);
+    return nextQuoteIndex !== -1;
+  }
+
+  private createPphpScriptRedirectCompletionItems(): vscode.CompletionItem[] {
+    const items: vscode.CompletionItem[] = [];
+
+    this.routeProvider.getRoutes().forEach((route) => {
+      const item = new vscode.CompletionItem(
+        route.url,
+        route.isDynamic
+          ? vscode.CompletionItemKind.Snippet
+          : vscode.CompletionItemKind.Reference
+      );
+
+      // Create route groups display text
+      const groupsText =
+        route.routeGroups.length > 0
+          ? ` ${route.routeGroups.map((g) => `(${g})`).join(" ")}`
+          : "";
+
+      if (route.isDynamic) {
+        item.detail = `Dynamic Route: ${route.url}${groupsText}`;
+        item.documentation = new vscode.MarkdownString(
+          `**Dynamic Route:** \`${route.url}\`${
+            groupsText ? ` ${groupsText}` : ""
+          }\n\n` +
+            `**Parameters:** ${route.dynamicSegments
+              .map((s) => `\`${s}\``)
+              .join(", ")}\n\n` +
+            `**File:** \`${route.filePath}\`\n\n` +
+            `**JavaScript Usage:**\n` +
+            `\`\`\`javascript\n` +
+            `pphp.redirect('${route.url}');\n` +
+            `\`\`\`\n\n` +
+            `**Examples:**\n` +
+            `${this.generateJavaScriptExamples(route)
+              .map((ex) => `- \`pphp.redirect('${ex}');\``)
+              .join("\n")}`
+        );
+        item.insertText = this.createSnippetText(route);
+      } else {
+        item.detail = `Static Route: ${route.url}${groupsText}`;
+        item.documentation = new vscode.MarkdownString(
+          `**Route:** \`${route.url}\`${
+            groupsText ? ` ${groupsText}` : ""
+          }\n\n**File:** \`${route.filePath}\`\n\n` +
+            `**JavaScript Usage:**\n` +
+            `\`\`\`javascript\n` +
+            `pphp.redirect('${route.url}');\n` +
+            `\`\`\``
+        );
+        item.insertText = route.url;
+      }
+
+      // Sorting: static routes first, then dynamic
+      item.sortText = route.isDynamic
+        ? `2_${route.url}`
+        : route.url === "/"
+        ? "0_/"
+        : `1_${route.url}`;
+
+      items.push(item);
+    });
+
+    return items;
+  }
+
+  private createSnippetText(route: RouteInfo): vscode.SnippetString {
+    let snippet = route.url;
+    let tabIndex = 1;
+
+    route.dynamicSegments.forEach((param) => {
+      if (route.path.includes(`[...${param}]`)) {
+        snippet = snippet.replace(
+          `{...${param}}`,
+          `\${${tabIndex}:${param}/more}`
+        );
+      } else {
+        snippet = snippet.replace(`{${param}}`, `\${${tabIndex}:${param}}`);
+      }
+      tabIndex++;
+    });
+
+    return new vscode.SnippetString(snippet);
+  }
+
+  private generateJavaScriptExamples(route: RouteInfo): string[] {
+    const examples: string[] = [];
+
+    // Generate examples by replacing each dynamic segment
+    route.dynamicSegments.forEach((paramName) => {
+      if (route.path.includes(`[...${paramName}]`)) {
+        // Catch-all route examples
+        const basePath = route.url.replace(`{...${paramName}}`, "");
+        examples.push(`${basePath}category`);
+        examples.push(`${basePath}category/subcategory`);
+      } else {
+        // Single dynamic segment examples
+        const basePath = route.url.replace(`{${paramName}}`, "");
+
+        if (paramName === "id") {
+          examples.push(`${basePath}123`);
+          examples.push(`${basePath}456`);
+        } else if (paramName === "slug") {
+          examples.push(`${basePath}my-post`);
+          examples.push(`${basePath}another-article`);
+        } else {
+          // Generic examples for other parameter names
+          examples.push(`${basePath}example`);
+          examples.push(`${basePath}sample`);
+        }
+      }
+    });
+
+    // If no specific examples were generated, create generic ones
+    if (examples.length === 0) {
+      let genericExample = route.url;
+      route.dynamicSegments.forEach((paramName) => {
+        if (route.path.includes(`[...${paramName}]`)) {
+          genericExample = genericExample.replace(
+            `{...${paramName}}`,
+            "example"
+          );
+        } else {
+          genericExample = genericExample.replace(`{${paramName}}`, "example");
+        }
+      });
+      examples.push(genericExample);
+    }
+
+    return examples.slice(0, 2); // Limit to 2 examples for JavaScript
+  }
+}
+
+export class PphpScriptRedirectDefinitionProvider
+  implements vscode.DefinitionProvider
+{
+  constructor(
+    private routeProvider: RouteProvider,
+    private workspaceFolder: vscode.WorkspaceFolder
+  ) {}
+
+  provideDefinition(
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): vscode.ProviderResult<vscode.Definition> {
+    const line = document.lineAt(position.line).text;
+    const cursorOffset = position.character;
+
+    // Check if we're clicking on a pphp.redirect value
+    const redirectValue = this.getRedirectValue(line, cursorOffset);
+    if (!redirectValue) {
+      return;
+    }
+
+    const route = this.routeProvider.getRouteByUrl(redirectValue);
+    if (!route) {
+      return;
+    }
+
+    // Convert relative file path to absolute path
+    const absoluteFilePath = path.resolve(
+      this.workspaceFolder.uri.fsPath,
+      route.filePath
+    );
+
+    // Check if file exists
+    if (!fs.existsSync(absoluteFilePath)) {
+      console.warn(`Route file not found: ${absoluteFilePath}`);
+      return;
+    }
+
+    // Create VS Code URI and Location
+    const fileUri = vscode.Uri.file(absoluteFilePath);
+    const location = new vscode.Location(fileUri, new vscode.Position(0, 0));
+
+    return location;
+  }
+
+  /**
+   * Extract redirect value at cursor position
+   */
+  private getRedirectValue(line: string, cursorOffset: number): string | null {
+    // Find pphp.redirect() calls in the line
+    const redirectRegex = /pphp\.redirect\s*\(\s*['"]([^'"]*)['"]\s*\)/g;
+    let match;
+
+    while ((match = redirectRegex.exec(line)) !== null) {
+      const start = match.index + match[0].indexOf(match[1]);
+      const end = start + match[1].length;
+
+      if (cursorOffset >= start && cursorOffset <= end) {
+        return match[1];
+      }
+    }
+
+    return null;
+  }
+}
