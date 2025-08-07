@@ -1215,17 +1215,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // ── Register Route-related Providers ───────────────────────────
 
-  // 1. Completion provider for href attributes
-  context.subscriptions.push(
-    vscode.languages.registerCompletionItemProvider(
-      { language: "php", scheme: "file" },
-      hrefCompletionProvider,
-      '"',
-      "'",
-      "/"
-    )
-  );
-
   // 2. Hover provider for href values
   context.subscriptions.push(
     vscode.languages.registerHoverProvider(
