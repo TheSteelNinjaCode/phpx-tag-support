@@ -490,7 +490,6 @@ export class RouteProvider {
   }
 }
 
-// Updated diagnostic provider
 export class HrefDiagnosticProvider {
   constructor(private routeProvider: RouteProvider) {}
 
@@ -505,6 +504,11 @@ export class HrefDiagnosticProvider {
       const hrefValue = match[1];
 
       if (this.isExternalOrSpecialUrl(hrefValue)) {
+        continue;
+      }
+
+      // NEW: Skip validation if href contains PHP tags
+      if (this.containsPhpTags(hrefValue)) {
         continue;
       }
 
@@ -541,11 +545,26 @@ export class HrefDiagnosticProvider {
     return diagnostics;
   }
 
+  /**
+   * Check if string contains PHP tags
+   */
+  private containsPhpTags(value: string): boolean {
+    // Check for various PHP tag patterns
+    const phpTagPatterns = [
+      /<\?php/i, // <?php
+      /<\?=/i, // <?=
+      /<\?(?!\s*xml)/i, // <? (but not <?xml)
+      /<\%/i, // <% (alternative PHP tags)
+      /<script[^>]*language\s*=\s*["']?php["']?[^>]*>/i, // <script language="php">
+    ];
+
+    return phpTagPatterns.some((pattern) => pattern.test(value));
+  }
+
   private getSuggestions(invalidUrl: string): string[] {
     const routes = this.routeProvider.getRoutes();
     const suggestions: string[] = [];
 
-    // Find similar static routes
     routes
       .filter((route) => !route.isDynamic)
       .forEach((route) => {
@@ -554,7 +573,6 @@ export class HrefDiagnosticProvider {
         }
       });
 
-    // Add dynamic route patterns that might match
     routes
       .filter((route) => route.isDynamic)
       .forEach((route) => {
@@ -802,7 +820,6 @@ export class PhpRedirectDiagnosticProvider {
     const diagnostics: vscode.Diagnostic[] = [];
     const text = document.getText();
 
-    // Match Request::redirect('...') and Request::redirect("...")
     const redirectRegex = /Request::redirect\s*\(\s*['"]([^'"]*)['"]\s*\)/g;
     let match;
 
@@ -810,6 +827,11 @@ export class PhpRedirectDiagnosticProvider {
       const redirectValue = match[1];
 
       if (this.isExternalOrSpecialUrl(redirectValue)) {
+        continue;
+      }
+
+      // NEW: Skip validation if redirect value contains PHP tags
+      if (this.containsPhpTags(redirectValue)) {
         continue;
       }
 
@@ -846,11 +868,25 @@ export class PhpRedirectDiagnosticProvider {
     return diagnostics;
   }
 
+  /**
+   * Check if string contains PHP tags
+   */
+  private containsPhpTags(value: string): boolean {
+    const phpTagPatterns = [
+      /<\?php/i,
+      /<\?=/i,
+      /<\?(?!\s*xml)/i,
+      /<\%/i,
+      /<script[^>]*language\s*=\s*["']?php["']?[^>]*>/i,
+    ];
+
+    return phpTagPatterns.some((pattern) => pattern.test(value));
+  }
+
   private getSuggestions(invalidUrl: string): string[] {
     const routes = this.routeProvider.getRoutes();
     const suggestions: string[] = [];
 
-    // Find similar static routes
     routes
       .filter((route) => !route.isDynamic)
       .forEach((route) => {
@@ -859,7 +895,6 @@ export class PhpRedirectDiagnosticProvider {
         }
       });
 
-    // Add dynamic route patterns that might match
     routes
       .filter((route) => route.isDynamic)
       .forEach((route) => {
