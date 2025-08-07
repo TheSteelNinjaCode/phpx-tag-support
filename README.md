@@ -360,7 +360,3 @@ See the [LICENSE](./LICENSE) file for details.
 ---
 
 🔥 **Pro Tip:** This extension works best in Prisma PHP projects with properly configured `class-log.json`, `files-list.json`, and TypeScript definitions for maximum IntelliSense support!
-
-```
-
-```
