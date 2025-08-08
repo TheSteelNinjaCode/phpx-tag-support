@@ -2168,7 +2168,7 @@ use Lib\\\\PHPX\\\\PHPX;
 
 class ${classNamePlaceholder} extends PHPX
 {
-    public ?string $class = '';
+    public ?string \\$class = '';
 
     public function __construct(array \\$props = [])
     {
