@@ -234,6 +234,12 @@ function makeReplaceRange(
   return new vscode.Range(start, end);
 }
 
+/**
+ * Check if a node is a valid data value (array literal, variable, or property lookup)
+ */
+const isValidDataValue = (n: Node): boolean =>
+  isArray(n) || isVariable(n) || isPropLookup(n);
+
 // ========== MAIN PROVIDER FUNCTION ==========
 export function registerPrismaFieldProvider(): vscode.Disposable {
   return vscode.languages.registerCompletionItemProvider(
@@ -2448,56 +2454,66 @@ export async function validateCreateCall(
 
     /* ⑤ para create(): un solo objeto */
     if (opName === "create") {
-      for (const item of (dataEntry.value as PhpArray).items as Entry[]) {
-        if (!item.key || item.key.kind !== "string") {
-          continue;
-        }
+      if (!isValidDataValue(dataEntry.value)) {
+        diagnostics.push(
+          new vscode.Diagnostic(
+            rangeOf(doc, dataEntry.key!.loc!),
+            "`data` must be an array literal or a variable containing array data.",
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      } else if (isArray(dataEntry.value)) {
+        for (const item of (dataEntry.value as PhpArray).items as Entry[]) {
+          if (!item.key || item.key.kind !== "string") {
+            continue;
+          }
 
-        if (validateSelectIncludeExclusivity(args, doc, diagnostics)) {
-          break;
-        }
+          if (validateSelectIncludeExclusivity(args, doc, diagnostics)) {
+            break;
+          }
 
-        const key = (item.key as any).value as string;
-        if (PRISMA_OPERATORS.has(key)) {
-          continue;
-        }
+          const key = (item.key as any).value as string;
+          if (PRISMA_OPERATORS.has(key)) {
+            continue;
+          }
 
-        const value = item.value;
-        if (isArray(value)) {
-          validateFieldAssignments(
-            doc,
-            printArrayLiteral(value),
-            value.loc!.start.offset,
-            fields,
-            modelName,
-            diagnostics
-          );
-          continue;
-        }
+          const value = item.value;
+          if (isArray(value)) {
+            validateFieldAssignments(
+              doc,
+              printArrayLiteral(value),
+              value.loc!.start.offset,
+              fields,
+              modelName,
+              diagnostics
+            );
+            continue;
+          }
 
-        const info = fields.get(key);
-        const keyRange = rangeOf(doc, item.key.loc!);
-        if (!info) {
-          diagnostics.push(
-            new vscode.Diagnostic(
-              keyRange,
-              `The column "${key}" does not exist in ${modelName}.`,
-              vscode.DiagnosticSeverity.Error
-            )
-          );
-          continue;
-        }
+          const info = fields.get(key);
+          const keyRange = rangeOf(doc, item.key.loc!);
+          if (!info) {
+            diagnostics.push(
+              new vscode.Diagnostic(
+                keyRange,
+                `The column "${key}" does not exist in ${modelName}.`,
+                vscode.DiagnosticSeverity.Error
+              )
+            );
+            continue;
+          }
 
-        const raw = doc.getText(rangeOf(doc, value.loc!)).trim();
-        if (!isValidPhpType(raw, info)) {
-          const expected = info.isList ? `${info.type}[]` : info.type;
-          diagnostics.push(
-            new vscode.Diagnostic(
-              keyRange,
-              `"${key}" expects ${expected}, but received "${raw}".`,
-              vscode.DiagnosticSeverity.Error
-            )
-          );
+          const raw = doc.getText(rangeOf(doc, value.loc!)).trim();
+          if (!isValidPhpType(raw, info)) {
+            const expected = info.isList ? `${info.type}[]` : info.type;
+            diagnostics.push(
+              new vscode.Diagnostic(
+                keyRange,
+                `"${key}" expects ${expected}, but received "${raw}".`,
+                vscode.DiagnosticSeverity.Error
+              )
+            );
+          }
         }
       }
 
@@ -2958,15 +2974,15 @@ export async function validateUpdateCall(
     }
 
     // ── validate WHERE
-    if (!isArray(whereEntry.value)) {
+    if (!isValidDataValue(whereEntry.value)) {
       diagnostics.push(
         new vscode.Diagnostic(
           rangeOf(doc, whereEntry.key!.loc!),
-          "`where` must be an array literal.",
+          "`where` must be an array literal or a variable containing filter conditions.",
           vscode.DiagnosticSeverity.Error
         )
       );
-    } else {
+    } else if (isArray(whereEntry.value)) {
       validateWhereArray(
         doc,
         whereEntry.value,
@@ -2978,18 +2994,19 @@ export async function validateUpdateCall(
     }
 
     // ── validate DATA
-    if (!isArray(dataEntry.value)) {
+    if (!isValidDataValue(dataEntry.value)) {
       diagnostics.push(
         new vscode.Diagnostic(
           rangeOf(doc, dataEntry.key!.loc!),
-          "`data` must be an array literal.",
+          "`data` must be an array literal or a variable containing array data.",
           vscode.DiagnosticSeverity.Error
         )
       );
-    } else {
+    } else if (isArray(dataEntry.value)) {
+      // Only validate the contents if it's an array literal, not a variable
       const entries = (dataEntry.value as PhpArray).items as Entry[];
 
-      // ① make sure they’re actually updating at least one *column*
+      // ① make sure they're actually updating at least one *column*
       const realUpdates = entries.filter((e) => {
         if (!e.key) {
           return false;
@@ -3014,7 +3031,7 @@ export async function validateUpdateCall(
         );
       }
 
-      // ② then exactly the same per‐column checks you had before
+      // ② then exactly the same per‑column checks you had before
       for (const item of entries) {
         if (!item.key || item.key.kind !== "string") {
           continue;
@@ -3295,16 +3312,16 @@ export async function validateUpsertCall(
       return;
     }
 
-    // ── validate WHERE ──
-    if (!isArray(whereEntry.value)) {
+    // ── validate WHERE
+    if (!isValidDataValue(whereEntry.value)) {
       diagnostics.push(
         new vscode.Diagnostic(
           rangeOf(doc, whereEntry.key!.loc!),
-          "`where` must be an array literal.",
+          "`where` must be an array literal or a variable containing filter conditions.",
           vscode.DiagnosticSeverity.Error
         )
       );
-    } else {
+    } else if (isArray(whereEntry.value)) {
       validateWhereArray(
         doc,
         whereEntry.value,
@@ -3316,15 +3333,15 @@ export async function validateUpsertCall(
     }
 
     // ── validate UPDATE ──
-    if (!isArray(updateEntry.value)) {
+    if (!isValidDataValue(updateEntry.value)) {
       diagnostics.push(
         new vscode.Diagnostic(
           rangeOf(doc, updateEntry.key!.loc!),
-          "`update` must be an array literal.",
+          "`update` must be an array literal or a variable containing array data.",
           vscode.DiagnosticSeverity.Error
         )
       );
-    } else {
+    } else if (isArray(updateEntry.value)) {
       for (const item of (updateEntry.value as PhpArray).items as Entry[]) {
         if (!item.key || item.key.kind !== "string") {
           continue;
@@ -3377,15 +3394,15 @@ export async function validateUpsertCall(
     }
 
     // ── validate CREATE ──
-    if (!isArray(createEntry.value)) {
+    if (!isValidDataValue(createEntry.value)) {
       diagnostics.push(
         new vscode.Diagnostic(
           rangeOf(doc, createEntry.key!.loc!),
-          "`create` must be an array literal.",
+          "`create` must be an array literal or a variable containing array data.",
           vscode.DiagnosticSeverity.Error
         )
       );
-    } else {
+    } else if (isArray(createEntry.value)) {
       for (const item of (createEntry.value as PhpArray).items as Entry[]) {
         if (!item.key || item.key.kind !== "string") {
           continue;
