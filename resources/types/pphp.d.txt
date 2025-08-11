@@ -179,7 +179,10 @@ declare class PPHP {
     private extractDependencies;
     private isPlainText;
     private initializeAllReferencedProps;
-    dispatchEvent(target: string, value: any | ((prev: any) => any)): Promise<boolean>;
+    dispatchEvent(target: string, value: any | ((prev: any) => any), opts?: {
+        scope?: "current" | "parent" | "root" | string | string[];
+        from?: Element;
+    }): Promise<string | false>;
     private determineCurrentComponentHierarchy;
     private trackEventContext;
     private getEventSourceHierarchy;
@@ -187,8 +190,6 @@ declare class PPHP {
     private getActiveElementHierarchy;
     private buildComponentHierarchy;
     private resolveStatePath;
-    private waitForFlush;
-    private updateNestedValue;
     getCurrentComponent(selector?: string): string | null;
     private findComponentFromElement;
     private getFallbackComponent;

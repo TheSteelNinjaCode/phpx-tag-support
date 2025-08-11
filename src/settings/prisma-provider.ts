@@ -451,11 +451,35 @@ function findNestedContext(
     return null;
   }
 
+  // **ENHANCED: Better handling for include -> relation -> select patterns**
+  if (path.length >= 3) {
+    const rootOp = path[0]; // e.g., "include"
+    const relationName = path[1]; // e.g., "posts"
+    const nestedOp = path[2]; // e.g., "select"
+
+    if (
+      rootOp === "include" &&
+      ["select", "include", "where", "omit"].includes(nestedOp)
+    ) {
+      return {
+        relation: relationName,
+        operation: nestedOp as "select" | "include" | "where" | "omit",
+        parentKey: relationName,
+        relationChain: [
+          {
+            relationName,
+            operation: nestedOp as "select" | "include" | "where" | "omit",
+            modelType: "", // Will be resolved later
+          },
+        ],
+      };
+    }
+  }
+
   // **NEW: Special handling for _count**
   if (isCountContext(path)) {
     const countIndex = path.indexOf("_count");
     if (countIndex !== -1 && countIndex < path.length - 1) {
-      // We're inside _count, the next element should be the operation (like "select")
       const operation = path[countIndex + 1];
       if (["select", "where", "orderBy"].includes(operation)) {
         return {
@@ -501,19 +525,26 @@ function parsePathToRelationChain(
 ): RelationChainItem[] {
   const chain: RelationChainItem[] = [];
 
-  // Example paths:
-  // ["select", "userRole"] -> userRole relation, operation = "select" (parent operation)
-  // ["select", "userRole", "select"] -> userRole relation, operation = "select" (explicit)
-  // ["select", "userRole", "select", "menu"] -> menu relation in userRole.select
-  // ["select", "userRole", "select", "menu", "select"] -> menu relation, operation = "select"
+  if (path.length < 2) {
+    return chain;
+  }
 
-  let i = 1; // Skip the root operation (like "select")
+  // **ENHANCED: Better parsing for include->relation->select patterns**
+  let i = 1; // Skip the root operation (like "include")
 
   while (i < path.length) {
     const segment = path[i];
 
-    // Skip if this segment is an operation keyword
+    // Skip if this segment is an operation keyword at the wrong position
     if (["select", "include", "where", "omit", "orderBy"].includes(segment)) {
+      // If this is the first segment after root, it might be a relation name
+      // Otherwise, it's an operation
+      if (i === 1) {
+        // This could be a relation name that happens to match an operation
+        // We need to check if it's actually a field name
+        i++;
+        continue;
+      }
       i++;
       continue;
     }
@@ -521,7 +552,7 @@ function parsePathToRelationChain(
     // This must be a relation name
     const relationName = segment;
 
-    // **FIXED**: Determine the operation context
+    // **ENHANCED: Better operation detection**
     let operation: "select" | "include" | "where" | "omit";
 
     // Check if next segment is an operation
@@ -532,8 +563,14 @@ function parsePathToRelationChain(
       operation = path[i + 1] as "select" | "include" | "where" | "omit";
       i++; // Skip the operation in next iteration
     } else {
-      // No explicit operation yet, use parent operation
-      operation = rootOperation as "select" | "include" | "where" | "omit";
+      // No explicit operation yet, infer from context
+      if (rootOperation === "include") {
+        // In include context, if we have a nested operation, use it
+        // Otherwise, default to "select" for the nested relation
+        operation = "select";
+      } else {
+        operation = rootOperation as "select" | "include" | "where" | "omit";
+      }
     }
 
     chain.push({
@@ -548,54 +585,6 @@ function parsePathToRelationChain(
   return chain;
 }
 
-function buildRelationChainFromPath(
-  path: string[],
-  rootOperation: RootKey
-): RelationChainItem[] {
-  const chain: RelationChainItem[] = [];
-
-  // Path structure examples:
-  // ["select", "userRole"] -> userRole relation with select operation
-  // ["select", "userRole", "select"] -> userRole.select
-  // ["select", "userRole", "select", "menu"] -> userRole.select.menu
-  // ["select", "userRole", "select", "menu", "select"] -> userRole.select.menu.select
-
-  if (path.length < 2) {
-    return chain;
-  }
-
-  // Start from index 1 (skip root operation like "select")
-  for (let i = 1; i < path.length; i++) {
-    const segment = path[i];
-
-    // If this segment is an operation, skip it (it applies to the previous relation)
-    if (["select", "include", "where", "omit", "orderBy"].includes(segment)) {
-      continue;
-    }
-
-    // This is a relation name
-    const relationName = segment;
-
-    // Look ahead to see if there's an operation after this relation
-    let operation: "select" | "include" | "where" | "omit" =
-      rootOperation as any;
-    if (
-      i + 1 < path.length &&
-      ["select", "include", "where", "omit"].includes(path[i + 1])
-    ) {
-      operation = path[i + 1] as "select" | "include" | "where" | "omit";
-    }
-
-    chain.push({
-      relationName,
-      operation,
-      modelType: "", // Will be resolved later
-    });
-  }
-
-  return chain;
-}
-
 function determineFieldSuggestions(
   context: CompletionContext,
   arrayContext: ArrayContext
@@ -604,62 +593,21 @@ function determineFieldSuggestions(
   const { currentRoot, relationChain, nestedOperation, nestedRoot } =
     arrayContext;
 
-  // **FIXED: Handle _count -> select context first**
+  // **ENHANCED: Handle include -> relation -> select context first**
   if (relationChain && relationChain.length > 0) {
     const lastRelation = relationChain[relationChain.length - 1];
 
+    // Special case for _count -> select
     if (
       lastRelation.relationName === "_count" &&
       lastRelation.operation === "select"
     ) {
-      // For _count -> select, show only relations (not scalar fields) and NOT _count itself
       const allFields = [...fieldMap.entries()];
       const relations = filterFieldsByOperation(allFields, "include", modelMap);
       return relations;
     }
-  }
 
-  // **NEW: Enhanced path-based relation detection**
-  const path = findArrayPath(
-    context.callNode.arguments?.[0] as PhpArray,
-    arrayContext.hostArray
-  );
-
-  if (path && path.length >= 2) {
-    // Try to find relation field in the path
-    let targetFields = fieldMap;
-    let currentModelFields = fieldMap;
-
-    for (let i = 1; i < path.length; i++) {
-      const segment = path[i];
-
-      // Skip operation keywords
-      if (["select", "include", "where", "omit", "orderBy"].includes(segment)) {
-        continue;
-      }
-
-      // Check if this segment is a relation field
-      const relationInfo = currentModelFields.get(segment);
-      if (relationInfo && isRelationField(relationInfo, modelMap)) {
-        const relatedModelName = relationInfo.type.toLowerCase();
-        const relatedFields = modelMap.get(relatedModelName);
-        if (relatedFields) {
-          targetFields = relatedFields;
-          currentModelFields = relatedFields;
-        }
-      }
-    }
-
-    // If we found a different target model, return its fields
-    if (targetFields !== fieldMap) {
-      const allFields = [...targetFields.entries()];
-      const operation = currentRoot || "select";
-      return filterFieldsByOperation(allFields, operation, modelMap);
-    }
-  }
-
-  // **Case 1: Deep nested relations using the relation chain**
-  if (relationChain && relationChain.length > 0) {
+    // **ENHANCED: Better handling for include -> posts -> select**
     let currentFields = fieldMap; // Start with base model
     let targetFields = currentFields;
 
@@ -667,14 +615,9 @@ function determineFieldSuggestions(
     for (let i = 0; i < relationChain.length; i++) {
       const relation = relationChain[i];
 
-      // Skip _count processing in the chain since it's handled above
-      if (relation.relationName === "_count") {
-        continue;
-      }
-
       const relationInfo = currentFields.get(relation.relationName);
 
-      if (relationInfo) {
+      if (relationInfo && isRelationField(relationInfo, modelMap)) {
         const targetModelName = relationInfo.type.toLowerCase();
         const targetModel = modelMap.get(targetModelName);
 
@@ -687,13 +630,48 @@ function determineFieldSuggestions(
       }
     }
 
-    // Return fields from the final target model
+    // **CRITICAL FIX: Use the last relation's operation, not the first**
     const allFields = [...targetFields.entries()];
-    const lastRelation = relationChain[relationChain.length - 1];
-    return filterFieldsByOperation(allFields, lastRelation.operation, modelMap);
+
+    // **ENHANCED: Better operation-based filtering**
+    if (lastRelation.operation === "select") {
+      // For select: show ALL fields (scalars + relations) from the target model
+      return allFields;
+    } else if (lastRelation.operation === "include") {
+      // For include: only show relations from the target model
+      return filterFieldsByOperation(allFields, "include", modelMap);
+    } else {
+      // For other operations (where, omit, etc.)
+      return allFields;
+    }
   }
 
-  // **Case 2: Simple nested relation (backward compatibility)**
+  // **ENHANCED: Better path-based relation detection**
+  const path = findArrayPath(
+    context.callNode.arguments?.[0] as PhpArray,
+    arrayContext.hostArray
+  );
+
+  if (path && path.length >= 3) {
+    const rootOp = path[0]; // e.g., "include"
+    const relationName = path[1]; // e.g., "posts"
+    const targetOp = path[2]; // e.g., "select"
+
+    // Handle include -> relation -> select pattern
+    if (rootOp === "include" && targetOp === "select") {
+      const relationInfo = fieldMap.get(relationName);
+      if (relationInfo && isRelationField(relationInfo, modelMap)) {
+        const relatedModelName = relationInfo.type.toLowerCase();
+        const relatedFields = modelMap.get(relatedModelName);
+        if (relatedFields) {
+          const allFields = [...relatedFields.entries()];
+          // For select in a relation: show ALL fields from that model
+          return allFields;
+        }
+      }
+    }
+  }
+
   if (nestedRoot && nestedRoot !== "_count" && fieldMap.has(nestedRoot)) {
     const relationInfo = fieldMap.get(nestedRoot);
     if (relationInfo) {
@@ -707,7 +685,7 @@ function determineFieldSuggestions(
     }
   }
 
-  // **Case 3: Special cases**
+  // Special cases
   if (currentRoot === "_count") {
     return [
       [
@@ -717,15 +695,13 @@ function determineFieldSuggestions(
     ];
   }
 
-  // **Case 4: Include at root level - only show relations**
+  // Include at root level - only show relations
   if (currentRoot === "include") {
-    // If we're inside _count, don't add _count again
     if (path && isCountContext(path)) {
       const allFields = [...fieldMap.entries()];
       return filterFieldsByOperation(allFields, "include", modelMap);
     }
 
-    // Normal include at root level - add _count
     const allFields = [...fieldMap.entries()];
     const relations = filterFieldsByOperation(allFields, "include", modelMap);
     relations.push([
@@ -735,7 +711,7 @@ function determineFieldSuggestions(
     return relations;
   }
 
-  // **Case 5: Default - return base model fields**
+  // Default - return base model fields
   const allFields = [...fieldMap.entries()];
   return filterFieldsByOperation(allFields, currentRoot || "select", modelMap);
 }
