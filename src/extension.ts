@@ -1318,7 +1318,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
     phpRoutesDiagnosticCollection.set(document.uri, diagnostics);
   };
-
   // Register href providers for HTML and PHP files
   const htmlPhpSelector = [
     { scheme: "file", language: "html" },
@@ -1328,34 +1327,70 @@ export async function activate(context: vscode.ExtensionContext) {
   // Register PHP-only providers
   const phpSelector = { scheme: "file", language: "php" };
 
-  // Register all providers
+  // Register all providers with improved triggers
   context.subscriptions.push(
-    // Href providers (HTML + PHP)
+    // ── Href providers (HTML + PHP) ──
     vscode.languages.registerHoverProvider(htmlPhpSelector, hrefHoverProvider),
+
+    // Href completion with triggers for quotes and equals
     vscode.languages.registerCompletionItemProvider(
       htmlPhpSelector,
-      hrefCompletionProvider
+      hrefCompletionProvider,
+      '"', // Trigger when typing opening quote: href="
+      "'", // Trigger when typing single quote: href='
+      "=", // Trigger when typing equals: href=
+      " " // Keep existing space trigger
     ),
+
     vscode.languages.registerDefinitionProvider(
       htmlPhpSelector,
       hrefDefinitionProvider
     ),
 
-    // PHP redirect providers (PHP only)
+    // ── PHP redirect providers (PHP only) ──
     vscode.languages.registerHoverProvider(
       phpSelector,
       phpRedirectHoverProvider
     ),
+
+    // PHP redirect completion with triggers for quotes and parentheses
     vscode.languages.registerCompletionItemProvider(
       phpSelector,
-      phpRedirectCompletionProvider
+      phpRedirectCompletionProvider,
+      '"', // Trigger when typing opening quote: Request::redirect("
+      "'", // Trigger when typing single quote: Request::redirect('
+      "(", // Trigger when typing parentheses: Request::redirect(
+      " " // Keep existing space trigger
     ),
+
     vscode.languages.registerDefinitionProvider(
       phpSelector,
       phpRedirectDefinitionProvider
     ),
 
-    // Diagnostic collection
+    // ── PPHP Script redirect providers ──
+    vscode.languages.registerHoverProvider(
+      phpSelector,
+      pphpScriptRedirectHoverProvider
+    ),
+
+    // PPHP script redirect completion with triggers for quotes and parentheses
+    vscode.languages.registerCompletionItemProvider(
+      phpSelector,
+      pphpScriptRedirectCompletionProvider,
+      '"', // Trigger when typing opening quote: pphp.redirect("
+      "'", // Trigger when typing single quote: pphp.redirect('
+      "(", // Trigger when typing parentheses: pphp.redirect(
+      " " // Keep existing space trigger
+    ),
+
+    // Definition provider for pphp.redirect() values (Ctrl+Click navigation)
+    vscode.languages.registerDefinitionProvider(
+      phpSelector,
+      pphpScriptRedirectDefinitionProvider
+    ),
+
+    // ── Diagnostic collection and listeners ──
     phpRoutesDiagnosticCollection,
 
     // Document change listeners
@@ -1372,27 +1407,6 @@ export async function activate(context: vscode.ExtensionContext) {
       vscode.workspace.textDocuments.forEach(updateDiagnostics);
       vscode.window.showInformationMessage("Routes refreshed successfully!");
     })
-  );
-
-  // Register PPHP Script redirect providers (PHP files only, but looking for JavaScript-style calls)
-  context.subscriptions.push(
-    // Hover provider for pphp.redirect() values
-    vscode.languages.registerHoverProvider(
-      phpSelector,
-      pphpScriptRedirectHoverProvider
-    ),
-
-    // Completion provider for pphp.redirect() values
-    vscode.languages.registerCompletionItemProvider(
-      phpSelector,
-      pphpScriptRedirectCompletionProvider
-    ),
-
-    // Definition provider for pphp.redirect() values (Ctrl+Click navigation)
-    vscode.languages.registerDefinitionProvider(
-      phpSelector,
-      pphpScriptRedirectDefinitionProvider
-    )
   );
 
   // Initial validation for already open documents
