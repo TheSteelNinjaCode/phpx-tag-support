@@ -200,8 +200,11 @@ declare class PPHP {
     private fadeInBody;
     private reconcileHead;
     private scrubTemplateValueAttributes;
+    private restoreScrollPositions;
     private PRESERVE_HANDLERS;
     private populateDocumentBody;
+    private saveScrollPositions;
+    private getElementKey;
     private attachWireFunctionEvents;
     private decodeEntities;
     private unwrapArrowBody;

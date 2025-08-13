@@ -2488,9 +2488,14 @@ function sanitizeForDiagnosticsXML(raw: string): string {
 
   text = preprocessFragmentShortSyntax(text);
 
-  /* 0️⃣ NEW: hide JS inside <script> … </script>  */
+  // ── 0️⃣ FIRST: Remove all PHP code including short tags ──
+  text = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (m) => " ".repeat(m.length));
+  text = text.replace(/<\?(?:php|=)?(?:[^?]|\?(?!>))*$/g, (m) =>
+    " ".repeat(m.length)
+  );
+
+  // ── 1️⃣ THEN: hide JS inside <script> … </script>  ──
   text = text.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gi, (full, body) => {
-    // keep the tags, blank out only the body
     return full.replace(body, spacer(body));
   });
 
