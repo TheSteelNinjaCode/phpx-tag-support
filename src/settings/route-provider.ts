@@ -15,6 +15,7 @@ interface RouteInfo {
 export class RouteProvider {
   private routes: RouteInfo[] = [];
   private filesListPath: string;
+  private allFiles: string[] = []; // NEW: Store all files from files-list.json
 
   constructor(workspaceFolder: vscode.WorkspaceFolder) {
     this.filesListPath = path.join(
@@ -35,11 +36,36 @@ export class RouteProvider {
       const fileContent = fs.readFileSync(this.filesListPath, "utf8");
       const files: string[] = JSON.parse(fileContent);
 
+      // NEW: Store all files for static asset validation
+      this.allFiles = files;
+
       this.routes = this.extractRoutesFromFiles(files);
       console.log(`Loaded ${this.routes.length} routes:`, this.routes);
     } catch (error) {
       console.error("Error loading routes from files-list.json:", error);
     }
+  }
+
+  // NEW: Method to check if a path is a valid static asset
+  public isValidStaticAsset(path: string): boolean {
+    // Convert href path to match files-list.json format
+    // href="/src/app/assets/images/check.svg" -> "./src/app/assets/images/check.svg"
+    const normalizedPath = path.startsWith("/") ? "." + path : path;
+
+    // Check if this file exists in our files list and is NOT a route
+    const fileExists = this.allFiles.includes(normalizedPath);
+    const isRoute =
+      normalizedPath.endsWith("/index.php") && normalizedPath.includes("/app/");
+
+    return fileExists && !isRoute;
+  }
+
+  // NEW: Method to get all static assets (non-route files)
+  public getStaticAssets(): string[] {
+    return this.allFiles.filter((file) => {
+      // Exclude route files (index.php files in app directory)
+      return !(file.endsWith("/index.php") && file.includes("/app/"));
+    });
   }
 
   private extractRoutesFromFiles(files: string[]): RouteInfo[] {
@@ -507,8 +533,13 @@ export class HrefDiagnosticProvider {
         continue;
       }
 
-      // NEW: Skip validation if href contains PHP tags
+      // Skip validation if href contains PHP tags
       if (this.containsPhpTags(hrefValue)) {
+        continue;
+      }
+
+      // NEW: Skip validation if href points to a valid static asset
+      if (this.routeProvider.isValidStaticAsset(hrefValue)) {
         continue;
       }
 
@@ -644,6 +675,61 @@ export class HrefHoverProvider implements vscode.HoverProvider {
       return;
     }
 
+    // NEW: Check if it's a static asset first
+    if (this.routeProvider.isValidStaticAsset(hrefValue)) {
+      const md = new vscode.MarkdownString();
+      md.appendCodeblock(`href="${hrefValue}"`, "html");
+      md.appendMarkdown(`\n\n**Static Asset:** \`${hrefValue}\``);
+
+      // Convert href path to files-list.json format for display
+      const normalizedPath = hrefValue.startsWith("/")
+        ? "." + hrefValue
+        : hrefValue;
+      md.appendMarkdown(`\n\n**File:** \`${normalizedPath}\``);
+
+      // Detect file type and add info
+      const fileExtension = hrefValue.split(".").pop()?.toLowerCase();
+      let fileType = "File";
+
+      switch (fileExtension) {
+        case "svg":
+          fileType = "SVG Image";
+          break;
+        case "png":
+        case "jpg":
+        case "jpeg":
+        case "gif":
+        case "webp":
+          fileType = "Image";
+          break;
+        case "css":
+          fileType = "Stylesheet";
+          break;
+        case "js":
+          fileType = "JavaScript";
+          break;
+        case "woff":
+        case "woff2":
+        case "ttf":
+        case "otf":
+          fileType = "Font";
+          break;
+        case "pdf":
+          fileType = "PDF Document";
+          break;
+        case "json":
+          fileType = "JSON Data";
+          break;
+        default:
+          fileType = "File";
+      }
+
+      md.appendMarkdown(`\n\n**Type:** ${fileType}`);
+
+      return new vscode.Hover(md);
+    }
+
+    // Existing route hover logic
     const matchResult = this.routeProvider.getMatchingRoute(hrefValue);
     if (!matchResult) {
       return;
@@ -723,8 +809,85 @@ export class HrefCompletionProvider implements vscode.CompletionItemProvider {
       return [];
     }
 
-    // Return route completions
-    return this.routeProvider.createHrefCompletionItems();
+    const items: vscode.CompletionItem[] = [];
+
+    // Add route completions
+    items.push(...this.routeProvider.createHrefCompletionItems());
+
+    // NEW: Add static asset completions
+    items.push(...this.createStaticAssetCompletionItems());
+
+    return items;
+  }
+
+  // NEW: Create completion items for static assets
+  private createStaticAssetCompletionItems(): vscode.CompletionItem[] {
+    const items: vscode.CompletionItem[] = [];
+    const staticAssets = this.routeProvider.getStaticAssets();
+
+    staticAssets.forEach((filePath) => {
+      // Convert "./src/app/assets/images/check.svg" to "/src/app/assets/images/check.svg"
+      const hrefPath = filePath.startsWith("./")
+        ? filePath.substring(1)
+        : "/" + filePath;
+
+      const fileName = filePath.split("/").pop() || filePath;
+      const fileExtension = fileName.split(".").pop()?.toLowerCase() || "";
+
+      let kind = vscode.CompletionItemKind.File;
+      let fileType = "File";
+
+      // Determine completion kind and type based on file extension
+      switch (fileExtension) {
+        case "svg":
+        case "png":
+        case "jpg":
+        case "jpeg":
+        case "gif":
+        case "webp":
+          kind = vscode.CompletionItemKind.Color; // Use color icon for images
+          fileType = fileExtension.toUpperCase() + " Image";
+          break;
+        case "css":
+          kind = vscode.CompletionItemKind.Reference;
+          fileType = "Stylesheet";
+          break;
+        case "js":
+          kind = vscode.CompletionItemKind.Function;
+          fileType = "JavaScript";
+          break;
+        case "woff":
+        case "woff2":
+        case "ttf":
+        case "otf":
+          kind = vscode.CompletionItemKind.Text;
+          fileType = "Font";
+          break;
+        case "json":
+          kind = vscode.CompletionItemKind.Struct;
+          fileType = "JSON Data";
+          break;
+        default:
+          kind = vscode.CompletionItemKind.File;
+          fileType = "File";
+      }
+
+      const item = new vscode.CompletionItem(hrefPath, kind);
+      item.detail = `Static Asset: ${fileType}`;
+      item.documentation = new vscode.MarkdownString(
+        `**Static Asset:** \`${hrefPath}\`\n\n` +
+          `**Type:** ${fileType}\n\n` +
+          `**File:** \`${filePath}\``
+      );
+      item.insertText = hrefPath;
+
+      // Sort static assets after routes
+      item.sortText = `3_${hrefPath}`;
+
+      items.push(item);
+    });
+
+    return items;
   }
 
   /**
