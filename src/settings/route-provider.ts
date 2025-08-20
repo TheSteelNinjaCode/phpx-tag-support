@@ -1860,3 +1860,451 @@ export class PphpScriptRedirectDefinitionProvider
     return null;
   }
 }
+
+export class SrcDiagnosticProvider {
+  constructor(private routeProvider: RouteProvider) {}
+
+  validateDocument(document: vscode.TextDocument): vscode.Diagnostic[] {
+    const diagnostics: vscode.Diagnostic[] = [];
+    const text = document.getText();
+
+    const srcRegex = /src\s*=\s*"([^"]*)"/g;
+    let match;
+
+    while ((match = srcRegex.exec(text)) !== null) {
+      const srcValue = match[1];
+
+      if (this.isExternalOrSpecialUrl(srcValue)) {
+        continue;
+      }
+
+      // Skip validation if src contains PHP tags
+      if (this.containsPhpTags(srcValue)) {
+        continue;
+      }
+
+      // Only validate against static assets (not routes)
+      if (!this.routeProvider.isValidStaticAsset(srcValue)) {
+        const start = document.positionAt(
+          match.index + match[0].indexOf(srcValue)
+        );
+        const end = document.positionAt(
+          match.index + match[0].indexOf(srcValue) + srcValue.length
+        );
+
+        const suggestions = this.getSuggestions(srcValue);
+        const message = suggestions.length
+          ? `Static asset "${srcValue}" not found. Did you mean: ${suggestions.join(
+              ", "
+            )}?`
+          : `Static asset "${srcValue}" not found. Check your file path.`;
+
+        diagnostics.push(
+          new vscode.Diagnostic(
+            new vscode.Range(start, end),
+            message,
+            vscode.DiagnosticSeverity.Warning
+          )
+        );
+      }
+    }
+
+    return diagnostics;
+  }
+
+  private containsPhpTags(value: string): boolean {
+    const phpTagPatterns = [
+      /<\?php/i,
+      /<\?=/i,
+      /<\?(?!\s*xml)/i,
+      /<\%/i,
+      /<script[^>]*language\s*=\s*["']?php["']?[^>]*>/i,
+    ];
+
+    return phpTagPatterns.some((pattern) => pattern.test(value));
+  }
+
+  private getSuggestions(invalidPath: string): string[] {
+    const staticAssets = this.routeProvider.getStaticAssets();
+    const suggestions: string[] = [];
+
+    // Convert invalid path to normalized format for comparison
+    const normalizedInvalid = invalidPath.startsWith("/")
+      ? "." + invalidPath
+      : invalidPath;
+
+    staticAssets.forEach((asset) => {
+      // Convert asset path to href format for suggestion
+      const assetHref = asset.startsWith("./")
+        ? asset.substring(1)
+        : "/" + asset;
+
+      if (this.isSimilar(invalidPath, assetHref)) {
+        suggestions.push(assetHref);
+      }
+    });
+
+    // Also suggest based on file extension if it's an image
+    const fileExt = invalidPath.split(".").pop()?.toLowerCase();
+    if (["png", "jpg", "jpeg", "gif", "svg", "webp"].includes(fileExt || "")) {
+      staticAssets
+        .filter((asset) => asset.toLowerCase().endsWith(`.${fileExt}`))
+        .slice(0, 3)
+        .forEach((asset) => {
+          const assetHref = asset.startsWith("./")
+            ? asset.substring(1)
+            : "/" + asset;
+          if (!suggestions.includes(assetHref)) {
+            suggestions.push(assetHref);
+          }
+        });
+    }
+
+    return suggestions.slice(0, 3);
+  }
+
+  private isSimilar(str1: string, str2: string): boolean {
+    const distance = this.levenshteinDistance(str1, str2);
+    return distance <= Math.max(str1.length, str2.length) * 0.4;
+  }
+
+  private levenshteinDistance(str1: string, str2: string): number {
+    const matrix = Array(str2.length + 1)
+      .fill(null)
+      .map(() => Array(str1.length + 1).fill(null));
+
+    for (let i = 0; i <= str1.length; i++) {
+      matrix[0][i] = i;
+    }
+    for (let j = 0; j <= str2.length; j++) {
+      matrix[j][0] = j;
+    }
+
+    for (let j = 1; j <= str2.length; j++) {
+      for (let i = 1; i <= str1.length; i++) {
+        const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1;
+        matrix[j][i] = Math.min(
+          matrix[j][i - 1] + 1,
+          matrix[j - 1][i] + 1,
+          matrix[j - 1][i - 1] + indicator
+        );
+      }
+    }
+
+    return matrix[str2.length][str1.length];
+  }
+
+  private isExternalOrSpecialUrl(url: string): boolean {
+    return (
+      url.startsWith("http://") ||
+      url.startsWith("https://") ||
+      url.startsWith("data:") ||
+      url.startsWith("blob:") ||
+      url.startsWith("#") ||
+      url === ""
+    );
+  }
+}
+
+export class SrcHoverProvider implements vscode.HoverProvider {
+  constructor(private routeProvider: RouteProvider) {}
+
+  provideHover(
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): vscode.ProviderResult<vscode.Hover> {
+    const line = document.lineAt(position.line).text;
+    const cursorOffset = position.character;
+
+    const srcValue = this.getSrcValue(line, cursorOffset);
+    if (!srcValue) {
+      return;
+    }
+
+    // Check if it's a valid static asset
+    if (this.routeProvider.isValidStaticAsset(srcValue)) {
+      const md = new vscode.MarkdownString();
+      md.appendCodeblock(`src="${srcValue}"`, "html");
+      md.appendMarkdown(`\n\n**Static Asset:** \`${srcValue}\``);
+
+      // Convert src path to files-list.json format for display
+      const normalizedPath = srcValue.startsWith("/")
+        ? "." + srcValue
+        : srcValue;
+      md.appendMarkdown(`\n\n**File:** \`${normalizedPath}\``);
+
+      // Detect file type and add info
+      const fileExtension = srcValue.split(".").pop()?.toLowerCase();
+      let fileType = "File";
+
+      switch (fileExtension) {
+        case "svg":
+          fileType = "SVG Image";
+          break;
+        case "png":
+          fileType = "PNG Image";
+          break;
+        case "jpg":
+        case "jpeg":
+          fileType = "JPEG Image";
+          break;
+        case "gif":
+          fileType = "GIF Image";
+          break;
+        case "webp":
+          fileType = "WebP Image";
+          break;
+        case "ico":
+          fileType = "Icon";
+          break;
+        case "bmp":
+          fileType = "Bitmap Image";
+          break;
+        default:
+          fileType = "File";
+      }
+
+      md.appendMarkdown(`\n\n**Type:** ${fileType}`);
+
+      // Add image dimensions info if available (this would require additional file reading)
+      if (
+        ["png", "jpg", "jpeg", "gif", "webp", "bmp"].includes(
+          fileExtension || ""
+        )
+      ) {
+        md.appendMarkdown(`\n\n**Usage:** Image resource for web display`);
+      } else if (fileExtension === "svg") {
+        md.appendMarkdown(`\n\n**Usage:** Scalable vector graphics`);
+      }
+
+      return new vscode.Hover(md);
+    }
+
+    return;
+  }
+
+  private getSrcValue(line: string, cursorOffset: number): string | null {
+    const srcRegex = /src\s*=\s*"([^"]*)"/g;
+    let match;
+
+    while ((match = srcRegex.exec(line)) !== null) {
+      const start = match.index + match[0].indexOf(match[1]);
+      const end = start + match[1].length;
+
+      if (cursorOffset >= start && cursorOffset <= end) {
+        return match[1];
+      }
+    }
+
+    return null;
+  }
+}
+
+export class SrcCompletionProvider implements vscode.CompletionItemProvider {
+  constructor(private routeProvider: RouteProvider) {}
+
+  provideCompletionItems(
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): vscode.CompletionItem[] {
+    const line = document.lineAt(position.line).text;
+    const cursorOffset = position.character;
+
+    // Check if we're inside a src attribute
+    const srcContext = this.getSrcContext(line, cursorOffset);
+    if (!srcContext) {
+      return [];
+    }
+
+    // Only provide static asset completions for src attributes
+    return this.createSrcCompletionItems();
+  }
+
+  private createSrcCompletionItems(): vscode.CompletionItem[] {
+    const items: vscode.CompletionItem[] = [];
+    const staticAssets = this.routeProvider.getStaticAssets();
+
+    staticAssets.forEach((filePath) => {
+      // Convert "./src/app/assets/images/check.svg" to "/src/app/assets/images/check.svg"
+      const srcPath = filePath.startsWith("./")
+        ? filePath.substring(1)
+        : "/" + filePath;
+
+      const fileName = filePath.split("/").pop() || filePath;
+      const fileExtension = fileName.split(".").pop()?.toLowerCase() || "";
+
+      // Filter to only show relevant files for src (primarily images and media)
+      const isRelevantForSrc = [
+        "svg",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "webp",
+        "ico",
+        "bmp",
+        "mp4",
+        "webm",
+        "ogg",
+        "mp3",
+        "wav",
+        "pdf",
+        "txt",
+        "json",
+        "xml",
+      ].includes(fileExtension);
+
+      if (!isRelevantForSrc) {
+        return; // Skip this file
+      }
+
+      let kind = vscode.CompletionItemKind.File;
+      let fileType = "File";
+
+      // Determine completion kind and type based on file extension
+      switch (fileExtension) {
+        case "svg":
+        case "png":
+        case "jpg":
+        case "jpeg":
+        case "gif":
+        case "webp":
+        case "ico":
+        case "bmp":
+          kind = vscode.CompletionItemKind.Color;
+          fileType = fileExtension.toUpperCase() + " Image";
+          break;
+        case "mp4":
+        case "webm":
+        case "ogg":
+          kind = vscode.CompletionItemKind.Event;
+          fileType = fileExtension.toUpperCase() + " Video";
+          break;
+        case "mp3":
+        case "wav":
+          kind = vscode.CompletionItemKind.Event;
+          fileType = fileExtension.toUpperCase() + " Audio";
+          break;
+        case "pdf":
+          kind = vscode.CompletionItemKind.File;
+          fileType = "PDF Document";
+          break;
+        case "json":
+          kind = vscode.CompletionItemKind.Struct;
+          fileType = "JSON Data";
+          break;
+        case "xml":
+          kind = vscode.CompletionItemKind.Struct;
+          fileType = "XML Document";
+          break;
+        default:
+          kind = vscode.CompletionItemKind.File;
+          fileType = "File";
+      }
+
+      const item = new vscode.CompletionItem(srcPath, kind);
+      item.detail = `Static Asset: ${fileType}`;
+      item.documentation = new vscode.MarkdownString(
+        `**Static Asset:** \`${srcPath}\`\n\n` +
+          `**Type:** ${fileType}\n\n` +
+          `**File:** \`${filePath}\``
+      );
+      item.insertText = srcPath;
+
+      // Sort images first, then other media, then other files
+      let sortPrefix = "3_"; // default
+      if (
+        ["svg", "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp"].includes(
+          fileExtension
+        )
+      ) {
+        sortPrefix = "1_"; // images first
+      } else if (["mp4", "webm", "ogg", "mp3", "wav"].includes(fileExtension)) {
+        sortPrefix = "2_"; // media second
+      }
+
+      item.sortText = `${sortPrefix}${srcPath}`;
+
+      items.push(item);
+    });
+
+    return items;
+  }
+
+  private getSrcContext(line: string, cursorOffset: number): boolean {
+    const beforeCursor = line.substring(0, cursorOffset);
+    const afterCursor = line.substring(cursorOffset);
+
+    // Look for src=" before cursor
+    const srcMatch = /src\s*=\s*"([^"]*)$/.exec(beforeCursor);
+    if (!srcMatch) {
+      return false;
+    }
+
+    // Make sure there's a closing quote after cursor
+    const nextQuoteIndex = afterCursor.indexOf('"');
+    return nextQuoteIndex !== -1;
+  }
+}
+
+export class SrcDefinitionProvider implements vscode.DefinitionProvider {
+  constructor(
+    private routeProvider: RouteProvider,
+    private workspaceFolder: vscode.WorkspaceFolder
+  ) {}
+
+  provideDefinition(
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): vscode.ProviderResult<vscode.Definition> {
+    const line = document.lineAt(position.line).text;
+    const cursorOffset = position.character;
+
+    // Check if we're clicking on a src value
+    const srcValue = this.getSrcValue(line, cursorOffset);
+    if (!srcValue) {
+      return;
+    }
+
+    // Check if it's a valid static asset
+    if (!this.routeProvider.isValidStaticAsset(srcValue)) {
+      return;
+    }
+
+    // Convert src path to file path
+    const normalizedPath = srcValue.startsWith("/") ? "." + srcValue : srcValue;
+    const absoluteFilePath = path.resolve(
+      this.workspaceFolder.uri.fsPath,
+      normalizedPath
+    );
+
+    // Check if file exists
+    if (!fs.existsSync(absoluteFilePath)) {
+      console.warn(`Static asset not found: ${absoluteFilePath}`);
+      return;
+    }
+
+    // Create VS Code URI and Location
+    const fileUri = vscode.Uri.file(absoluteFilePath);
+    const location = new vscode.Location(fileUri, new vscode.Position(0, 0));
+
+    return location;
+  }
+
+  private getSrcValue(line: string, cursorOffset: number): string | null {
+    // Find src attributes in the line
+    const srcRegex = /src\s*=\s*"([^"]*)"/g;
+    let match;
+
+    while ((match = srcRegex.exec(line)) !== null) {
+      const start = match.index + match[0].indexOf(match[1]);
+      const end = start + match[1].length;
+
+      if (cursorOffset >= start && cursorOffset <= end) {
+        return match[1];
+      }
+    }
+
+    return null;
+  }
+}

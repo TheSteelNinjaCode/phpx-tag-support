@@ -50,6 +50,10 @@ import {
   PphpScriptRedirectDiagnosticProvider,
   PphpScriptRedirectHoverProvider,
   RouteProvider,
+  SrcCompletionProvider,
+  SrcDefinitionProvider,
+  SrcDiagnosticProvider,
+  SrcHoverProvider,
 } from "./settings/route-provider";
 
 /* ────────────────────────────────────────────────────────────── *
@@ -1188,6 +1192,13 @@ export async function activate(context: vscode.ExtensionContext) {
     routeProvider,
     wsFolder
   );
+  const srcDiagnosticProvider = new SrcDiagnosticProvider(routeProvider);
+  const srcHoverProvider = new SrcHoverProvider(routeProvider);
+  const srcCompletionProvider = new SrcCompletionProvider(routeProvider);
+  const srcDefinitionProvider = new SrcDefinitionProvider(
+    routeProvider,
+    wsFolder
+  );
 
   // PHP redirect providers
   const phpRedirectDiagnosticProvider = new PhpRedirectDiagnosticProvider(
@@ -1298,23 +1309,23 @@ export async function activate(context: vscode.ExtensionContext) {
       return;
     }
 
+    if (document.languageId !== "html" && document.languageId !== "php") {
+      return;
+    }
+
     const diagnostics: vscode.Diagnostic[] = [];
 
-    // Check for href diagnostics in HTML/PHP files
-    if (document.languageId === "html" || document.languageId === "php") {
-      diagnostics.push(...hrefDiagnosticProvider.validateDocument(document));
-    }
+    diagnostics.push(...hrefDiagnosticProvider.validateDocument(document));
 
-    // Check for PHP redirect diagnostics in PHP files
-    if (document.languageId === "php") {
-      diagnostics.push(
-        ...phpRedirectDiagnosticProvider.validateDocument(document)
-      );
-    }
+    diagnostics.push(
+      ...phpRedirectDiagnosticProvider.validateDocument(document)
+    );
 
     diagnostics.push(
       ...pphpScriptRedirectDiagnosticProvider.validateDocument(document)
     );
+
+    diagnostics.push(...srcDiagnosticProvider.validateDocument(document));
 
     phpRoutesDiagnosticCollection.set(document.uri, diagnostics);
   };
@@ -1331,6 +1342,19 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     // ── Href providers (HTML + PHP) ──
     vscode.languages.registerHoverProvider(htmlPhpSelector, hrefHoverProvider),
+    vscode.languages.registerHoverProvider(["html", "php"], srcHoverProvider),
+    vscode.languages.registerCompletionItemProvider(
+      ["html", "php"],
+      srcCompletionProvider,
+      '"',
+      "'",
+      "=",
+      " "
+    ),
+    vscode.languages.registerDefinitionProvider(
+      ["html", "php"],
+      srcDefinitionProvider
+    ),
 
     // Href completion with triggers for quotes and equals
     vscode.languages.registerCompletionItemProvider(
