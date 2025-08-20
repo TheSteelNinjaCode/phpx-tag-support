@@ -26,10 +26,50 @@ interface PropMeta {
 
 type Cached = { mtime: number; props: PropMeta[] };
 
+function containsPhpCode(value: string): boolean {
+  const trimmed = value.trim();
+
+  // Return early if obviously not PHP
+  if (!trimmed.includes("<?")) {
+    return false;
+  }
+
+  // Check for various PHP syntax patterns with flexible matching
+  const phpPatterns = [
+    // Standard PHP echo: <?= ... ?>
+    /^<\?=[\s\S]*?\?>$/i,
+
+    // PHP echo with various whitespace: <?php echo ... ?>
+    /^<\?php\s+echo\b[\s\S]*?\?>$/i,
+
+    // PHP print: <?php print ... ?>
+    /^<\?php\s+print\b[\s\S]*?\?>$/i,
+
+    // General PHP code block: <?php ... ?>
+    /^<\?php\b[\s\S]*?\?>$/i,
+
+    // Short PHP tags: <? ... ?> (but not <?= which is handled above)
+    /^<\?\s+(?!=)[\s\S]*?\?>$/i,
+
+    // PHP with variables: <?php $var ?>, <?= $var ?>, etc.
+    /^<\?(?:php\s+|\s*=\s*)?\$[\w\[\]'"->]+.*?\?>$/i,
+
+    // Multiple PHP blocks or mixed content
+    /<\?(?:=|php\b)[\s\S]*?\?>/i,
+  ];
+
+  return phpPatterns.some((pattern) => pattern.test(trimmed));
+}
+
 function isAllowed(meta: PropMeta, value: string): boolean {
   if (!value.trim()) {
     return false;
   } // empty still illegal
+
+  // ✅ NEW: Allow PHP code syntax - skip validation for dynamic content
+  if (containsPhpCode(value)) {
+    return true; // PHP code is always valid - it will be evaluated at runtime
+  }
 
   // No enum at all → only simple type check
   if (!meta.allowed) {
@@ -58,6 +98,11 @@ function isValidType(type: string, value: string): boolean {
     return false; // Empty values are not valid
   }
 
+  // ✅ NEW: Allow PHP code syntax
+  if (containsPhpCode(value)) {
+    return true; // PHP code is always valid - it will be evaluated at runtime
+  }
+
   switch (type.toLowerCase()) {
     case "int":
     case "integer":
@@ -81,11 +126,11 @@ function typeToString(t: any | undefined): string {
   }
 
   switch (t.kind) {
-    /* plain Foo */
+    /* plain Foo */
     case "identifier":
       return t.name;
 
-    /* string, int, DateTime, …   (php‑parser’s own node) */
+    /* string, int, DateTime, …   (php‑parser's own node) */
     case "typereference":
       return t.raw ?? t.name;
 
@@ -188,9 +233,9 @@ function parsePublicProps(body: string): PropMeta[] {
 
     props.push({
       name,
-      type: rawType, // dejamos todos los “|” para el tooltip
+      type: rawType, // dejamos todos los "|" para el tooltip
       default: def?.trim(),
-      optional: /\bnull\b/i.test(rawType), // ← lo que pide tu interfaz
+      optional: /\bnull\b/i.test(rawType), // ← lo que pide tu interfaz
       // doc y allowed los puedes añadir más tarde si lo necesitas
     });
   }
@@ -489,67 +534,215 @@ export function validateComponentPropValues(
   const text = doc.getText();
   const diags: vscode.Diagnostic[] = [];
 
-  const tagRe = /<\s*([A-Z][A-Za-z0-9_]*)\b([^>]*?)\/?>/g;
-  const attrRe = /([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"/g;
+  // ✅ FIXED: Better tag parsing that handles > inside quoted attributes
+  const findTags = (text: string) => {
+    const tags: Array<{
+      fullMatch: string;
+      tag: string;
+      attrPart: string;
+      startIndex: number;
+      endIndex: number;
+    }> = [];
 
-  let tagMatch: RegExpExecArray | null;
-  while ((tagMatch = tagRe.exec(text))) {
-    const [, tag, attrPart] = tagMatch;
-
-    attrRe.lastIndex = 0;
-
-    const props = propsProvider.getProps(tag);
-
-    /* record which attrs we actually saw in this tag */
-    const present = new Set<string>();
-
-    /* ── 1️⃣  validate values that ARE present ─────────────────── */
-    let attrMatch: RegExpExecArray | null;
-    while ((attrMatch = attrRe.exec(attrPart))) {
-      const [, attrName, value] = attrMatch;
-      present.add(attrName);
-
-      const meta = props.find((p) => p.name === attrName);
-      if (!meta) {
-        continue; // we don't know this prop
+    let i = 0;
+    while (i < text.length) {
+      // Find opening tag
+      const tagStart = text.indexOf("<", i);
+      if (tagStart === -1) {
+        break;
       }
 
-      if (!isAllowed(meta, value)) {
-        const tagStart = tagMatch.index;
-        const attrRelOffset = tagMatch[0].indexOf(attrMatch[0]);
-        const absStart = tagStart + attrRelOffset + attrMatch[0].indexOf(value);
-        const absEnd = absStart + value.length;
+      // Skip if it's not a component tag (must start with uppercase)
+      const afterTag = tagStart + 1;
+      if (afterTag >= text.length || !/[A-Z]/.test(text[afterTag])) {
+        i = tagStart + 1;
+        continue;
+      }
 
+      // Extract tag name
+      let tagEnd = afterTag;
+      while (tagEnd < text.length && /[A-Za-z0-9_]/.test(text[tagEnd])) {
+        tagEnd++;
+      }
+
+      const tagName = text.slice(afterTag, tagEnd);
+      if (!tagName || !/^[A-Z]/.test(tagName)) {
+        i = tagStart + 1;
+        continue;
+      }
+
+      // Find the end of the tag, respecting quoted attributes
+      let pos = tagEnd;
+      let inQuotes = false;
+      let quoteChar = "";
+      let tagEndPos = -1;
+
+      while (pos < text.length) {
+        const char = text[pos];
+
+        if (!inQuotes) {
+          if (char === '"' || char === "'") {
+            inQuotes = true;
+            quoteChar = char;
+          } else if (
+            char === ">" ||
+            (char === "/" && pos + 1 < text.length && text[pos + 1] === ">")
+          ) {
+            tagEndPos = char === ">" ? pos : pos + 1;
+            break;
+          }
+        } else {
+          if (char === quoteChar) {
+            inQuotes = false;
+            quoteChar = "";
+          }
+        }
+        pos++;
+      }
+
+      if (tagEndPos === -1) {
+        i = tagStart + 1;
+        continue;
+      }
+
+      const fullMatch = text.slice(tagStart, tagEndPos + 1);
+      const attrPart = text.slice(tagEnd, tagEndPos).trim();
+
+      tags.push({
+        fullMatch,
+        tag: tagName,
+        attrPart,
+        startIndex: tagStart,
+        endIndex: tagEndPos + 1,
+      });
+
+      i = tagEndPos + 1;
+    }
+
+    return tags;
+  };
+
+  const tags = findTags(text);
+
+  for (const { tag, attrPart, startIndex, fullMatch } of tags) {
+    const props = propsProvider.getProps(tag);
+    const present = new Set<string>();
+
+    // ✅ IMPROVED: Parse attributes with proper quote handling
+    const parseAttributes = (attrString: string) => {
+      const attributes: Array<{
+        name: string;
+        value: string;
+        startPos: number;
+        endPos: number;
+      }> = [];
+
+      let i = 0;
+      while (i < attrString.length) {
+        // Skip whitespace
+        while (i < attrString.length && /\s/.test(attrString[i])) {
+          i++;
+        }
+        if (i >= attrString.length) {
+          break;
+        }
+
+        // Get attribute name
+        let nameStart = i;
+        while (i < attrString.length && /[A-Za-z0-9_-]/.test(attrString[i])) {
+          i++;
+        }
+        const name = attrString.slice(nameStart, i);
+
+        if (!name) {
+          break;
+        }
+
+        // Skip whitespace and =
+        while (i < attrString.length && /[\s=]/.test(attrString[i])) {
+          i++;
+        }
+
+        // Expect quote
+        if (
+          i >= attrString.length ||
+          (attrString[i] !== '"' && attrString[i] !== "'")
+        ) {
+          break;
+        }
+
+        const quoteChar = attrString[i];
+        i++; // skip opening quote
+
+        const valueStart = i;
+        let value = "";
+
+        // Read until closing quote
+        while (i < attrString.length && attrString[i] !== quoteChar) {
+          value += attrString[i];
+          i++;
+        }
+
+        if (i < attrString.length && attrString[i] === quoteChar) {
+          i++; // skip closing quote
+
+          const absoluteValueStart =
+            startIndex + fullMatch.indexOf(attrPart) + valueStart;
+
+          attributes.push({
+            name,
+            value,
+            startPos: absoluteValueStart,
+            endPos: absoluteValueStart + value.length,
+          });
+        }
+      }
+
+      return attributes;
+    };
+
+    const attributes = parseAttributes(attrPart);
+
+    // ✅ Record present attributes and validate values
+    for (const attr of attributes) {
+      present.add(attr.name);
+
+      const meta = props.find((p) => p.name === attr.name);
+      if (!meta) {
+        continue;
+      }
+
+      if (!isAllowed(meta, attr.value)) {
         const allowedInfo = meta.allowed
           ? `Allowed values: ${meta.allowed.replace(/\|/g, ", ")}`
           : `Expected type: ${meta.type}`;
 
         diags.push(
           new vscode.Diagnostic(
-            new vscode.Range(doc.positionAt(absStart), doc.positionAt(absEnd)),
-            `Invalid value "${value}". ${allowedInfo}`,
+            new vscode.Range(
+              doc.positionAt(attr.startPos),
+              doc.positionAt(attr.endPos)
+            ),
+            `Invalid value "${attr.value}". ${allowedInfo}`,
             vscode.DiagnosticSeverity.Warning
           )
         );
       }
     }
 
-    /* ── 2️⃣  flag *missing* required props ─────────────────────── */
+    // ✅ Check for missing required props
     for (const p of props) {
       if (!p.optional && !present.has(p.name)) {
-        // ✅ FIX: Double-check that this prop actually belongs to this component
         const componentsMap = getComponentsFromClassLog();
         const fqcn = componentsMap.get(tag);
 
-        // ✅ FIX: Only add diagnostic if we're sure this is the right component
         if (
           fqcn &&
           propsProvider
             .getProps(tag)
             .some((prop) => prop.name === p.name && !prop.optional)
         ) {
-          // highlight the tag name itself for visibility
-          const tagNameStart = tagMatch.index + 1; // skip '<'
+          const tagNameStart = startIndex + 1; // skip '<'
           const tagNameEnd = tagNameStart + tag.length;
 
           diags.push(
@@ -565,9 +758,6 @@ export function validateComponentPropValues(
         }
       }
     }
-
-    // ✅ FIX: Reset regex state after each tag
-    attrRe.lastIndex = 0;
   }
 
   ATTR_VALUE_DIAG.set(doc.uri, diags);
@@ -716,6 +906,11 @@ export function buildDynamicAttrItems(
         // Type information
         md.appendMarkdown(`\n\n**🏷️ Type:** \`${type}\``);
 
+        // ✅ NEW: Add PHP support hint
+        md.appendMarkdown(
+          `\n\n**💻 PHP Support:** Dynamic values like \`<?= $variable ?>\` are supported`
+        );
+
         // Original documentation from PHP docblock
         if (doc) {
           md.appendMarkdown(`\n\n---\n\n📝 **Documentation:**\n\n${doc}`);
@@ -725,11 +920,15 @@ export function buildDynamicAttrItems(
         if (finalAllowed && finalAllowed.includes("|")) {
           const exampleValue = finalAllowed.split("|")[0].trim();
           md.appendMarkdown(
-            `\n\n---\n\n**📋 Example:**\n\`\`\`php\n<${tag} ${name}="${exampleValue}" />\n\`\`\``
+            `\n\n---\n\n**📋 Example:**\n\`\`\`php\n<${tag} ${name}="${exampleValue}" />\n<${tag} ${name}="<?= $dynamicValue ?>" />\n\`\`\``
           );
         } else if (def) {
           md.appendMarkdown(
-            `\n\n---\n\n**📋 Example:**\n\`\`\`php\n<${tag} ${name}="${def}" />\n\`\`\``
+            `\n\n---\n\n**📋 Example:**\n\`\`\`php\n<${tag} ${name}="${def}" />\n<${tag} ${name}="<?= $dynamicValue ?>" />\n\`\`\``
+          );
+        } else {
+          md.appendMarkdown(
+            `\n\n---\n\n**📋 Example:**\n\`\`\`php\n<${tag} ${name}="value" />\n<${tag} ${name}="<?= $dynamicValue ?>" />\n\`\`\``
           );
         }
 
