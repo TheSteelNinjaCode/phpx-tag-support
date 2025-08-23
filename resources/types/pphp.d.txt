@@ -36,7 +36,6 @@ declare class PPHP {
     private _hydrated;
     private _currentProcessingHierarchy;
     private _stateHierarchy;
-    private _currentTemplateHierarchy;
     private _inlineModuleFns;
     private _currentExecutionScope;
     private _transitionStyleInjected;
@@ -265,7 +264,6 @@ declare class PPHP {
     private clean;
     private evaluateJavaScriptObject;
     private handleInputElement;
-    private setCursorPosition;
     private handleInputAppendParams;
     private handleHiddenAttribute;
     private handleVisibilityElementAttribute;

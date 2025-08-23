@@ -75,13 +75,6 @@ export const ATTRS: readonly AttrDoc[] = [
 
   /* ── Misc UX helpers ───────────────────────────────────── */
   {
-    label: "pp-autofocus",
-    blurb:
-      "Automatically focuses the element once it appears in the DOM (after render).",
-    mdExtra: `Good for modals / first‑field forms.  
-[Full docs](https://prismaphp.tsnc.tech/docs?doc=pp-autofocus)`,
-  },
-  {
     label: "pp-append-params",
     blurb:
       "Synchronises the element’s value with the current URL’s **query‑string** (great for filters & pagination).",

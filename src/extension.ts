@@ -55,6 +55,12 @@ import {
   SrcDiagnosticProvider,
   SrcHoverProvider,
 } from "./settings/route-provider";
+import {
+  FetchFunctionCompletionProvider,
+  FetchFunctionDefinitionProvider,
+  FetchFunctionDiagnosticProvider,
+  FetchFunctionHoverProvider,
+} from "./analysis/fetch-function";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                    *
@@ -1150,6 +1156,11 @@ export async function activate(context: vscode.ExtensionContext) {
     await validateGroupByCall(document, groupByDiags);
     await validateAggregateCall(document, aggregateDiags);
 
+    // Add fetchFunction validation
+    const fetchFunctionDiags =
+      fetchFunctionDiagnosticProvider.validateDocument(document);
+    fetchFunctionDiagnostics.set(document.uri, fetchFunctionDiags);
+
     updateStringDecorations(document);
     updateNativeTokenDecorations(
       document,
@@ -1458,6 +1469,39 @@ export async function activate(context: vscode.ExtensionContext) {
       );
     })
   );
+
+  // ── Register fetchFunction providers ───────────────────────────
+  const fetchFunctionCompletionProvider = new FetchFunctionCompletionProvider();
+  const fetchFunctionDefinitionProvider = new FetchFunctionDefinitionProvider();
+  const fetchFunctionHoverProvider = new FetchFunctionHoverProvider();
+  const fetchFunctionDiagnosticProvider = new FetchFunctionDiagnosticProvider();
+
+  context.subscriptions.push(
+    // Completion provider - triggers when typing quotes in fetchFunction
+    vscode.languages.registerCompletionItemProvider(
+      { language: "php", scheme: "file" },
+      fetchFunctionCompletionProvider,
+      "'", // Trigger on single quote
+      '"' // Trigger on double quote
+    ),
+
+    // Definition provider - Ctrl+Click navigation
+    vscode.languages.registerDefinitionProvider(
+      { language: "php", scheme: "file" },
+      fetchFunctionDefinitionProvider
+    ),
+
+    // Hover provider - show function info on hover
+    vscode.languages.registerHoverProvider(
+      { language: "php", scheme: "file" },
+      fetchFunctionHoverProvider
+    )
+  );
+
+  // Add fetchFunction diagnostics to existing validation
+  const fetchFunctionDiagnostics =
+    vscode.languages.createDiagnosticCollection("fetch-function");
+  context.subscriptions.push(fetchFunctionDiagnostics);
 }
 
 /* ────────────────────────────────────────────────────────────── *

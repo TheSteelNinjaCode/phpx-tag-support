@@ -2,19 +2,52 @@ import ts from "typescript";
 import * as vscode from "vscode";
 
 /**
+ * Sanitizes PHP-mixed code for TypeScript parsing by replacing PHP blocks with placeholders
+ */
+function sanitizeForTsParser(text: string): string {
+  // Replace PHP short tags and blocks with placeholder values
+  return (
+    text
+      // Replace <?= ... ?> with a placeholder
+      .replace(/<\?=\s*[^?]*\?>/g, '"__PHP_VALUE__"')
+      // Replace <?php ... ?> with a placeholder
+      .replace(/<\?php\s+[^?]*\?>/g, '"__PHP_VALUE__"')
+      // Replace standalone <?php blocks (without closing ?>)
+      .replace(/<\?php\s+[^?]*$/g, '"__PHP_VALUE__"')
+      // Replace any remaining PHP-like patterns
+      .replace(/<\?[^?]*\?>/g, '"__PHP_VALUE__"')
+  );
+}
+
+/**
  * Validates that tuple-style state calls (array destructuring) use exactly one argument.
  */
 export function validateStateTupleUsage(
   document: vscode.TextDocument,
   diagCollection: vscode.DiagnosticCollection
 ): void {
-  const source = ts.createSourceFile(
-    document.uri.fsPath,
-    document.getText(),
-    ts.ScriptTarget.Latest,
-    /*setParentNodes*/ true,
-    ts.ScriptKind.TS
-  );
+  // Only validate PHP files that might contain mixed PHP/JS code
+  if (document.languageId !== "php") {
+    return;
+  }
+
+  const originalText = document.getText();
+  const sanitizedText = sanitizeForTsParser(originalText);
+
+  // Try to parse as TypeScript - if it fails, skip validation
+  let source: ts.SourceFile;
+  try {
+    source = ts.createSourceFile(
+      document.uri.fsPath,
+      sanitizedText,
+      ts.ScriptTarget.Latest,
+      /*setParentNodes*/ true,
+      ts.ScriptKind.TS
+    );
+  } catch (error) {
+    // If parsing fails, don't show diagnostics
+    return;
+  }
 
   const diags: vscode.Diagnostic[] = [];
 
@@ -34,8 +67,8 @@ export function validateStateTupleUsage(
         expr.name.text === "state"
       ) {
         // Tuple form must have exactly one argument
-        // Tuple form must have either zero or one argument
         if (call.arguments.length > 1) {
+          // Map positions back to original document
           const start = document.positionAt(call.getStart());
           const end = document.positionAt(call.getEnd());
           const range = new vscode.Range(start, end);

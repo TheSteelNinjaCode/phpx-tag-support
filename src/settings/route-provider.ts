@@ -523,11 +523,13 @@ export class HrefDiagnosticProvider {
     const diagnostics: vscode.Diagnostic[] = [];
     const text = document.getText();
 
-    const hrefRegex = /href\s*=\s*"([^"]*)"/g;
+    // Updated regex to capture both regular href and pp-bind-href attributes
+    const hrefRegex = /((?:pp-bind-)?href)\s*=\s*"([^"]*)"/g;
     let match;
 
     while ((match = hrefRegex.exec(text)) !== null) {
-      const hrefValue = match[1];
+      const attributeName = match[1]; // 'href' or 'pp-bind-href'
+      const hrefValue = match[2];
 
       if (this.isExternalOrSpecialUrl(hrefValue)) {
         continue;
@@ -535,6 +537,16 @@ export class HrefDiagnosticProvider {
 
       // Skip validation if href contains PHP tags
       if (this.containsPhpTags(hrefValue)) {
+        continue;
+      }
+
+      // NEW: Skip validation for mustache expressions
+      if (this.containsMustacheExpression(hrefValue)) {
+        continue;
+      }
+
+      // NEW: Skip validation for pp-bind attributes (they contain variable names, not paths)
+      if (this.isPpBindAttribute(attributeName)) {
         continue;
       }
 
@@ -574,6 +586,20 @@ export class HrefDiagnosticProvider {
     }
 
     return diagnostics;
+  }
+
+  /**
+   * Check if string contains mustache expressions {{ ... }}
+   */
+  private containsMustacheExpression(value: string): boolean {
+    return /\{\{.*?\}\}/.test(value);
+  }
+
+  /**
+   * Check if the attribute is a pp-bind attribute
+   */
+  private isPpBindAttribute(attrName: string): boolean {
+    return attrName.startsWith("pp-bind-");
   }
 
   /**
@@ -1868,11 +1894,13 @@ export class SrcDiagnosticProvider {
     const diagnostics: vscode.Diagnostic[] = [];
     const text = document.getText();
 
-    const srcRegex = /src\s*=\s*"([^"]*)"/g;
+    // Updated regex to capture both regular src and pp-bind-src attributes
+    const srcRegex = /((?:pp-bind-)?src)\s*=\s*"([^"]*)"/g;
     let match;
 
     while ((match = srcRegex.exec(text)) !== null) {
-      const srcValue = match[1];
+      const attributeName = match[1]; // 'src' or 'pp-bind-src'
+      const srcValue = match[2];
 
       if (this.isExternalOrSpecialUrl(srcValue)) {
         continue;
@@ -1880,6 +1908,16 @@ export class SrcDiagnosticProvider {
 
       // Skip validation if src contains PHP tags
       if (this.containsPhpTags(srcValue)) {
+        continue;
+      }
+
+      // NEW: Skip validation for mustache expressions
+      if (this.containsMustacheExpression(srcValue)) {
+        continue;
+      }
+
+      // NEW: Skip validation for pp-bind attributes (they contain variable names, not paths)
+      if (this.isPpBindAttribute(attributeName)) {
         continue;
       }
 
@@ -1910,6 +1948,20 @@ export class SrcDiagnosticProvider {
     }
 
     return diagnostics;
+  }
+
+  /**
+   * Check if string contains mustache expressions {{ ... }}
+   */
+  private containsMustacheExpression(value: string): boolean {
+    return /\{\{.*?\}\}/.test(value);
+  }
+
+  /**
+   * Check if the attribute is a pp-bind attribute
+   */
+  private isPpBindAttribute(attrName: string): boolean {
+    return attrName.startsWith("pp-bind-");
   }
 
   private containsPhpTags(value: string): boolean {
