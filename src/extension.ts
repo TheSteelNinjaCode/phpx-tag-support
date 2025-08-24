@@ -1580,6 +1580,54 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   };
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "phpx-tag-support.refreshPpSync",
+      async () => {
+        await ppSyncProvider.refresh();
+        const count = ppSyncProvider.getSyncValues().length;
+        vscode.window.showInformationMessage(
+          `✅ PP-Sync refreshed! Found ${count} sync tables.`
+        );
+
+        // Re-validate all open documents
+        for (const doc of vscode.workspace.textDocuments) {
+          if (doc.languageId === "php") {
+            await validatePpSync(doc);
+          }
+        }
+      }
+    ),
+
+    // ADD THIS MISSING COMMAND
+    vscode.commands.registerCommand("phpx-tag-support.showPpSyncTables", () => {
+      const tables = ppSyncProvider.getSyncValues();
+
+      if (tables.length === 0) {
+        vscode.window.showWarningMessage(
+          "No PP-Sync tables found. Make sure you have pp-sync attributes in your PHP files under src/app/"
+        );
+        return;
+      }
+
+      const tableList = tables.map((table) => `• ${table}`).join("\n");
+      vscode.window.showInformationMessage(
+        `PP-Sync Tables (${tables.length}):\n\n${tableList}`,
+        { modal: true }
+      );
+    }),
+
+    vscode.commands.registerCommand("phpx-tag-support.debugPpSync", () => {
+      const tables = ppSyncProvider.getSyncValues();
+      console.log("🐛 PP-Sync Debug - Available tables:", tables);
+
+      vscode.window.showInformationMessage(
+        `Debug: Found ${tables.length} tables:\n${tables.join(", ")}`,
+        { modal: true }
+      );
+    })
+  );
+
   phpFileWatcher.onDidChange(refreshPpSyncAndValidateAll);
   phpFileWatcher.onDidCreate(refreshPpSyncAndValidateAll);
   phpFileWatcher.onDidDelete(refreshPpSyncAndValidateAll);

@@ -35,6 +35,18 @@
         "command": "phpx-tag-support.showRoutes",
         "title": "Show All Available Routes",
         "category": "PHPX"
+      },
+      {
+        "command": "phpx-tag-support.refreshPpSync",
+        "title": "PHPX: Refresh PP-Sync Tables"
+      },
+      {
+        "command": "phpx-tag-support.showPpSyncTables",
+        "title": "PHPX: Show PP-Sync Tables"
+      },
+      {
+        "command": "phpx-tag-support.debugPpSync",
+        "title": "PHPX: Debug PP-Sync"
       }
     ]
   },
