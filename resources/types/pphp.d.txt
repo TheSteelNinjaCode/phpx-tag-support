@@ -8,7 +8,6 @@ type SearchParamsListener = (params: URLSearchParams) => void;
 type FetchFunctionOptions = {
     abortPrevious?: boolean;
     element?: HTMLElement;
-    requestId?: string;
 };
 declare class PPHP {
     props: Record<string, any>;
@@ -48,7 +47,6 @@ declare class PPHP {
     private _currentEventTarget;
     private _eventContextStack;
     private _currentProcessingElement;
-    private _activeRequests;
     private readonly _eventHandlers;
     private readonly _redirectRegex;
     private readonly _assignmentRe;
@@ -181,9 +179,6 @@ declare class PPHP {
     getShared<T = any>(key: string): T & ((...args: any[]) => T) & {
         set: (value: T | ((prev: T) => T)) => void;
     };
-    private createSharedAccessor;
-    private createReactiveSharedReference;
-    private createSharedProxy;
     clearShare: (key?: string) => void;
     state<T>(key?: string, initial?: T): [(() => T) & {
         value: T;
@@ -302,10 +297,7 @@ declare class PPHP {
     parseJson(jsonString: string): any | null;
     private parseTime;
     private scheduleChange;
-    fetchFunction<T = any>(functionName: string, data?: Record<string, any>, optionsOrAbortPrevious?: boolean | FetchFunctionOptions, element?: HTMLElement, requestId?: string): Promise<T | string>;
-    private generateRequestId;
-    cancelRequest(requestId: string): void;
-    private cancelServerRequest;
+    fetchFunction<T = any>(functionName: string, data?: Record<string, any>, optionsOrAbortPrevious?: boolean | FetchFunctionOptions, element?: HTMLElement): Promise<T | string>;
     sync(...prefixes: string[]): Promise<void>;
     fetchAndUpdateBodyContent(): Promise<void>;
     copyCode(btnElement: HTMLElement, containerClass: string, initialIconAttr: {
