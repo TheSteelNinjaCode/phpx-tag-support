@@ -5,6 +5,11 @@ declare global {
 }
 type LocalStoreState = Record<string, any>;
 type SearchParamsListener = (params: URLSearchParams) => void;
+type FetchFunctionOptions = {
+    abortPrevious?: boolean;
+    element?: HTMLElement;
+    requestId?: string;
+};
 declare class PPHP {
     props: Record<string, any>;
     private _isNavigating;
@@ -42,6 +47,8 @@ declare class PPHP {
     private _currentEffectContext;
     private _currentEventTarget;
     private _eventContextStack;
+    private _currentProcessingElement;
+    private _activeRequests;
     private readonly _eventHandlers;
     private readonly _redirectRegex;
     private readonly _assignmentRe;
@@ -137,6 +144,8 @@ declare class PPHP {
     private callInlineModule;
     private getScopedFunction;
     private processInlineModuleScripts;
+    private transformEffectDependencies;
+    private smartSplitDependencies;
     private stateDeclarations;
     private injectScopedVariables;
     private extractStateVariables;
@@ -169,6 +178,12 @@ declare class PPHP {
     share<T>(key: string, initial?: T): [(() => T) & {
         value: T;
     }, (v: T | ((p: T) => T)) => void];
+    getShared<T = any>(key: string): T & ((...args: any[]) => T) & {
+        set: (value: T | ((prev: T) => T)) => void;
+    };
+    private createSharedAccessor;
+    private createReactiveSharedReference;
+    private createSharedProxy;
     clearShare: (key?: string) => void;
     state<T>(key?: string, initial?: T): [(() => T) & {
         value: T;
@@ -176,6 +191,8 @@ declare class PPHP {
     private markNestedPropertiesDirty;
     private static readonly _isBuiltIn;
     private extractDependencies;
+    private isInlineModuleFunction;
+    private looksLikeFunctionName;
     private isPlainText;
     private initializeAllReferencedProps;
     dispatchEvent(target: string, value: any | ((prev: any) => any), opts?: {
@@ -285,7 +302,10 @@ declare class PPHP {
     parseJson(jsonString: string): any | null;
     private parseTime;
     private scheduleChange;
-    fetchFunction<T = any>(functionName: string, data?: Record<string, any>, abortPrevious?: boolean): Promise<T | string>;
+    fetchFunction<T = any>(functionName: string, data?: Record<string, any>, optionsOrAbortPrevious?: boolean | FetchFunctionOptions, element?: HTMLElement, requestId?: string): Promise<T | string>;
+    private generateRequestId;
+    cancelRequest(requestId: string): void;
+    private cancelServerRequest;
     sync(...prefixes: string[]): Promise<void>;
     fetchAndUpdateBodyContent(): Promise<void>;
     copyCode(btnElement: HTMLElement, containerClass: string, initialIconAttr: {

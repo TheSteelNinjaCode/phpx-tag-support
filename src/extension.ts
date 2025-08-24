@@ -61,6 +61,13 @@ import {
   FetchFunctionDiagnosticProvider,
   FetchFunctionHoverProvider,
 } from "./analysis/fetch-function";
+import {
+  PpSyncCompletionProvider,
+  PpSyncDefinitionProvider,
+  PpSyncDiagnosticProvider,
+  PpSyncHoverProvider,
+  PpSyncProvider,
+} from "./analysis/pp-sync";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                    *
@@ -1155,11 +1162,7 @@ export async function activate(context: vscode.ExtensionContext) {
     await validateUpsertCall(document, upsertDiags);
     await validateGroupByCall(document, groupByDiags);
     await validateAggregateCall(document, aggregateDiags);
-
-    // Add fetchFunction validation
-    const fetchFunctionDiags =
-      fetchFunctionDiagnosticProvider.validateDocument(document);
-    fetchFunctionDiagnostics.set(document.uri, fetchFunctionDiags);
+    await validatePpSync(document);
 
     updateStringDecorations(document);
     updateNativeTokenDecorations(
@@ -1168,6 +1171,10 @@ export async function activate(context: vscode.ExtensionContext) {
       nativePropertyDecorationType
     );
     validateMissingImports(document, diagnosticCollection);
+    // Add fetchFunction validation
+    const fetchFunctionDiags =
+      fetchFunctionDiagnosticProvider.validateDocument(document);
+    fetchFunctionDiagnostics.set(document.uri, fetchFunctionDiags);
   };
 
   context.subscriptions.push(objectPropertyDecorationType);
@@ -1502,6 +1509,82 @@ export async function activate(context: vscode.ExtensionContext) {
   const fetchFunctionDiagnostics =
     vscode.languages.createDiagnosticCollection("fetch-function");
   context.subscriptions.push(fetchFunctionDiagnostics);
+
+  // ── Initialize PP-Sync Provider ────────────────────────────────
+  const ppSyncProvider = new PpSyncProvider(wsFolder);
+  const ppSyncCompletionProvider = new PpSyncCompletionProvider(ppSyncProvider);
+  const ppSyncHoverProvider = new PpSyncHoverProvider(ppSyncProvider);
+  const ppSyncDefinitionProvider = new PpSyncDefinitionProvider(
+    ppSyncProvider,
+    wsFolder
+  );
+  const ppSyncDiagnosticProvider = new PpSyncDiagnosticProvider(ppSyncProvider);
+
+  // ── Register PP-Sync Providers ─────────────────────────────────
+  context.subscriptions.push(
+    // Completion provider for pphp.sync() calls
+    vscode.languages.registerCompletionItemProvider(
+      phpSelector,
+      ppSyncCompletionProvider,
+      '"',
+      "'",
+      "(",
+      ",",
+      " ",
+      ..."abcdefghijklmnopqrstuvwxyz".split("")
+    ),
+
+    vscode.languages.registerHoverProvider(phpSelector, ppSyncHoverProvider),
+    vscode.languages.registerDefinitionProvider(
+      phpSelector,
+      ppSyncDefinitionProvider
+    )
+  );
+
+  // ── PP-Sync Diagnostics ────────────────────────────────────────
+  const ppSyncDiagnostics =
+    vscode.languages.createDiagnosticCollection("pp-sync");
+  context.subscriptions.push(ppSyncDiagnostics);
+
+  // ⚠️ FIXED: Ensure refresh happens BEFORE validation
+  const validatePpSync = async (document: vscode.TextDocument) => {
+    if (document.languageId !== "php") {
+      return;
+    }
+
+    // 🔄 ALWAYS refresh before validating to get latest sync tables
+    await ppSyncProvider.refresh();
+
+    const diagnostics = ppSyncDiagnosticProvider.validateDocument(document);
+    ppSyncDiagnostics.set(document.uri, diagnostics);
+  };
+
+  // ── Watch for PHP file changes to refresh PP-Sync ─────────────
+  const phpFileWatcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(wsFolder, "src/app/**/*.php")
+  );
+
+  const refreshPpSyncAndValidateAll = async () => {
+    console.log("🔄 Refreshing PP-Sync due to file change...");
+    await ppSyncProvider.refresh();
+    console.log(
+      `✅ Found ${ppSyncProvider.getSyncValues().length} sync tables`
+    );
+
+    // Re-validate all open PHP documents
+    for (const doc of vscode.workspace.textDocuments) {
+      if (doc.languageId === "php") {
+        const diagnostics = ppSyncDiagnosticProvider.validateDocument(doc);
+        ppSyncDiagnostics.set(doc.uri, diagnostics);
+      }
+    }
+  };
+
+  phpFileWatcher.onDidChange(refreshPpSyncAndValidateAll);
+  phpFileWatcher.onDidCreate(refreshPpSyncAndValidateAll);
+  phpFileWatcher.onDidDelete(refreshPpSyncAndValidateAll);
+
+  context.subscriptions.push(phpFileWatcher);
 }
 
 /* ────────────────────────────────────────────────────────────── *
