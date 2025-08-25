@@ -5,10 +5,6 @@ declare global {
 }
 type LocalStoreState = Record<string, any>;
 type SearchParamsListener = (params: URLSearchParams) => void;
-type FetchFunctionOptions = {
-    abortPrevious?: boolean;
-    element?: HTMLElement;
-};
 declare class PPHP {
     props: Record<string, any>;
     private _isNavigating;
@@ -297,7 +293,7 @@ declare class PPHP {
     parseJson(jsonString: string): any | null;
     private parseTime;
     private scheduleChange;
-    fetchFunction<T = any>(functionName: string, data?: Record<string, any>, optionsOrAbortPrevious?: boolean | FetchFunctionOptions, element?: HTMLElement): Promise<T | string>;
+    fetchFunction<T = any>(functionName: string, data?: Record<string, any>, abortPrevious?: boolean): Promise<T | string>;
     sync(...prefixes: string[]): Promise<void>;
     fetchAndUpdateBodyContent(): Promise<void>;
     copyCode(btnElement: HTMLElement, containerClass: string, initialIconAttr: {
