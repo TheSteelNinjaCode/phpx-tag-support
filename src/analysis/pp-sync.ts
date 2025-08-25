@@ -102,12 +102,19 @@ ${syncValuesArray
 }
 `;
 
-    const outputPath = path.join(this.workspaceFolder.uri.fsPath, "pp-sync.ts");
+    // 🔧 FIX: Create the file in .pphp directory instead of root
+    const pphpDir = path.join(this.workspaceFolder.uri.fsPath, ".pphp");
+    const outputPath = path.join(pphpDir, "pp-sync.ts");
 
     try {
+      // Ensure .pphp directory exists
+      if (!fs.existsSync(pphpDir)) {
+        fs.mkdirSync(pphpDir, { recursive: true });
+      }
+
       fs.writeFileSync(outputPath, tsContent, "utf8");
       console.log(
-        `✅ Generated pp-sync.ts with ${syncValuesArray.length} sync tables`
+        `✅ Generated .pphp/pp-sync.ts with ${syncValuesArray.length} sync tables`
       );
     } catch (error) {
       console.error("Error writing pp-sync.ts:", error);
