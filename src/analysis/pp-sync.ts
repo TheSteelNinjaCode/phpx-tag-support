@@ -388,111 +388,107 @@ export class PpSyncDiagnosticProvider {
     }
 
     const diagnostics: vscode.Diagnostic[] = [];
-    const text = document.getText();
+    // const text = document.getText();
 
-    // More robust regex that handles mixed quotes properly
-    const syncCallRegex =
-      /pphp\.sync\s*\(\s*(['"])((?:\\.|(?!\1)[^\\])*?)\1\s*,\s*(['"])((?:\\.|(?!\3)[^\\])*?)\3\s*\)/g;
+    // // More robust regex that handles mixed quotes properly
+    // const syncCallRegex =
+    //   /pphp\.sync\s*\(\s*(['"])((?:\\.|(?!\1)[^\\])*?)\1\s*,\s*(['"])((?:\\.|(?!\3)[^\\])*?)\3\s*\)/g;
 
-    let match;
-    while ((match = syncCallRegex.exec(text)) !== null) {
-      const [fullMatch, sourceQuote, sourceTable, targetQuote, targetTable] =
-        match;
-      const matchStart = match.index;
+    // let match;
+    // while ((match = syncCallRegex.exec(text)) !== null) {
+    //   const [fullMatch, sourceQuote, sourceTable, targetQuote, targetTable] =
+    //     match;
+    //   const matchStart = match.index;
 
-      // Debug logging (remove in production)
-      console.log(`Found pphp.sync call: "${sourceTable}" -> "${targetTable}"`);
-      console.log(`Available tables:`, this.syncProvider.getSyncValues());
+    //   // Check for duplicate values (same source and target)
+    //   if (sourceTable === targetTable) {
+    //     const fullRange = new vscode.Range(
+    //       document.positionAt(matchStart),
+    //       document.positionAt(matchStart + fullMatch.length)
+    //     );
 
-      // Check for duplicate values (same source and target)
-      if (sourceTable === targetTable) {
-        const fullRange = new vscode.Range(
-          document.positionAt(matchStart),
-          document.positionAt(matchStart + fullMatch.length)
-        );
+    //     diagnostics.push(
+    //       new vscode.Diagnostic(
+    //         fullRange,
+    //         `⚠️ Source and target tables are the same ("${sourceTable}"). Sync operations should use different tables.`,
+    //         vscode.DiagnosticSeverity.Warning
+    //       )
+    //     );
+    //     continue; // Skip individual validation if they're the same
+    //   }
 
-        diagnostics.push(
-          new vscode.Diagnostic(
-            fullRange,
-            `⚠️ Source and target tables are the same ("${sourceTable}"). Sync operations should use different tables.`,
-            vscode.DiagnosticSeverity.Warning
-          )
-        );
-        continue; // Skip individual validation if they're the same
-      }
+    //   // Validate source table
+    //   if (!this.syncProvider.hasSyncValue(sourceTable)) {
+    //     const sourceStart = this.findParameterPosition(
+    //       fullMatch,
+    //       sourceTable,
+    //       sourceQuote,
+    //       true
+    //     );
+    //     if (sourceStart !== -1) {
+    //       const absoluteStart = matchStart + sourceStart;
+    //       const sourceRange = new vscode.Range(
+    //         document.positionAt(absoluteStart),
+    //         document.positionAt(absoluteStart + sourceTable.length)
+    //       );
 
-      // Validate source table
-      if (!this.syncProvider.hasSyncValue(sourceTable)) {
-        const sourceStart = this.findParameterPosition(
-          fullMatch,
-          sourceTable,
-          sourceQuote,
-          true
-        );
-        if (sourceStart !== -1) {
-          const absoluteStart = matchStart + sourceStart;
-          const sourceRange = new vscode.Range(
-            document.positionAt(absoluteStart),
-            document.positionAt(absoluteStart + sourceTable.length)
-          );
+    //       const availableTables = this.syncProvider.getSyncValues();
+    //       const suggestion = this.findClosestMatch(
+    //         sourceTable,
+    //         availableTables
+    //       );
 
-          const availableTables = this.syncProvider.getSyncValues();
-          const suggestion = this.findClosestMatch(
-            sourceTable,
-            availableTables
-          );
+    //       let message = `❌ Unknown sync table "${sourceTable}". Add pp-sync="${sourceTable}" to an HTML tag.`;
+    //       if (suggestion) {
+    //         message += ` Did you mean "${suggestion}"?`;
+    //       }
 
-          let message = `❌ Unknown sync table "${sourceTable}". Add pp-sync="${sourceTable}" to an HTML tag.`;
-          if (suggestion) {
-            message += ` Did you mean "${suggestion}"?`;
-          }
+    //       diagnostics.push(
+    //         new vscode.Diagnostic(
+    //           sourceRange,
+    //           message,
+    //           vscode.DiagnosticSeverity.Error
+    //         )
+    //       );
+    //     }
+    //   }
 
-          diagnostics.push(
-            new vscode.Diagnostic(
-              sourceRange,
-              message,
-              vscode.DiagnosticSeverity.Error
-            )
-          );
-        }
-      }
+    //   // Validate target table
+    //   if (!this.syncProvider.hasSyncValue(targetTable)) {
+    //     const targetStart = this.findParameterPosition(
+    //       fullMatch,
+    //       targetTable,
+    //       targetQuote,
+    //       false
+    //     );
+    //     if (targetStart !== -1) {
+    //       const absoluteStart = matchStart + targetStart;
+    //       const targetRange = new vscode.Range(
+    //         document.positionAt(absoluteStart),
+    //         document.positionAt(absoluteStart + targetTable.length)
+    //       );
 
-      // Validate target table
-      if (!this.syncProvider.hasSyncValue(targetTable)) {
-        const targetStart = this.findParameterPosition(
-          fullMatch,
-          targetTable,
-          targetQuote,
-          false
-        );
-        if (targetStart !== -1) {
-          const absoluteStart = matchStart + targetStart;
-          const targetRange = new vscode.Range(
-            document.positionAt(absoluteStart),
-            document.positionAt(absoluteStart + targetTable.length)
-          );
+    //       const availableTables = this.syncProvider.getSyncValues();
+    //       const suggestion = this.findClosestMatch(
+    //         targetTable,
+    //         availableTables
+    //       );
 
-          const availableTables = this.syncProvider.getSyncValues();
-          const suggestion = this.findClosestMatch(
-            targetTable,
-            availableTables
-          );
+    //       let message = `❌ Unknown sync table "${targetTable}". Add pp-sync="${targetTable}" to an HTML tag.`;
+    //       if (suggestion) {
+    //         message += ` Did you mean "${suggestion}"?`;
+    //       }
 
-          let message = `❌ Unknown sync table "${targetTable}". Add pp-sync="${targetTable}" to an HTML tag.`;
-          if (suggestion) {
-            message += ` Did you mean "${suggestion}"?`;
-          }
-
-          diagnostics.push(
-            new vscode.Diagnostic(
-              targetRange,
-              message,
-              vscode.DiagnosticSeverity.Error
-            )
-          );
-        }
-      }
-    }
+    //       diagnostics.push(
+    //         new vscode.Diagnostic(
+    //           targetRange,
+    //           message,
+    //           vscode.DiagnosticSeverity.Error
+    //         )
+    //       );
+    //     }
+    //   }
+    // }
 
     return diagnostics;
   }

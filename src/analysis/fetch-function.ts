@@ -260,38 +260,38 @@ export class FetchFunctionHoverProvider implements vscode.HoverProvider {
 export class FetchFunctionDiagnosticProvider {
   validateDocument(document: vscode.TextDocument): vscode.Diagnostic[] {
     const diagnostics: vscode.Diagnostic[] = [];
-    const text = document.getText();
-    const functions = extractPhpFunctions(document);
-    const availableFunctions = new Set(functions.map((f) => f.name));
+    // const text = document.getText();
+    // const functions = extractPhpFunctions(document);
+    // const availableFunctions = new Set(functions.map((f) => f.name));
 
-    // Find all fetchFunction calls
-    const fetchFunctionRegex = /pphp\.fetchFunction\s*\(\s*['"]([^'"]+)['"]/g;
-    let match: RegExpExecArray | null;
+    // // Find all fetchFunction calls
+    // const fetchFunctionRegex = /pphp\.fetchFunction\s*\(\s*['"]([^'"]+)['"]/g;
+    // let match: RegExpExecArray | null;
 
-    while ((match = fetchFunctionRegex.exec(text)) !== null) {
-      const functionName = match[1];
+    // while ((match = fetchFunctionRegex.exec(text)) !== null) {
+    //   const functionName = match[1];
 
-      if (!availableFunctions.has(functionName)) {
-        const startPos = document.positionAt(
-          match.index + match[0].indexOf(functionName)
-        );
-        const endPos = startPos.translate(0, functionName.length);
+    //   if (!availableFunctions.has(functionName)) {
+    //     const startPos = document.positionAt(
+    //       match.index + match[0].indexOf(functionName)
+    //     );
+    //     const endPos = startPos.translate(0, functionName.length);
 
-        const availableList = Array.from(availableFunctions).join(", ");
-        const message =
-          availableFunctions.size > 0
-            ? `PHP function '${functionName}' not found. Available PHP functions: ${availableList}`
-            : `PHP function '${functionName}' not found. No PHP functions available in this file.`;
+    //     const availableList = Array.from(availableFunctions).join(", ");
+    //     const message =
+    //       availableFunctions.size > 0
+    //         ? `PHP function '${functionName}' not found. Available PHP functions: ${availableList}`
+    //         : `PHP function '${functionName}' not found. No PHP functions available in this file.`;
 
-        diagnostics.push(
-          new vscode.Diagnostic(
-            new vscode.Range(startPos, endPos),
-            message,
-            vscode.DiagnosticSeverity.Error
-          )
-        );
-      }
-    }
+    //     diagnostics.push(
+    //       new vscode.Diagnostic(
+    //         new vscode.Range(startPos, endPos),
+    //         message,
+    //         vscode.DiagnosticSeverity.Error
+    //       )
+    //     );
+    //   }
+    // }
 
     return diagnostics;
   }

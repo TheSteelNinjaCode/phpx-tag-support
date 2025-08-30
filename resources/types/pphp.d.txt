@@ -63,6 +63,8 @@ declare class PPHP {
     debugProps(): void;
     private setupGlobalEventTracking;
     private scheduleInitialHydration;
+    hydratePortal(root?: ParentNode): Promise<void>;
+    private getPreservedPortalHierarchy;
     private initCryptoKey;
     private encryptCallbackName;
     private decryptCallbackName;
@@ -78,6 +80,7 @@ declare class PPHP {
     private hasValueChanged;
     private resetProps;
     private initReactiveOn;
+    private markPortalChildrenWithHierarchy;
     private removeAllEventListenersOnNavigation;
     private initLoopBindings;
     private registerLoop;
@@ -146,6 +149,8 @@ declare class PPHP {
     private extractDeclaredVariables;
     private findScopedKeyForVariable;
     private extractVariableReferences;
+    private shouldSkipVariableInjection;
+    private isInDestructuringPattern;
     private isActualFunctionParameter;
     private isInDestructuringDeclaration;
     private hasInScopedContext;
@@ -246,6 +251,8 @@ declare class PPHP {
     private containsAwait;
     private handleInvokeError;
     private handleParsedCallback;
+    private shouldCallServer;
+    private resolveLocalFunction;
     private handleUndefinedFunction;
     private handleAfterRequest;
     private sanitizePassiveHandlers;
