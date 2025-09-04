@@ -2836,15 +2836,16 @@ function validateScalarWhereArray(
     if (!opEntry.key || opEntry.key.kind !== "string") {
       continue;
     }
+
     const op = (opEntry.key as any).value as string;
     const opRange = locToRange(doc, opEntry.key.loc!);
 
-    // Don't allow relation operators on scalar fields
+    // relation operators are not allowed on scalars
     if (RELATION_OPERATORS.includes(op as any)) {
       out.push(
         new vscode.Diagnostic(
           opRange,
-          `Cannot use relation operator "${op}" on scalar field "${fieldName}". Relation operators are only for relation fields.`,
+          `Cannot use relation operator "${op}" on scalar field "${fieldName}".`,
           vscode.DiagnosticSeverity.Error
         )
       );
@@ -2862,21 +2863,53 @@ function validateScalarWhereArray(
       continue;
     }
 
-    // Existing validation logic for scalar operators...
     const valRange = locToRange(doc, opEntry.value.loc!);
     const raw = doc.getText(valRange).trim();
 
-    if ((op === "in" || op === "notIn") && !/^\[.*\]$/.test(raw)) {
-      out.push(
-        new vscode.Diagnostic(
-          opRange,
-          `Filter "${op}" for "${fieldName}" expects an array, but got "${raw}".`,
-          vscode.DiagnosticSeverity.Error
-        )
-      );
-      continue;
+    // ✅ SPECIAL-CASE: in / notIn expect an array (or array-producing expr)
+    if (op === "in" || op === "notIn") {
+      const isArrayLiteral = /^\[.*\]$/.test(raw);
+      const isVar = /^\$[A-Za-z_]\w*/.test(raw);
+      const isProp = /^\$[A-Za-z_]\w*(?:->\w+)+$/.test(raw);
+      const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(raw);
+
+      if (!isArrayLiteral && !isVar && !isProp && !isFnCall) {
+        out.push(
+          new vscode.Diagnostic(
+            opRange,
+            `Filter "${op}" for "${fieldName}" expects an array (e.g. [1, 2, 3]) ` +
+              `or an expression that yields an array (e.g. $ids). Got "${raw}".`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+        continue;
+      }
+
+      // (Optional) quick best-effort check the *elements* if it’s a literal:
+      if (isArrayLiteral) {
+        const inner = raw.slice(1, -1).trim();
+        if (inner.length) {
+          const elems = inner.split(/\s*,\s*/); // simple split – good enough for scalars
+          for (const el of elems) {
+            // validate each element against the scalar type
+            if (!isValidPhpType(el, { ...fieldInfo, isList: false })) {
+              out.push(
+                new vscode.Diagnostic(
+                  opRange,
+                  `Filter "${op}" for "${fieldName}" expects elements of type ${fieldInfo.type}, ` +
+                    `but found "${el}".`,
+                  vscode.DiagnosticSeverity.Error
+                )
+              );
+              break;
+            }
+          }
+        }
+      }
+      continue; // ← do NOT run the scalar check on the whole array string
     }
 
+    // default scalar validation for the rest of operators
     if (!isValidPhpType(raw, fieldInfo)) {
       out.push(
         new vscode.Diagnostic(
