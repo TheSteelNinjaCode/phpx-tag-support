@@ -62,9 +62,10 @@ function containsPhpCode(value: string): boolean {
 }
 
 function isAllowed(meta: PropMeta, value: string): boolean {
-  if (!value.trim()) {
-    return false;
-  } // empty still illegal
+  // ✅ FIXED: Allow empty values for optional properties
+  if (!value.trim() && !meta.optional) {
+    return false; // empty only illegal for required properties
+  }
 
   // ✅ NEW: Allow PHP code syntax - skip validation for dynamic content
   if (containsPhpCode(value)) {
@@ -73,7 +74,7 @@ function isAllowed(meta: PropMeta, value: string): boolean {
 
   // No enum at all → only simple type check
   if (!meta.allowed) {
-    return isValidType(meta.type, value);
+    return isValidType(meta.type, value, meta.optional); // Pass optional flag
   }
 
   const parts = meta.allowed.split("|").map((v) => v.trim());
@@ -86,21 +87,31 @@ function isAllowed(meta: PropMeta, value: string): boolean {
 
   // 2) wildcard means fall back to type-check
   if (hasWildcard) {
-    return isValidType(meta.type, value);
+    return isValidType(meta.type, value, meta.optional); // Pass optional flag
   }
 
   // 3) strict enum: reject
   return false;
 }
 
-function isValidType(type: string, value: string): boolean {
-  if (!value.trim()) {
-    return false; // Empty values are not valid
+function isValidType(
+  type: string,
+  value: string,
+  optional: boolean = false
+): boolean {
+  // ✅ FIXED: Allow empty values for optional properties
+  if (!value.trim() && !optional) {
+    return false; // Empty values are only invalid for required properties
   }
 
   // ✅ NEW: Allow PHP code syntax
   if (containsPhpCode(value)) {
     return true; // PHP code is always valid - it will be evaluated at runtime
+  }
+
+  // ✅ FIXED: Allow empty strings for optional string properties
+  if (!value.trim() && optional) {
+    return true; // Empty strings are valid for optional properties
   }
 
   switch (type.toLowerCase()) {
@@ -114,7 +125,7 @@ function isValidType(type: string, value: string): boolean {
     case "boolean":
       return ["true", "false", "1", "0"].includes(value.toLowerCase());
     case "string":
-      return true; // Any non-empty string is valid
+      return true; // Any string (including empty) is valid for string type
     default:
       return true; // Unknown types are allowed
   }
