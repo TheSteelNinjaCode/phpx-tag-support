@@ -43,6 +43,8 @@ declare class PPHP {
     private _currentEventTarget;
     private _eventContextStack;
     private _currentProcessingElement;
+    private _hydrationListeners;
+    private _isInitialHydrationComplete;
     private readonly _eventHandlers;
     private readonly _redirectRegex;
     private readonly _assignmentRe;
@@ -62,6 +64,8 @@ declare class PPHP {
     static get instance(): PPHP;
     debugProps(): void;
     private setupGlobalEventTracking;
+    onHydrationComplete(callback: () => void): () => void;
+    private notifyHydrationComplete;
     private scheduleInitialHydration;
     hydratePortal(root?: ParentNode): Promise<void>;
     private getPreservedPortalHierarchy;
@@ -74,6 +78,7 @@ declare class PPHP {
     private detectElementHierarchy;
     private generateScopedKey;
     ref(key: string, index?: number): HTMLElement | HTMLElement[];
+    private processRefsInFragment;
     effect(fn: () => void | (() => void), deps?: (string | (() => any))[]): () => void;
     private resolveDependencyPath;
     private getResolvedValue;
@@ -91,6 +96,10 @@ declare class PPHP {
     private setupLoopMarker;
     private initializeLoopState;
     private createItemNodes;
+    private processNestedLoopsInFragment;
+    private processTextNodesInNestedFragment;
+    private processElementBindingsInNestedFragment;
+    private processEventHandlersInNestedFragment;
     private processTextNodesInFragment;
     private createTextNodeUpdaterWithItemKey;
     private findItemByKey;
@@ -108,6 +117,7 @@ declare class PPHP {
     private renderElementBinding;
     private applyAttributeBinding;
     private processEventHandlersInFragment;
+    private _getDynamicLoopItem;
     private _idxOf;
     private updateItemNodes;
     private updateConditionalNodes;
@@ -124,6 +134,7 @@ declare class PPHP {
     private applyLoopInsertions;
     private performLoopUpdate;
     private applyLoopDeletions;
+    private cleanupRefsInNode;
     private initRefs;
     private scheduleBindingUpdate;
     private makeReactive;
