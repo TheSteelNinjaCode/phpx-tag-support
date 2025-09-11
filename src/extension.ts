@@ -668,29 +668,29 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
           }
 
-          /* 0️⃣  bail out if we're already inside an attribute value  */
+          /* 0️⃣  bail out if we’re already inside an attribute value  */
           /* look for the *last* equal‑sign before the cursor *inside* the tag */
           const eq = uptoCursor.lastIndexOf("=");
           if (eq > lt) {
-            // any quote after that "=" that hasn't been closed yet?
+            // any quote after that “=” that hasn’t been closed yet?
             const afterEq = uptoCursor.slice(eq + 1);
             const openQuote = afterEq.match(/['"]/); // first quote
             const closeQuote = afterEq.match(/(['"])[^'"]*\1\s*$/); // matching closer
             if (openQuote && !closeQuote) {
-              return; // ↩︎  we're inside  foo="|"
+              return; // ↩︎  we’re inside  foo="|"
             }
           }
 
           /* ② figure out which <Tag … ---------------------------------- */
           const tagMatch = uptoCursor.slice(lt).match(/^<\s*([A-Za-z0-9_]+)/);
-          const tagName = tagMatch ? tagMatch[1].toLowerCase() : null;
+          const tagName = tagMatch ? tagMatch[1] : null;
 
           /* ③ attributes already written -------------------------------- */
           const written = new Set<string>(
             uptoCursor.slice(lt).match(/\b[\w-]+(?==)/g) || []
           );
 
-          /* ④ what's the user typing right now? ------------------------- */
+          /* ④ what’s the user typing right now? ------------------------- */
           const word = doc.getWordRangeAtPosition(pos, /[\w-]+/);
           const partial = word ? doc.getText(word) : "";
 
@@ -723,7 +723,7 @@ export async function activate(context: vscode.ExtensionContext) {
               return it;
             });
 
-          /* ⑥ DYNAMIC completions – public props of the component -------- */
+          /* ⑥ DYNAMIC completions – public props of the component -------- */
           const dynamicItems = tagName
             ? buildDynamicAttrItems(
                 tagName,
@@ -747,7 +747,7 @@ export async function activate(context: vscode.ExtensionContext) {
             it.sortText = `1_${it.label}`;
           });
 
-          return [...dynamicItems, ...staticItems];
+          return [...dynamicItems, ...staticItems]; // ← changed line
         },
       },
       " ",
