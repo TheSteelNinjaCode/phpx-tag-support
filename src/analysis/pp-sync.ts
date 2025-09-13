@@ -12,13 +12,8 @@ export class PpSyncProvider {
   }
 
   async refresh(): Promise<void> {
-    console.log("🔍 PP-Sync: Starting refresh...");
     this.syncValues.clear();
     await this.scanForSyncAttributes();
-    console.log(
-      `✅ PP-Sync: Found ${this.syncValues.size} sync tables:`,
-      Array.from(this.syncValues)
-    );
     await this.generateTypescriptFile();
   }
 
@@ -30,7 +25,6 @@ export class PpSyncProvider {
       return;
     }
 
-    console.log("🔍 PP-Sync: Scanning directory:", srcAppPath);
     await this.scanDirectory(srcAppPath);
   }
 
@@ -61,13 +55,6 @@ export class PpSyncProvider {
           this.syncValues.add(syncValue);
           foundInThisFile++;
         }
-      }
-
-      if (foundInThisFile > 0) {
-        console.log(
-          `📄 PP-Sync: Found ${foundInThisFile} sync attribute(s) in:`,
-          path.relative(this.workspaceFolder.uri.fsPath, filePath)
-        );
       }
     } catch (error) {
       console.error(`❌ PP-Sync: Error reading file ${filePath}:`, error);
@@ -113,9 +100,6 @@ ${syncValuesArray
       }
 
       fs.writeFileSync(outputPath, tsContent, "utf8");
-      console.log(
-        `✅ Generated .pphp/pp-sync.ts with ${syncValuesArray.length} sync tables`
-      );
     } catch (error) {
       console.error("Error writing pp-sync.ts:", error);
     }

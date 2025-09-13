@@ -68,6 +68,7 @@ import {
   PpSyncHoverProvider,
   PpSyncProvider,
 } from "./analysis/pp-sync";
+import { createReactiveStateValidator } from "./analysis/reactive-state-validator";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                    *
@@ -1580,12 +1581,7 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   const refreshPpSyncAndValidateAll = async () => {
-    console.log("🔄 Refreshing PP-Sync due to file change...");
     await ppSyncProvider.refresh();
-    console.log(
-      `✅ Found ${ppSyncProvider.getSyncValues().length} sync tables`
-    );
-
     // Re-validate all open PHP documents
     for (const doc of vscode.workspace.textDocuments) {
       if (doc.languageId === "php") {
@@ -1648,6 +1644,9 @@ export async function activate(context: vscode.ExtensionContext) {
   phpFileWatcher.onDidDelete(refreshPpSyncAndValidateAll);
 
   context.subscriptions.push(phpFileWatcher);
+
+  const stateValidator = createReactiveStateValidator();
+  context.subscriptions.push(stateValidator);
 }
 
 /* ────────────────────────────────────────────────────────────── *
@@ -3335,7 +3334,10 @@ const validateMissingImports = (
   let noCommentsText = removePhpComments(originalText);
   noCommentsText = blankOutHeredocOpeners(noCommentsText);
 
-  // Use the sanitized version (without comments) to parse imports.
+  // 🔧 NEW: Remove PHP string literals to avoid matching components inside them
+  noCommentsText = removePhpStringLiterals(noCommentsText);
+
+  // Use the sanitized version (without comments and strings) to parse imports.
   const useMap = parsePhpUseStatements(noCommentsText);
 
   const diagnostics: vscode.Diagnostic[] = [];
@@ -3357,6 +3359,9 @@ const validateMissingImports = (
   const heredocBlocks = extractAllHeredocBlocks(originalText);
   heredocBlocks.forEach((block) => {
     let blockContent = blankOutHeredocOpeners(block.content);
+    // 🔧 NEW: Also remove string literals from heredoc content
+    blockContent = removePhpStringLiterals(blockContent);
+
     const blockTagMatches = [
       ...blockContent.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g),
     ];
@@ -3386,6 +3391,18 @@ const validateMissingImports = (
 /* ────────────────────────────────────────────────────────────── *
  *                       PHP SANITIZATION UTILS                     *
  * ────────────────────────────────────────────────────────────── */
+
+const removePhpStringLiterals = (text: string): string => {
+  // Remove single quoted strings
+  text = text.replace(/'(?:[^'\\]|\\.)*'/g, (match) =>
+    " ".repeat(match.length)
+  );
+  // Remove double quoted strings
+  text = text.replace(/"(?:[^"\\]|\\.)*"/g, (match) =>
+    " ".repeat(match.length)
+  );
+  return text;
+};
 
 const extractAllHeredocBlocks = (text: string): HeredocBlock[] => {
   const blocks: HeredocBlock[] = [];

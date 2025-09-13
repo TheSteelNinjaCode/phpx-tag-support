@@ -45,6 +45,16 @@ declare class PPHP {
     private _currentProcessingElement;
     private _hydrationListeners;
     private _isInitialHydrationComplete;
+    private _lastNavigationTime;
+    private _navigationThrottleMs;
+    private _bindingUpdateCount;
+    private _maxBindingUpdates;
+    private _bindingUpdateResetTimeout;
+    private _errorCounts;
+    private _maxErrorsPerFunction;
+    private _errorResetTimeout;
+    private _lastRequestTime;
+    private _requestThrottleMs;
     private readonly _eventHandlers;
     private readonly _redirectRegex;
     private readonly _assignmentRe;
@@ -195,6 +205,9 @@ declare class PPHP {
     state<T>(key?: string, initial?: T): [(() => T) & {
         value: T;
     }, (value: T | ((prev: T) => T)) => void];
+    getState<T = any>(key: string): T & ((...args: any[]) => T) & {
+        set: (value: T | ((prev: T) => T)) => void;
+    };
     private markNestedPropertiesDirty;
     private static readonly _isBuiltIn;
     private extractDependencies;
@@ -265,6 +278,9 @@ declare class PPHP {
     private shouldCallServer;
     private resolveLocalFunction;
     private handleUndefinedFunction;
+    private isCircuitOpen;
+    private recordError;
+    private shouldThrottleRequest;
     private handleAfterRequest;
     private sanitizePassiveHandlers;
     private handlePassiveWheelStashes;
