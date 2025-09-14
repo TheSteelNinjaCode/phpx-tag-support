@@ -435,6 +435,10 @@ export class ReactiveStateValidator {
             continue;
           }
 
+          if (this.isInsideEffectDependencies(scriptContent, i, matchStart)) {
+            continue;
+          }
+
           // Skip if it's already part of a spread usage
           const beforeMatch = line.substring(
             Math.max(0, matchStart - 3),
@@ -602,6 +606,90 @@ export class ReactiveStateValidator {
       beforeMatch.includes("= pphp.state") ||
       beforeMatch.includes("= pphp.share")
     );
+  }
+
+  private isInsideEffectDependencies(
+    scriptContent: string,
+    lineIndex: number,
+    positionInLine: number
+  ): boolean {
+    const lines = scriptContent.split("\n");
+
+    // Build the text up to the current position
+    let textUpToPosition = "";
+    for (let i = 0; i < lineIndex; i++) {
+      textUpToPosition += lines[i] + "\n";
+    }
+    textUpToPosition += lines[lineIndex].substring(0, positionInLine);
+
+    // Find the last pphp.effect call before our position
+    const effectRegex = /pphp\.effect\s*\(/g;
+    let lastEffectMatch: RegExpExecArray | null = null;
+    let match;
+
+    while ((match = effectRegex.exec(textUpToPosition)) !== null) {
+      lastEffectMatch = match;
+    }
+
+    if (!lastEffectMatch) {
+      return false;
+    }
+
+    // From the effect call position, find the dependency array opening bracket
+    const textFromEffect = textUpToPosition.substring(lastEffectMatch.index!);
+
+    // Look for the pattern: pphp.effect(function, [dependencies
+    // We need to find the comma that separates the callback from dependencies, then the opening bracket
+    let parenCount = 0;
+    let foundComma = false;
+    let dependencyArrayStart = -1;
+
+    for (let i = 0; i < textFromEffect.length; i++) {
+      const char = textFromEffect[i];
+
+      if (char === "(") {
+        parenCount++;
+      } else if (char === ")") {
+        parenCount--;
+        if (parenCount === 0) {
+          // We've closed the effect call without finding dependency array
+          break;
+        }
+      } else if (char === "," && parenCount === 1 && !foundComma) {
+        // This is the comma separating callback from dependencies
+        foundComma = true;
+      } else if (char === "[" && foundComma && parenCount === 1) {
+        // This is the start of the dependency array
+        dependencyArrayStart = i;
+        break;
+      }
+    }
+
+    if (dependencyArrayStart === -1) {
+      return false;
+    }
+
+    // Now check if we're before the closing bracket of the dependency array
+    const textFromDepsStart = textFromEffect.substring(
+      dependencyArrayStart + 1
+    );
+    let bracketCount = 1;
+
+    for (let i = 0; i < textFromDepsStart.length; i++) {
+      const char = textFromDepsStart[i];
+      if (char === "[") {
+        bracketCount++;
+      } else if (char === "]") {
+        bracketCount--;
+        if (bracketCount === 0) {
+          // We found the closing bracket, so we were inside the dependency array
+          return true;
+        }
+      }
+    }
+
+    // If we reach here, the dependency array is still open, so we're inside it
+    return true;
   }
 
   public dispose(): void {
