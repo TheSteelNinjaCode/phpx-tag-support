@@ -343,7 +343,7 @@ export class ReactiveStateValidator {
           }
 
           // Skip if it's inside console.log, alert, or other logging functions
-          if (this.isInsideLoggingFunction(line, matchStart)) {
+          if (this.isInsideLoggingFunction(scriptContent, i, matchStart)) {
             continue;
           }
 
@@ -384,7 +384,7 @@ export class ReactiveStateValidator {
           }
 
           // Skip if it's inside console.log, alert, or other logging functions
-          if (this.isInsideLoggingFunction(line, matchStart)) {
+          if (this.isInsideLoggingFunction(scriptContent, i, matchStart)) {
             continue;
           }
 
@@ -426,7 +426,7 @@ export class ReactiveStateValidator {
           }
 
           // Skip if it's inside console.log, alert, or other logging functions
-          if (this.isInsideLoggingFunction(line, matchStart)) {
+          if (this.isInsideLoggingFunction(scriptContent, i, matchStart)) {
             continue;
           }
 
@@ -483,11 +483,20 @@ export class ReactiveStateValidator {
     );
   }
 
-  private isInsideLoggingFunction(line: string, position: number): boolean {
-    const beforeMatch = line.substring(0, position);
-    const afterMatch = line.substring(position);
+  private isInsideLoggingFunction(
+    scriptContent: string,
+    lineIndex: number,
+    positionInLine: number
+  ): boolean {
+    const lines = scriptContent.split("\n");
 
-    // Check if we're inside console.log(), alert(), etc.
+    // Build the text up to the current position
+    let textUpToPosition = "";
+    for (let i = 0; i < lineIndex; i++) {
+      textUpToPosition += lines[i] + "\n";
+    }
+    textUpToPosition += lines[lineIndex].substring(0, positionInLine);
+
     const logFunctions = [
       "console.log",
       "console.warn",
@@ -497,18 +506,44 @@ export class ReactiveStateValidator {
       "print",
     ];
 
+    // Find the last logging function call before our position
+    let lastLogMatch: { index: number; funcName: string } | null = null;
+
     for (const func of logFunctions) {
-      const funcIndex = beforeMatch.lastIndexOf(func + "(");
-      if (funcIndex !== -1) {
-        // Check if there's a closing parenthesis after our position
-        const closingParen = line.indexOf(")", position);
-        if (closingParen !== -1) {
-          return true;
+      const regex = new RegExp(`\\b${func.replace(".", "\\.")}\\s*\\(`, "g");
+      let match;
+      while ((match = regex.exec(textUpToPosition)) !== null) {
+        if (!lastLogMatch || match.index > lastLogMatch.index) {
+          lastLogMatch = { index: match.index, funcName: func };
         }
       }
     }
 
-    return false;
+    if (!lastLogMatch) {
+      return false;
+    }
+
+    // From the logging function call position, count parentheses to see if we're still inside
+    const textFromLog = textUpToPosition.substring(lastLogMatch.index);
+    let parenCount = 0;
+    let foundFirstParen = false;
+
+    for (let i = 0; i < textFromLog.length; i++) {
+      const char = textFromLog[i];
+      if (char === "(") {
+        parenCount++;
+        foundFirstParen = true;
+      } else if (char === ")") {
+        parenCount--;
+        if (parenCount === 0 && foundFirstParen) {
+          // We've closed the logging function call
+          return false;
+        }
+      }
+    }
+
+    // If we reach here and found the opening paren, we're still inside the logging function
+    return foundFirstParen && parenCount > 0;
   }
 
   private isInsideStringLiteral(line: string, position: number): boolean {
