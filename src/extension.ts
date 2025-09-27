@@ -68,7 +68,6 @@ import {
   PpSyncHoverProvider,
   PpSyncProvider,
 } from "./analysis/pp-sync";
-import { createReactiveStateValidator } from "./analysis/reactive-state-validator";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                    *
@@ -1644,9 +1643,6 @@ export async function activate(context: vscode.ExtensionContext) {
   phpFileWatcher.onDidDelete(refreshPpSyncAndValidateAll);
 
   context.subscriptions.push(phpFileWatcher);
-
-  const stateValidator = createReactiveStateValidator();
-  context.subscriptions.push(stateValidator);
 }
 
 /* ────────────────────────────────────────────────────────────── *
@@ -2391,7 +2387,7 @@ declare(strict_types=1);
 
 namespace ${namespacePlaceholder};
 
-use Lib\\\\PHPX\\\\PHPX;
+use PP\\\\PHPX\\\\PHPX;
 
 class ${classNamePlaceholder} extends PHPX
 {
@@ -2404,11 +2400,13 @@ class ${classNamePlaceholder} extends PHPX
 
     public function render(): string
     {
-        \\$attributes = \\$this->getAttributes();
         \\$class = \\$this->getMergeClasses(\\$this->class);
+        \\$attributes = \\$this->getAttributes([
+            'class' => \\$class,
+        ]);
 
         return <<<HTML
-        <div class="{\\$class}" {\\$attributes}>
+        <div {\\$attributes}>
             {\\$this->children}
         </div>
         HTML;
