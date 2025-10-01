@@ -2040,16 +2040,24 @@ const registerPhpMarkupCompletionProvider = () =>
         if (isInsidePrismaCall(fullBefore)) {
           return [];
         }
-        if (/^\s*<\?[A-Za-z=]*$/i.test(uptoCursor)) return [];
-        if (isInsideMustacheText(fullBefore)) return [];
+        if (/^\s*<\?[A-Za-z=]*$/i.test(uptoCursor)) {
+          return [];
+        }
+        if (isInsideMustacheText(fullBefore)) {
+          return [];
+        }
 
         const mem = memberItems(uptoCursor);
-        if (mem?.length) return mem;
+        if (mem?.length) {
+          return mem;
+        }
 
         const prefix = uptoCursor.match(/([A-Za-z_]*)$/)?.[1] ?? "";
         if (prefix.length) {
           const vars = variableItems(prefix);
-          if (vars.length) return vars;
+          if (vars.length) {
+            return vars;
+          }
         }
 
         const items = await buildComponentCompletions(doc, line, pos);
@@ -2083,7 +2091,9 @@ function isInsideMustacheText(before: string): boolean {
   // and it’s not part of a “{{”.
   const lastOpen = before.lastIndexOf("{");
   const lastClose = before.lastIndexOf("}");
-  if (lastOpen <= lastClose) return false;
+  if (lastOpen <= lastClose) {
+    return false;
+  }
   return before[lastOpen - 1] !== "{"; // guard against legacy "{{"
 }
 
@@ -2103,10 +2113,16 @@ async function buildComponentCompletions(
 
   if (lt !== -1) {
     let head = lineText.slice(lt + 1);
-    if (head.startsWith("/")) head = head.slice(1);
-    if (/\s|['"]/.test(head)) return [];
+    if (head.startsWith("/")) {
+      head = head.slice(1);
+    }
+    if (/\s|['"]/.test(head)) {
+      return [];
+    }
   } else {
-    if (!/^\s*$/.test(lineText.replace(/\w*$/, ""))) return [];
+    if (!/^\s*$/.test(lineText.replace(/\w*$/, ""))) {
+      return [];
+    }
   }
 
   const completions: vscode.CompletionItem[] = [];
@@ -2165,7 +2181,9 @@ function maybeAddPhpXClassSnippet(
   position: vscode.Position
 ): vscode.CompletionItem[] {
   const prefixLine: string = line.match(/([A-Za-z_]*)$/)![1];
-  if (!/^\s*phpx?c?l?a?s?s?$/i.test(prefixLine)) return [];
+  if (!/^\s*phpx?c?l?a?s?s?$/i.test(prefixLine)) {
+    return [];
+  }
 
   const wsFolder: vscode.WorkspaceFolder | undefined =
     vscode.workspace.getWorkspaceFolder(document.uri);
@@ -2421,8 +2439,12 @@ export const getFxpDiagnostics = (
 };
 
 function hasRealClosingTagOrHeredocHtml(src: string): boolean {
-  if (hasRealClosingTag(src)) return true;
-  if (hasHtmlInHeredoc(src)) return true;
+  if (hasRealClosingTag(src)) {
+    return true;
+  }
+  if (hasHtmlInHeredoc(src)) {
+    return true;
+  }
 
   const sanitized = sanitizeForDiagnosticsXML(src);
   const hasHtmlTags = /[<][A-Za-z][A-Za-z0-9-]*(\s|>)/.test(sanitized);
@@ -2493,7 +2515,9 @@ const stripInlineSlashes = (txt: string): string =>
 const blankMustaches = (txt: string) =>
   txt.replace(/\{([\s\S]*?)\}/g, (m, inner, idx, full) => {
     // Skip legacy double-brace: if neighbor indicates "{{ … }}"
-    if (full[idx - 1] === "{" || full[idx + m.length] === "}") return m;
+    if (full[idx - 1] === "{" || full[idx + m.length] === "}") {
+      return m;
+    }
     return "{" + spacer(inner) + "}";
   });
 
@@ -2583,7 +2607,9 @@ let componentsCache = new Map<string, string>();
 
 async function loadComponentsFromClassLog(): Promise<void> {
   const workspaceFolders = vscode.workspace.workspaceFolders;
-  if (!workspaceFolders || workspaceFolders.length === 0) return;
+  if (!workspaceFolders || workspaceFolders.length === 0) {
+    return;
+  }
   const workspaceFolder = workspaceFolders[0];
   const jsonUri = vscode.Uri.joinPath(
     workspaceFolder.uri,
@@ -2618,7 +2644,9 @@ function updateJsVariableDecorations(
   decorationType: vscode.TextEditorDecorationType
 ): void {
   const editor = vscode.window.activeTextEditor;
-  if (!editor) return;
+  if (!editor) {
+    return;
+  }
 
   const text = document.getText();
   const decorations: vscode.DecorationOptions[] = [];
@@ -2630,7 +2658,9 @@ function updateJsVariableDecorations(
     const endIdx = startIdx + whole.length;
 
     // Skip legacy double-brace blocks
-    if (text[startIdx - 1] === "{" || text[endIdx] === "}") continue;
+    if (text[startIdx - 1] === "{" || text[endIdx] === "}") {
+      continue;
+    }
 
     const inner = m[1];
     const baseOffset = startIdx + whole.indexOf(inner);
@@ -2664,14 +2694,18 @@ function insideMustache(
   const before = doc.getText(new vscode.Range(new vscode.Position(0, 0), pos));
   const open = before.lastIndexOf("{");
   const close = before.lastIndexOf("}");
-  if (open === -1 || open <= close) return false;
+  if (open === -1 || open <= close) {
+    return false;
+  }
   // Not a legacy double brace
   return before[open - 1] !== "{";
 }
 
 function updateStringDecorations(document: vscode.TextDocument) {
   const editor = vscode.window.activeTextEditor;
-  if (!editor || editor.document !== document) return;
+  if (!editor || editor.document !== document) {
+    return;
+  }
 
   const text = document.getText();
   const decos: vscode.DecorationOptions[] = [];
@@ -2680,7 +2714,9 @@ function updateStringDecorations(document: vscode.TextDocument) {
   while ((mustacheMatch = JS_EXPR_REGEX.exec(text))) {
     const startIdx = mustacheMatch.index;
     const endIdx = startIdx + mustacheMatch[0].length;
-    if (text[startIdx - 1] === "{" || text[endIdx] === "}") continue;
+    if (text[startIdx - 1] === "{" || text[endIdx] === "}") {
+      continue;
+    }
 
     const inner = mustacheMatch[1];
     const baseOffset = startIdx + mustacheMatch[0].indexOf(inner);
@@ -2729,7 +2765,9 @@ export function containsJsAssignment(expr: string): boolean {
   let found = false;
 
   const visit = (node: ts.Node): void => {
-    if (found) return;
+    if (found) {
+      return;
+    }
 
     if (
       ts.isBinaryExpression(node) &&
@@ -2748,7 +2786,9 @@ export function containsJsAssignment(expr: string): boolean {
 function preNormalizePhpVars(text: string): string {
   return text.replace(/\{([\s\S]*?)\}/g, (full, inside, idx, src) => {
     // skip legacy {{ … }}
-    if (src[idx - 1] === "{" || src[idx + full.length] === "}") return full;
+    if (src[idx - 1] === "{" || src[idx + full.length] === "}") {
+      return full;
+    }
 
     const normal = inside
       .replace(/\{\s*\$([A-Za-z_]\w*)\s*->\s*([A-Za-z_]\w*)\s*\}/g, "$1.$2")
@@ -2767,7 +2807,9 @@ function diagnosticsEqual(
   a: vscode.Diagnostic[],
   b: vscode.Diagnostic[]
 ): boolean {
-  if (a.length !== b.length) return false;
+  if (a.length !== b.length) {
+    return false;
+  }
   for (let i = 0; i < a.length; i++) {
     const da = a[i];
     const db = b[i];
@@ -2786,7 +2828,9 @@ const validateJsVariablesInCurlyBraces = (
   document: vscode.TextDocument,
   diagnosticCollection: vscode.DiagnosticCollection
 ): void => {
-  if (document.languageId !== PHP_LANGUAGE) return;
+  if (document.languageId !== PHP_LANGUAGE) {
+    return;
+  }
 
   const originalText = document.getText();
 
@@ -2797,9 +2841,13 @@ const validateJsVariablesInCurlyBraces = (
     let m: RegExpExecArray | null;
     while ((m = re.exec(originalText)) !== null) {
       const openTagEnd = originalText.indexOf(">", m.index) + 1;
-      if (openTagEnd <= 0) continue;
+      if (openTagEnd <= 0) {
+        continue;
+      }
       const closeTagStart = m.index + m[0].length - "</script>".length;
-      if (closeTagStart <= openTagEnd) continue;
+      if (closeTagStart <= openTagEnd) {
+        continue;
+      }
       scriptRanges.push([openTagEnd, closeTagStart]);
     }
   }
@@ -2811,9 +2859,13 @@ const validateJsVariablesInCurlyBraces = (
     let m: RegExpExecArray | null;
     while ((m = re.exec(originalText)) !== null) {
       const openTagEnd = originalText.indexOf(">", m.index) + 1;
-      if (openTagEnd <= 0) continue;
+      if (openTagEnd <= 0) {
+        continue;
+      }
       const closeTagStart = m.index + m[0].length - "</style>".length;
-      if (closeTagStart <= openTagEnd) continue;
+      if (closeTagStart <= openTagEnd) {
+        continue;
+      }
       styleRanges.push([openTagEnd, closeTagStart]);
     }
   }
@@ -2937,8 +2989,12 @@ function* extractMustacheExpressions(text: string): Generator<{
 
         // Only count braces outside of strings
         if (!inString) {
-          if (ch === "{") depth++;
-          if (ch === "}") depth--;
+          if (ch === "{") {
+            depth++;
+          }
+          if (ch === "}") {
+            depth--;
+          }
         }
 
         j++;
@@ -2990,8 +3046,11 @@ export function* findPlaceholders(src: string) {
       let j = i + 2;
       while (j < src.length && depth) {
         const ch = src[j++];
-        if (ch === "{") depth++;
-        else if (ch === "}") depth--;
+        if (ch === "{") {
+          depth++;
+        } else if (ch === "}") {
+          depth--;
+        }
       }
       if (depth === 0) {
         yield { start: i, end: j };
@@ -3013,7 +3072,9 @@ function updateNativeTokenDecorations(
   propDecoType: vscode.TextEditorDecorationType
 ): void {
   const editor = vscode.window.activeTextEditor;
-  if (!editor || document.languageId !== PHP_LANGUAGE) return;
+  if (!editor || document.languageId !== PHP_LANGUAGE) {
+    return;
+  }
 
   const text = document.getText();
 
@@ -3028,7 +3089,9 @@ function updateNativeTokenDecorations(
     const whole = exprMatch[0];
     const base = exprMatch.index!;
     const end = base + whole.length;
-    if (text[base - 1] === "{" || text[end] === "}") continue;
+    if (text[base - 1] === "{" || text[end] === "}") {
+      continue;
+    }
 
     const jsExpr = exprMatch[1];
     const baseIndex = base + whole.indexOf(jsExpr);
@@ -3147,7 +3210,9 @@ const validateMissingImports = (
   document: vscode.TextDocument,
   diagnosticCollection: vscode.DiagnosticCollection
 ): void => {
-  if (document.languageId !== PHP_LANGUAGE) return;
+  if (document.languageId !== PHP_LANGUAGE) {
+    return;
+  }
 
   const originalText = document.getText();
   let noCommentsText = removePhpComments(originalText);
@@ -3311,7 +3376,9 @@ const parsePhpUseStatements = (text: string): Map<string, string> => {
   let match: RegExpExecArray | null;
   while ((match = useRegex.exec(text)) !== null) {
     const importBody = match[1].trim();
-    if (!importBody) continue;
+    if (!importBody) {
+      continue;
+    }
     const braceOpenIndex = importBody.indexOf("{");
     const braceCloseIndex = importBody.lastIndexOf("}");
     if (braceOpenIndex !== -1 && braceCloseIndex !== -1) {
@@ -3321,7 +3388,9 @@ const parsePhpUseStatements = (text: string): Map<string, string> => {
         .trim();
       insideBraces.split(",").forEach((rawItem) => {
         const item = rawItem.trim();
-        if (item) processSingleImport(prefix, item, shortNameMap);
+        if (item) {
+          processSingleImport(prefix, item, shortNameMap);
+        }
       });
     } else {
       processSingleImport("", importBody, shortNameMap);
@@ -3377,7 +3446,9 @@ export function parseArgsWithTs(args: string): string[] {
     }
   });
 
-  if (!call) return [];
+  if (!call) {
+    return [];
+  }
 
   return call.arguments.map((arg) => arg.getText(sf));
 }
@@ -3395,10 +3466,14 @@ function parseStubsWithTS(source: string) {
   );
 
   sf.statements.forEach((stmt) => {
-    if (!ts.isClassDeclaration(stmt) || !stmt.name) return;
+    if (!ts.isClassDeclaration(stmt) || !stmt.name) {
+      return;
+    }
 
     const name = stmt.name.text as keyof typeof classStubs;
-    if (!stubNames.has(name)) return;
+    if (!stubNames.has(name)) {
+      return;
+    }
 
     stmt.members.forEach((member) => {
       if (
