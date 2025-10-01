@@ -3210,22 +3210,37 @@ const validateMissingImports = (
   document: vscode.TextDocument,
   diagnosticCollection: vscode.DiagnosticCollection
 ): void => {
-  if (document.languageId !== PHP_LANGUAGE) {
-    return;
-  }
+  if (document.languageId !== PHP_LANGUAGE) return;
 
   const originalText = document.getText();
+
+  // ✅ Parse use statements from original text FIRST (they're in PHP blocks)
+  const useMap = parsePhpUseStatements(originalText);
+
+  // ✅ Now sanitize for component detection
   let noCommentsText = removePhpComments(originalText);
+
+  // ✅ NEW: Remove PHP blocks - components should only be in HTML markup
+  noCommentsText = noCommentsText.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (m) =>
+    " ".repeat(m.length)
+  );
+  noCommentsText = noCommentsText.replace(
+    /<\?(?:php|=)?(?:[^?]|\?(?!>))*$/g,
+    (m) => " ".repeat(m.length)
+  );
+
   noCommentsText = blankOutHeredocOpeners(noCommentsText);
   noCommentsText = removePhpStringLiterals(noCommentsText);
 
-  const useMap = parsePhpUseStatements(noCommentsText);
+  // ✅ Built-in components that don't need imports
+  const BUILTIN_COMPONENTS = new Set(["Fragment"]);
 
   const diagnostics: vscode.Diagnostic[] = [];
   const tagMatches = [...noCommentsText.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g)];
   tagMatches.forEach((match) => {
     const tag = match[1];
-    if (!useMap.has(tag)) {
+    // ✅ Skip if it's imported OR if it's a built-in component
+    if (!useMap.has(tag) && !BUILTIN_COMPONENTS.has(tag)) {
       const start = document.positionAt((match.index ?? 0) + 1);
       const range = new vscode.Range(start, start.translate(0, tag.length));
       diagnostics.push(
@@ -3248,7 +3263,8 @@ const validateMissingImports = (
     ];
     blockTagMatches.forEach((match) => {
       const tag = match[1];
-      if (!useMap.has(tag)) {
+      // ✅ Skip built-in components in heredoc too
+      if (!useMap.has(tag) && !BUILTIN_COMPONENTS.has(tag)) {
         const absoluteIndex = block.startIndex + (match.index ?? 0) + 1;
         const startPos = document.positionAt(absoluteIndex);
         const range = new vscode.Range(
