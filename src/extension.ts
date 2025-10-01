@@ -2804,17 +2804,29 @@ const validateJsVariablesInCurlyBraces = (
     }
   }
 
-  // ✅ NEW: Build [start,end) ranges for PHP blocks
+  // ✅ NEW: Build [start,end) ranges for <style> content
+  const styleRanges: Array<[number, number]> = [];
+  {
+    const re = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(originalText)) !== null) {
+      const openTagEnd = originalText.indexOf(">", m.index) + 1;
+      if (openTagEnd <= 0) continue;
+      const closeTagStart = m.index + m[0].length - "</style>".length;
+      if (closeTagStart <= openTagEnd) continue;
+      styleRanges.push([openTagEnd, closeTagStart]);
+    }
+  }
+
+  // Build [start,end) ranges for PHP blocks
   const phpRanges: Array<[number, number]> = [];
   {
-    // Match closed PHP blocks: <?php ... ?> or <?= ... ?>
     const closedRe = /<\?(?:php|=)?[\s\S]*?\?>/g;
     let m: RegExpExecArray | null;
     while ((m = closedRe.exec(originalText)) !== null) {
       phpRanges.push([m.index, m.index + m[0].length]);
     }
 
-    // Match open-ended PHP blocks: <?php ... (no closing ?>)
     const openRe = /<\?(?:php|=)?(?:[^?]|\?(?!>))*$/g;
     while ((m = openRe.exec(originalText)) !== null) {
       phpRanges.push([m.index, originalText.length]);
@@ -2824,7 +2836,10 @@ const validateJsVariablesInCurlyBraces = (
   const isInsideScript = (idx: number) =>
     scriptRanges.some(([s, e]) => idx >= s && idx < e);
 
-  // ✅ NEW: Check if inside PHP block
+  // ✅ NEW: Check if inside <style> tag
+  const isInsideStyle = (idx: number) =>
+    styleRanges.some(([s, e]) => idx >= s && idx < e);
+
   const isInsidePhp = (idx: number) =>
     phpRanges.some(([s, e]) => idx >= s && idx < e);
 
@@ -2835,8 +2850,14 @@ const validateJsVariablesInCurlyBraces = (
     const { full, inner, index: startIdx } = match;
     const endIdx = startIdx + full.length;
 
-    // ✅ UPDATED: Skip mustaches inside <script> OR <?php blocks
-    if (isInsideScript(startIdx) || isInsidePhp(startIdx)) continue;
+    // ✅ UPDATED: Skip mustaches inside <script>, <style>, OR <?php blocks
+    if (
+      isInsideScript(startIdx) ||
+      isInsideStyle(startIdx) ||
+      isInsidePhp(startIdx)
+    ) {
+      continue;
+    }
 
     const expr = inner.trim();
 
