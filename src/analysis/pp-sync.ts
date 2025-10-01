@@ -89,12 +89,10 @@ ${syncValuesArray
 }
 `;
 
-    // 🔧 FIX: Create the file in .pphp directory instead of root
-    const pphpDir = path.join(this.workspaceFolder.uri.fsPath, ".pphp");
+    const pphpDir = path.join(this.workspaceFolder.uri.fsPath, ".pp");
     const outputPath = path.join(pphpDir, "pp-sync.ts");
 
     try {
-      // Ensure .pphp directory exists
       if (!fs.existsSync(pphpDir)) {
         fs.mkdirSync(pphpDir, { recursive: true });
       }

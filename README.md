@@ -318,7 +318,7 @@ Ensure your Prisma PHP project includes:
 - `settings/class-log.json` – component definitions
 - `settings/files-list.json` – route definitions
 - `settings/prisma-schema.json` – Prisma integration
-- `.pphp/phpx-mustache.d.ts` – TypeScript for Mustache
+- `.pp/phpx-mustache.d.ts` – TypeScript for Mustache
 
 ---
 

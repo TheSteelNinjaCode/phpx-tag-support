@@ -12,6 +12,15 @@ interface RouteInfo {
   routeGroups: string[];
 }
 
+function srcOrHrefToFilesListPath(val: string): string {
+  if (val.startsWith("/")) {
+    return "." + (val.startsWith("/public/") ? val : "/public" + val);
+  }
+  if (val.startsWith("./public/")) return val;
+  if (val.startsWith("./")) return val.replace("./", "./public/");
+  return "./public/" + val.replace(/^\//, "");
+}
+
 export class RouteProvider {
   private routes: RouteInfo[] = [];
   private filesListPath: string;
@@ -46,25 +55,42 @@ export class RouteProvider {
     }
   }
 
-  // NEW: Method to check if a path is a valid static asset
-  public isValidStaticAsset(path: string): boolean {
-    // Convert href path to match files-list.json format
-    // href="/src/app/assets/images/check.svg" -> "./src/app/assets/images/check.svg"
-    const normalizedPath = path.startsWith("/") ? "." + path : path;
+  public isValidStaticAsset(p: string): boolean {
+    // Map public URL → files-list.json path
+    // "/css/style.css" -> "./public/css/style.css"
+    // "./public/css/style.css" stays as-is
+    let normalizedPath = p;
 
-    // Check if this file exists in our files list and is NOT a route
+    // Normalize leading slash form
+    if (normalizedPath.startsWith("/")) {
+      // ensure we point into ./public
+      normalizedPath =
+        "." +
+        (normalizedPath.startsWith("/public/")
+          ? normalizedPath
+          : "/public" + normalizedPath);
+    }
+
+    // Keep already relative-with-dot as-is, but if it's not under ./public, try to map it
+    if (
+      normalizedPath.startsWith("./") &&
+      !normalizedPath.startsWith("./public/")
+    ) {
+      // treat "./css/foo.css" as "./public/css/foo.css"
+      normalizedPath = normalizedPath.replace("./", "./public/");
+    }
+
     const fileExists = this.allFiles.includes(normalizedPath);
     const isRoute =
       normalizedPath.endsWith("/index.php") && normalizedPath.includes("/app/");
-
     return fileExists && !isRoute;
   }
 
-  // NEW: Method to get all static assets (non-route files)
   public getStaticAssets(): string[] {
+    // Non-route files, but only under ./public
     return this.allFiles.filter((file) => {
-      // Exclude route files (index.php files in app directory)
-      return !(file.endsWith("/index.php") && file.includes("/app/"));
+      if (file.endsWith("/index.php") && file.includes("/app/")) return false;
+      return file.startsWith("./public/");
     });
   }
 
@@ -523,37 +549,19 @@ export class HrefDiagnosticProvider {
     const diagnostics: vscode.Diagnostic[] = [];
     const text = document.getText();
 
-    // Updated regex to capture both regular href and pp-bind-href attributes
-    const hrefRegex = /((?:pp-bind-)?href)\s*=\s*"([^"]*)"/g;
+    const hrefRegex = /href\s*=\s*"([^"]*)"/g;
     let match;
 
     while ((match = hrefRegex.exec(text)) !== null) {
-      const attributeName = match[1]; // 'href' or 'pp-bind-href'
-      const hrefValue = match[2];
+      const hrefValue = match[1];
 
-      if (this.isExternalOrSpecialUrl(hrefValue)) {
-        continue;
-      }
+      if (this.isExternalOrSpecialUrl(hrefValue)) continue;
+      if (this.containsPhpTags(hrefValue)) continue;
+      // NEW: single-brace mustache skip
+      if (this.containsMustacheExpression(hrefValue)) continue;
 
-      // Skip validation if href contains PHP tags
-      if (this.containsPhpTags(hrefValue)) {
-        continue;
-      }
-
-      // NEW: Skip validation for mustache expressions
-      if (this.containsMustacheExpression(hrefValue)) {
-        continue;
-      }
-
-      // NEW: Skip validation for pp-bind attributes (they contain variable names, not paths)
-      if (this.isPpBindAttribute(attributeName)) {
-        continue;
-      }
-
-      // NEW: Skip validation if href points to a valid static asset
-      if (this.routeProvider.isValidStaticAsset(hrefValue)) {
-        continue;
-      }
+      // NEW: valid static asset under ./public mapped from leading slash
+      if (this.routeProvider.isValidStaticAsset(hrefValue)) continue;
 
       if (!this.routeProvider.isValidRoute(hrefValue)) {
         const start = document.positionAt(
@@ -588,18 +596,8 @@ export class HrefDiagnosticProvider {
     return diagnostics;
   }
 
-  /**
-   * Check if string contains mustache expressions {{ ... }}
-   */
   private containsMustacheExpression(value: string): boolean {
-    return /\{\{.*?\}\}/.test(value);
-  }
-
-  /**
-   * Check if the attribute is a pp-bind attribute
-   */
-  private isPpBindAttribute(attrName: string): boolean {
-    return attrName.startsWith("pp-bind-");
+    return /\{[^}]*\}/.test(value);
   }
 
   /**
@@ -708,9 +706,7 @@ export class HrefHoverProvider implements vscode.HoverProvider {
       md.appendMarkdown(`\n\n**Static Asset:** \`${hrefValue}\``);
 
       // Convert href path to files-list.json format for display
-      const normalizedPath = hrefValue.startsWith("/")
-        ? "." + hrefValue
-        : hrefValue;
+      const normalizedPath = srcOrHrefToFilesListPath(hrefValue);
       md.appendMarkdown(`\n\n**File:** \`${normalizedPath}\``);
 
       // Detect file type and add info
@@ -846,33 +842,32 @@ export class HrefCompletionProvider implements vscode.CompletionItemProvider {
     return items;
   }
 
-  // NEW: Create completion items for static assets
   private createStaticAssetCompletionItems(): vscode.CompletionItem[] {
     const items: vscode.CompletionItem[] = [];
     const staticAssets = this.routeProvider.getStaticAssets();
 
     staticAssets.forEach((filePath) => {
-      // Convert "./src/app/assets/images/check.svg" to "/src/app/assets/images/check.svg"
-      const hrefPath = filePath.startsWith("./")
+      // filePath like "./public/assets/img/check.svg" -> href "/assets/img/check.svg"
+      const hrefPath = filePath.startsWith("./public/")
+        ? filePath.substring("./public".length) // results like "/assets/img/check.svg"
+        : filePath.startsWith("./")
         ? filePath.substring(1)
-        : "/" + filePath;
+        : "/" + filePath; // fallback
 
       const fileName = filePath.split("/").pop() || filePath;
-      const fileExtension = fileName.split(".").pop()?.toLowerCase() || "";
+      const ext = (fileName.split(".").pop() || "").toLowerCase();
 
       let kind = vscode.CompletionItemKind.File;
       let fileType = "File";
-
-      // Determine completion kind and type based on file extension
-      switch (fileExtension) {
+      switch (ext) {
         case "svg":
         case "png":
         case "jpg":
         case "jpeg":
         case "gif":
         case "webp":
-          kind = vscode.CompletionItemKind.Color; // Use color icon for images
-          fileType = fileExtension.toUpperCase() + " Image";
+          kind = vscode.CompletionItemKind.Color;
+          fileType = ext.toUpperCase() + " Image";
           break;
         case "css":
           kind = vscode.CompletionItemKind.Reference;
@@ -901,15 +896,10 @@ export class HrefCompletionProvider implements vscode.CompletionItemProvider {
       const item = new vscode.CompletionItem(hrefPath, kind);
       item.detail = `Static Asset: ${fileType}`;
       item.documentation = new vscode.MarkdownString(
-        `**Static Asset:** \`${hrefPath}\`\n\n` +
-          `**Type:** ${fileType}\n\n` +
-          `**File:** \`${filePath}\``
+        `**Static Asset:** \`${hrefPath}\`\n\n**Type:** ${fileType}\n\n**File:** \`${filePath}\``
       );
       item.insertText = hrefPath;
-
-      // Sort static assets after routes
       item.sortText = `3_${hrefPath}`;
-
       items.push(item);
     });
 
@@ -1894,32 +1884,16 @@ export class SrcDiagnosticProvider {
     const diagnostics: vscode.Diagnostic[] = [];
     const text = document.getText();
 
-    // Updated regex to capture both regular src and pp-bind-src attributes
-    const srcRegex = /((?:pp-bind-)?src)\s*=\s*"([^"]*)"/g;
+    const srcRegex = /src\s*=\s*"([^"]*)"/g;
     let match;
 
     while ((match = srcRegex.exec(text)) !== null) {
-      const attributeName = match[1]; // 'src' or 'pp-bind-src'
-      const srcValue = match[2];
+      const srcValue = match[1];
 
-      if (this.isExternalOrSpecialUrl(srcValue)) {
-        continue;
-      }
-
-      // Skip validation if src contains PHP tags
-      if (this.containsPhpTags(srcValue)) {
-        continue;
-      }
-
-      // NEW: Skip validation for mustache expressions
-      if (this.containsMustacheExpression(srcValue)) {
-        continue;
-      }
-
-      // NEW: Skip validation for pp-bind attributes (they contain variable names, not paths)
-      if (this.isPpBindAttribute(attributeName)) {
-        continue;
-      }
+      if (this.isExternalOrSpecialUrl(srcValue)) continue;
+      if (this.containsPhpTags(srcValue)) continue;
+      // NEW: single-brace mustache skip
+      if (this.containsMustacheExpression(srcValue)) continue;
 
       // Only validate against static assets (not routes)
       if (!this.routeProvider.isValidStaticAsset(srcValue)) {
@@ -1954,14 +1928,7 @@ export class SrcDiagnosticProvider {
    * Check if string contains mustache expressions {{ ... }}
    */
   private containsMustacheExpression(value: string): boolean {
-    return /\{\{.*?\}\}/.test(value);
-  }
-
-  /**
-   * Check if the attribute is a pp-bind attribute
-   */
-  private isPpBindAttribute(attrName: string): boolean {
-    return attrName.startsWith("pp-bind-");
+    return /\{[^}]*\}/.test(value);
   }
 
   private containsPhpTags(value: string): boolean {
@@ -1980,35 +1947,29 @@ export class SrcDiagnosticProvider {
     const staticAssets = this.routeProvider.getStaticAssets();
     const suggestions: string[] = [];
 
-    // Convert invalid path to normalized format for comparison
-    const normalizedInvalid = invalidPath.startsWith("/")
-      ? "." + invalidPath
-      : invalidPath;
-
-    staticAssets.forEach((asset) => {
-      // Convert asset path to href format for suggestion
-      const assetHref = asset.startsWith("./")
+    // Turn "./public/foo/bar.png" into "/foo/bar.png" for comparison
+    const toHref = (asset: string) =>
+      asset.startsWith("./public/")
+        ? asset.substring("./public".length)
+        : asset.startsWith("./")
         ? asset.substring(1)
         : "/" + asset;
 
+    staticAssets.forEach((asset) => {
+      const assetHref = toHref(asset);
       if (this.isSimilar(invalidPath, assetHref)) {
         suggestions.push(assetHref);
       }
     });
 
-    // Also suggest based on file extension if it's an image
     const fileExt = invalidPath.split(".").pop()?.toLowerCase();
     if (["png", "jpg", "jpeg", "gif", "svg", "webp"].includes(fileExt || "")) {
       staticAssets
         .filter((asset) => asset.toLowerCase().endsWith(`.${fileExt}`))
         .slice(0, 3)
         .forEach((asset) => {
-          const assetHref = asset.startsWith("./")
-            ? asset.substring(1)
-            : "/" + asset;
-          if (!suggestions.includes(assetHref)) {
-            suggestions.push(assetHref);
-          }
+          const assetHref = toHref(asset);
+          if (!suggestions.includes(assetHref)) suggestions.push(assetHref);
         });
     }
 
@@ -2080,9 +2041,7 @@ export class SrcHoverProvider implements vscode.HoverProvider {
       md.appendMarkdown(`\n\n**Static Asset:** \`${srcValue}\``);
 
       // Convert src path to files-list.json format for display
-      const normalizedPath = srcValue.startsWith("/")
-        ? "." + srcValue
-        : srcValue;
+      const normalizedPath = srcOrHrefToFilesListPath(srcValue);
       md.appendMarkdown(`\n\n**File:** \`${normalizedPath}\``);
 
       // Detect file type and add info
@@ -2178,7 +2137,9 @@ export class SrcCompletionProvider implements vscode.CompletionItemProvider {
 
     staticAssets.forEach((filePath) => {
       // Convert "./src/app/assets/images/check.svg" to "/src/app/assets/images/check.svg"
-      const srcPath = filePath.startsWith("./")
+      const srcPath = filePath.startsWith("./public/")
+        ? filePath.substring("./public".length) // "/images/foo.png"
+        : filePath.startsWith("./")
         ? filePath.substring(1)
         : "/" + filePath;
 

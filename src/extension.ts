@@ -70,7 +70,7 @@ import {
 } from "./analysis/pp-sync";
 
 /* ────────────────────────────────────────────────────────────── *
- *                        INTERFACES & CONSTANTS                    *
+ *                        INTERFACES & CONSTANTS                  *
  * ────────────────────────────────────────────────────────────── */
 
 interface HeredocBlock {
@@ -82,7 +82,7 @@ const classNameMap: Record<
   VarName,
   "PPHP" | "PPHPLocalStore" | "SearchParamsManager"
 > = {
-  pphp: "PPHP",
+  pp: "PPHP",
   store: "PPHPLocalStore",
   searchParams: "SearchParamsManager",
 };
@@ -107,9 +107,8 @@ let classStubs: Record<
 let globalStubs: Record<string, string[]> = {};
 let globalStubTypes: Record<string, ts.TypeLiteralNode> = {};
 
-// Regex patterns
 const PHP_TAG_REGEX = /<\/?[A-Z][A-Za-z0-9]*/;
-const JS_EXPR_REGEX = /{{\s*(.*?)\s*}}/g;
+const JS_EXPR_REGEX = /\{\s*([\s\S]*?)\s*\}/g;
 const HEREDOC_PATTERN =
   /<<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
 // grab every key on String.prototype…
@@ -129,14 +128,14 @@ class PphpHoverProvider implements vscode.HoverProvider {
   ): vscode.ProviderResult<vscode.Hover> {
     const wr = document.getWordRangeAtPosition(
       position,
-      /(pphp|store|searchParams)\.(\w+)/
+      /(pp|store|searchParams)\.(\w+)/
     );
     if (!wr) {
       return;
     }
     const text = document.getText(wr);
     const [, varName, methodName] = text.match(
-      /(pphp|store|searchParams)\.(\w+)/
+      /(pp|store|searchParams)\.(\w+)/
     )! as [string, VarName, string];
     const cls = classNameMap[varName];
     const entry = classStubs[cls].find((e) => e.name === methodName);
@@ -160,11 +159,10 @@ class PphpSignatureHelpProvider implements SignatureHelpProvider {
     position: vscode.Position,
     token: CancellationToken
   ): SignatureHelp | null {
-    // look backwards to see if we’re in a pphp.*(…) call
     const line = document
       .lineAt(position.line)
       .text.slice(0, position.character);
-    const m = /(pphp|store|searchParams)\.(\w+)\($/.exec(line);
+    const m = /(pp|store|searchParams)\.(\w+)\($/.exec(line);
     if (!m) {
       return null;
     }
@@ -255,12 +253,10 @@ export function parseGlobalsWithTS(source: string) {
         const name = decl.name.text;
         const type = decl.type;
         if (type && ts.isTypeLiteralNode(type)) {
-          // 1) keep a list of immediate property NAMES
           globalStubs[name] = type.members
             .filter(ts.isPropertySignature)
             .map((ps) => (ps.name as ts.Identifier).text);
 
-          // 2) ALSO remember the TypeLiteralNode itself
           globalStubTypes[name] = type;
         } else {
           globalStubs[name] = [];
@@ -315,7 +311,6 @@ const addImportCommand = async (
     if (!existingComponents.includes(componentName)) {
       existingComponents.push(componentName);
       existingComponents.sort();
-      // Note: only escape the opening curly brace; the closing brace stays as is.
       const newGroupImport = `use ${groupPrefix}\\{${existingComponents.join(
         ", "
       )}\};`;
@@ -324,7 +319,6 @@ const addImportCommand = async (
         groupMatch.index + groupMatch[0].length
       );
       const groupRange = new vscode.Range(startPos, endPos);
-      // Removed the extra "\n" appended.
       edit.replace(document.uri, groupRange, newGroupImport);
     }
   } else {
@@ -344,26 +338,21 @@ const addImportCommand = async (
       });
     }
     if (matchArray.length > 0) {
-      // One or more separate use statements exist; replace them with a grouped one.
       let existingComponents = matchArray.map((x) => x.component);
       if (!existingComponents.includes(componentName)) {
         existingComponents.push(componentName);
       }
-      // Remove duplicates and sort.
       existingComponents = Array.from(new Set(existingComponents)).sort();
       const newGroupImport = `use ${groupPrefix}\\{${existingComponents.join(
         ", "
       )}\};`;
-      // Determine the range covering all matching separate use statements.
       const firstMatch = matchArray[0];
       const lastMatch = matchArray[matchArray.length - 1];
       const startPos = document.positionAt(firstMatch.index);
       const endPos = document.positionAt(lastMatch.index + lastMatch.length);
       const groupRange = new vscode.Range(startPos, endPos);
-      // Replace without adding an extra newline.
       edit.replace(document.uri, groupRange, newGroupImport);
     } else {
-      // No existing group or separate imports found; insert a new use statement.
       let insertPosition: vscode.Position;
       if (/^\s*<\?php/.test(text)) {
         const namespaceRegex = /^namespace\s+.+?;/m;
@@ -375,7 +364,6 @@ const addImportCommand = async (
           const firstLine = document.lineAt(0);
           insertPosition = new vscode.Position(firstLine.lineNumber + 1, 0);
         }
-        // Insert without an extra newline.
         edit.insert(document.uri, insertPosition, `use ${fullComponent};\n`);
       } else {
         insertPosition = new vscode.Position(0, 0);
@@ -395,8 +383,8 @@ function validatePphpCalls(
   const text = sanitizeForDiagnostics(original);
   const diags: vscode.Diagnostic[] = [];
 
-  // match pphp.foo(arg1, arg2, …)
-  const callRe = /\b(pphp|store|searchParams)\.(\w+)\(([^)]*)\)/g;
+  // match pp.foo(arg1, arg2, …)
+  const callRe = /\b(pp|store|searchParams)\.(\w+)\(([^)]*)\)/g;
   let m: RegExpExecArray | null;
   while ((m = callRe.exec(text))) {
     const [, varName, methodName, argsText] = m as unknown as [
@@ -406,7 +394,7 @@ function validatePphpCalls(
       string
     ];
     const classNameMap: Record<VarName, keyof typeof classStubs> = {
-      pphp: "PPHP",
+      pp: "PPHP",
       store: "PPHPLocalStore",
       searchParams: "SearchParamsManager",
     };
@@ -416,30 +404,22 @@ function validatePphpCalls(
       continue;
     }
 
-    // extract the parameter list from the signature string
-    // e.g. "fetchFunction(functionName: string, data?: Record<string, any>, abortPrevious?: boolean)"
     const paramsPart = entry.signature.replace(/^[^(]+\(([^)]*)\):.*$/, "$1");
     const expectedParams = paramsPart
       .split(",")
       .map((p) => p.trim())
       .filter((p) => !!p);
 
-    // detect whether there’s a rest-parameter (e.g. "...prefixes: string[]")
     const hasRest = expectedParams.some((p) => p.startsWith("..."));
-    // everything that isn’t the rest-param
     const nonRest = expectedParams.filter((p) => !p.startsWith("..."));
 
-    // count what the user actually passed
     const parsedArgs = parseArgsWithTs(argsText);
     const passedCount = parsedArgs.length;
 
-    // only non-rest params contribute to “required” count
     const requiredCount = nonRest.filter((p) => !p.includes("?")).length;
-    // if there *is* a rest param, there’s no upper limit
     const maxCount = hasRest ? Infinity : expectedParams.length;
 
     if (passedCount < requiredCount || passedCount > maxCount) {
-      // figure out where in the document this call happened
       const callStart = document.positionAt(m.index);
       const callEnd = document.positionAt(m.index + m[0].length);
       const range = new vscode.Range(callStart, callEnd);
@@ -461,15 +441,27 @@ function validatePphpCalls(
   diagCollection.set(document.uri, diags);
 }
 
+const isValidJsExpression = (expr: string): boolean => {
+  if (containsJsAssignment(expr)) {
+    return false;
+  }
+  try {
+    new Function(`return (${expr});`);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 /* ────────────────────────────────────────────────────────────── *
- *                       EXTENSION ACTIVATION                       *
+ *                       EXTENSION ACTIVATION                     *
  * ────────────────────────────────────────────────────────────── */
 
 export async function activate(context: vscode.ExtensionContext) {
   // ── 0️⃣  Make sure we’re in a workspace ─────────────────────────
   const folders = vscode.workspace.workspaceFolders;
   if (!folders || folders.length === 0) {
-    return; // no folder → bail out silently
+    return;
   }
 
   // ── 1️⃣  Check every root for prisma-php.json ───────────────────
@@ -477,16 +469,16 @@ export async function activate(context: vscode.ExtensionContext) {
     folders.map(async (folder) => {
       try {
         const uri = vscode.Uri.joinPath(folder.uri, "prisma-php.json");
-        await vscode.workspace.fs.stat(uri); // throws if it doesn’t exist
-        return true; // found → good
+        await vscode.workspace.fs.stat(uri);
+        return true;
       } catch {
-        return false; // not here → keep looking
+        return false;
       }
     })
-  ).catch(() => false); // all threw → false
+  ).catch(() => false);
 
   if (!isPrismaPhpProject) {
-    return; // not a Prisma PHP project
+    return;
   }
 
   console.log("PHPX tag support is now active!");
@@ -520,9 +512,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
   activateNativeJsHelp(context);
 
+  // — load global mustache stubs from new .pp/ path
   const globalStubFsPath = path.join(
     wsFolder.uri.fsPath,
-    ".pphp",
+    ".pp",
     "phpx-mustache.d.ts"
   );
 
@@ -535,10 +528,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
   parseGlobalsWithTS(globalsText);
 
-  // watch for changes to your mustache stub
+  // watch for changes to your mustache stub (.pp/…)
   const stubPattern = new vscode.RelativePattern(
     wsFolder,
-    ".pphp/phpx-mustache.d.ts"
+    ".pp/phpx-mustache.d.ts"
   );
   const stubWatcher = vscode.workspace.createFileSystemWatcher(stubPattern);
   context.subscriptions.push(stubWatcher);
@@ -574,8 +567,6 @@ export async function activate(context: vscode.ExtensionContext) {
           const fnRegex = new RegExp(`function\\s+${word}\\s*\\(`, "g");
           let match: RegExpExecArray | null;
           while ((match = fnRegex.exec(text))) {
-            // positionAt(match.index) is at the `f` of `function`
-            // but we want to point at the start of the identifier:
             const idOffset = match.index + match[0].indexOf(word);
             const loc = document.positionAt(idOffset);
             return new vscode.Location(document.uri, loc);
@@ -594,9 +585,7 @@ export async function activate(context: vscode.ExtensionContext) {
           const line = document
             .lineAt(position.line)
             .text.slice(0, position.character);
-          if (!/\bon[A-Za-z]+\s*=\s*"[^"]*$/.test(line)) {
-            return;
-          }
+          if (!/\bon[A-Za-z]+\s*=\s*"[^"]*$/.test(line)) return;
 
           // 2) What the user’s already typed
           const wordRange = document.getWordRangeAtPosition(
@@ -628,9 +617,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 fn,
                 vscode.CompletionItemKind.Function
               );
-              if (wordRange) {
-                item.range = wordRange;
-              }
+              if (wordRange) item.range = wordRange;
               return item;
             });
         },
@@ -649,36 +636,24 @@ export async function activate(context: vscode.ExtensionContext) {
 
           /* ① must be inside an open tag -------------------------------- */
           const lt = uptoCursor.lastIndexOf("<");
-          if (lt === -1) {
-            return;
-          }
+          if (lt === -1) return;
 
           // Skip PHP open tags
-          if (/^<\?(php|=)?/.test(uptoCursor.slice(lt))) {
-            return;
-          }
+          if (/^<\?(php|=)?/.test(uptoCursor.slice(lt))) return;
 
           // Ensure not inside closing tag
-          if (uptoCursor[lt + 1] === "/") {
-            return;
-          }
+          if (uptoCursor[lt + 1] === "/") return;
 
           // Ensure not already closed
-          if (uptoCursor.slice(lt).includes(">")) {
-            return;
-          }
+          if (uptoCursor.slice(lt).includes(">")) return;
 
           /* 0️⃣  bail out if we’re already inside an attribute value  */
-          /* look for the *last* equal‑sign before the cursor *inside* the tag */
           const eq = uptoCursor.lastIndexOf("=");
           if (eq > lt) {
-            // any quote after that “=” that hasn’t been closed yet?
             const afterEq = uptoCursor.slice(eq + 1);
-            const openQuote = afterEq.match(/['"]/); // first quote
-            const closeQuote = afterEq.match(/(['"])[^'"]*\1\s*$/); // matching closer
-            if (openQuote && !closeQuote) {
-              return; // ↩︎  we’re inside  foo="|"
-            }
+            const openQuote = afterEq.match(/['"]/);
+            const closeQuote = afterEq.match(/(['"])[^'"]*\1\s*$/);
+            if (openQuote && !closeQuote) return; // inside  foo="|"
           }
 
           /* ② figure out which <Tag … ---------------------------------- */
@@ -694,17 +669,15 @@ export async function activate(context: vscode.ExtensionContext) {
           const word = doc.getWordRangeAtPosition(pos, /[\w-]+/);
           const partial = word ? doc.getText(word) : "";
 
-          /* ⑤ STATIC completions – the list you already had ------------- */
+          /* ⑤ STATIC completions – */
           let staticCompletions = buildAttrCompletions();
 
           // 🎯 NEW: Filter pp-attributes based on tag type
           if (tagName === "template") {
-            // Only show pp-for for template tags
             staticCompletions = staticCompletions.filter(
               (item) => item.label === "pp-for"
             );
           } else {
-            // For all other tags, show all pp-attributes EXCEPT pp-for
             staticCompletions = staticCompletions.filter(
               (item) => item.label !== "pp-for"
             );
@@ -717,13 +690,11 @@ export async function activate(context: vscode.ExtensionContext) {
                 (it.label as string).startsWith(partial)
             )
             .map((it) => {
-              if (word) {
-                it.range = word;
-              }
+              if (word) it.range = word;
               return it;
             });
 
-          /* ⑥ DYNAMIC completions – public props of the component -------- */
+          /* ⑥ DYNAMIC completions – public props of the component -------- */
           const dynamicItems = tagName
             ? buildDynamicAttrItems(
                 tagName,
@@ -731,28 +702,21 @@ export async function activate(context: vscode.ExtensionContext) {
                 partial,
                 propsProvider
               ).map((it) => {
-                if (word) {
-                  it.range = word;
-                }
+                if (word) it.range = word;
                 return it;
               })
             : [];
 
           /* ⑦ return both lists – COMPONENT props first, pp- attributes later */
-          dynamicItems.forEach((it) => {
-            // "0_" makes them sort *before* everything that starts with "1_"
-            it.sortText = `0_${it.label}`;
-          });
-          staticItems.forEach((it) => {
-            it.sortText = `1_${it.label}`;
-          });
+          dynamicItems.forEach((it) => (it.sortText = `0_${it.label}`));
+          staticItems.forEach((it) => (it.sortText = `1_${it.label}`));
 
-          return [...dynamicItems, ...staticItems]; // ← changed line
+          return [...dynamicItems, ...staticItems];
         },
       },
       " ",
       ":",
-      "\t", // disparadores típicos mientras escribes attrs
+      "\t",
       ..."abcdefghijklmnopqrstuvwxyz".split("")
     )
   );
@@ -784,7 +748,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // Load the dynamic components from class-log.json.
   loadComponentsFromClassLog();
 
-  // watch for changes to class‑log.json
+  // watch for changes to class-log.json
   const watcher = vscode.workspace.createFileSystemWatcher(
     new vscode.RelativePattern(
       vscode.workspace.workspaceFolders![0],
@@ -803,40 +767,25 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.languages.registerHoverProvider("php", {
       provideHover(doc, pos) {
-        /* ① Make sure we are inside an opening tag,   <Tag …          */
         const line = doc.lineAt(pos.line).text;
         const uptoCur = line.slice(0, pos.character);
         const lt = uptoCur.lastIndexOf("<");
-        if (lt === -1 || uptoCur[lt + 1] === "/") {
-          return;
-        }
-        if (uptoCur.slice(lt).includes(">")) {
-          return;
-        }
+        if (lt === -1 || uptoCur[lt + 1] === "/") return;
+        if (uptoCur.slice(lt).includes(">")) return;
 
-        /* ② What tag are we in?   <Button … */
         const tagMatch = uptoCur.slice(lt).match(/^<\s*([A-Za-z0-9_]+)/);
         const tagName = tagMatch?.[1];
-        if (!tagName) {
-          return;
-        }
+        if (!tagName) return;
 
-        /* ③ Which *word* are we hovering?  (php matches attr names well) */
         const wr = doc.getWordRangeAtPosition(pos, /[\w-]+/);
-        if (!wr) {
-          return;
-        }
+        if (!wr) return;
         const attr = doc.getText(wr);
 
-        /* ④ Ask our props‑provider for meta */
         const meta = propsProvider
           .getProps(tagName)
           .find((p) => p.name === attr);
-        if (!meta) {
-          return;
-        }
+        if (!meta) return;
 
-        /* ⑤ Build the Markdown tooltip */
         const md = new vscode.MarkdownString();
         md.appendCodeblock(
           meta.default
@@ -844,9 +793,7 @@ export async function activate(context: vscode.ExtensionContext) {
             : `${meta.name}: ${meta.type}`,
           "php"
         );
-        if (meta.doc) {
-          md.appendMarkdown("\n\n" + meta.doc);
-        }
+        if (meta.doc) md.appendMarkdown("\n\n" + meta.doc);
 
         return new vscode.Hover(md, wr);
       },
@@ -854,14 +801,9 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   const fqcnToFile: FqcnToFile = (fqcn) => {
-    // 🔧 FIX: Look up the file path directly from class-log.json data
-    // instead of using the processed cache
     const wsFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!wsFolder) {
-      return undefined;
-    }
+    if (!wsFolder) return undefined;
 
-    // Read the class-log.json directly
     const jsonUri = vscode.Uri.joinPath(
       wsFolder.uri,
       "settings",
@@ -872,9 +814,7 @@ export async function activate(context: vscode.ExtensionContext) {
       const data = fs.readFileSync(jsonUri.fsPath, "utf8");
       const jsonMapping = JSON.parse(data);
       const entry = jsonMapping[fqcn];
-      if (!entry) {
-        return undefined;
-      }
+      if (!entry) return undefined;
 
       const sourceRoot = vscode.workspace
         .getConfiguration("phpx-tag-support")
@@ -893,8 +833,8 @@ export async function activate(context: vscode.ExtensionContext) {
   };
 
   const propsProvider = new ComponentPropsProvider(
-    getComponentsFromClassLog(), // tag → FQCN
-    fqcnToFile // FQCN → file
+    getComponentsFromClassLog(),
+    fqcnToFile
   );
 
   // Force Peek Definition for Go to Definition globally.
@@ -910,8 +850,8 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     registerPhpHoverProvider(),
     registerPhpDefinitionProvider(),
-    registerPhpMarkupCompletionProvider(), // outside <script>
-    registerPhpScriptCompletionProvider() // inside  <script>
+    registerPhpMarkupCompletionProvider(),
+    registerPhpScriptCompletionProvider()
   );
 
   // Register the command for auto-import.
@@ -969,46 +909,36 @@ export async function activate(context: vscode.ExtensionContext) {
           doc: vscode.TextDocument,
           pos: vscode.Position
         ): vscode.CompletionItem[] | undefined {
-          // ① Grab the entire “root” chain (e.g. "user.profile.address") and the partial after the last dot.
+          // ① Grab the entire “root” chain within a single-brace context
           const line = doc.lineAt(pos.line).text;
           const uptoCursor = line.slice(0, pos.character);
-          const lastOpen = uptoCursor.lastIndexOf("{{");
-          const exprPrefix = uptoCursor.slice(lastOpen + 2); // e.g. "user.profile.address.st"
 
-          // Notice the regex: we allow ANY number of “.foo” segments, then a dot, then capture the partial.
+          // Find last single "{", but ignore if it’s a double "{{"
+          const lastOpen = uptoCursor.lastIndexOf("{");
+          if (
+            lastOpen === -1 ||
+            uptoCursor[lastOpen - 1] === "{" // it’s actually "{{"
+          ) {
+            return;
+          }
+          const exprPrefix = uptoCursor.slice(lastOpen + 1);
+
           const m = /([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.\s*(\w*)$/.exec(
             exprPrefix
           );
-          if (!m) {
-            return;
-          }
+          if (!m) return;
 
           const [, root, partial] = m;
-          // e.g. root = "user.profile.address", partial = "st"
 
-          // ② If the root is one of the special names, bail out and let those providers handle it.
-          const special = new Set(["pphp", "store", "searchParams"]);
-          if (special.has(root)) {
-            return;
-          }
+          const special = new Set(["pp", "store", "searchParams"]);
+          if (special.has(root)) return;
 
-          // ③ Split the root chain on “.” and descend into globalStubTypes.
-          //    globalStubTypes was populated in parseGlobalsWithTS(…) so that
-          //    globalStubTypes["user"] is a ts.TypeLiteralNode of “user”’s shape.
           const parts = root.split(".");
           let typeNode = globalStubTypes[parts[0]];
-          if (!typeNode) {
-            // No top‐level stub for “parts[0]”
-            return;
-          }
+          if (!typeNode) return;
 
-          // Descend for each segment after the first:
-          //   e.g. if parts = ["user","profile","address"], first we had typeNode = globalStubTypes["user"].
-          //   Now find a PropertySignature named “profile” inside that TypeLiteralNode,
-          //   whose type is itself a TypeLiteralNode, then continue into “address.”
           for (let i = 1; i < parts.length; i++) {
             const propName = parts[i];
-            // Find the PropertySignature whose name text === propName:
             const memberSig = typeNode.members.find(
               (member) =>
                 ts.isPropertySignature(member) &&
@@ -1020,18 +950,12 @@ export async function activate(context: vscode.ExtensionContext) {
               !memberSig.type ||
               !ts.isTypeLiteralNode(memberSig.type)
             ) {
-              // Either the property doesn’t exist, or it isn’t an object literal type,
-              // so we can’t descend further.
-              typeNode = null!;
+              typeNode = null as any;
               break;
             }
-
-            // Now step into the nested TypeLiteralNode:
             typeNode = memberSig.type;
           }
 
-          // ④ After descending, “typeNode” is either the final nested TypeLiteralNode or null/undefined.
-          //    If we ended up with a valid node, extract its immediate property names.
           let stubProps: string[] = [];
           if (typeNode) {
             stubProps = typeNode.members
@@ -1039,7 +963,6 @@ export async function activate(context: vscode.ExtensionContext) {
               .map((ps) => (ps.name as ts.Identifier).text);
           }
 
-          // ⑤ Build completion items out of stubProps that match the “partial.”
           const out: vscode.CompletionItem[] = [];
           const seen = new Set<string>();
 
@@ -1048,18 +971,15 @@ export async function activate(context: vscode.ExtensionContext) {
               p,
               vscode.CompletionItemKind.Property
             );
-            it.sortText = "0_" + p; // “0_” so that real‐project props sort before JS natives
+            it.sortText = "0_" + p;
             out.push(it);
             seen.add(p);
           }
 
-          // ⑥ If there are zero or one “project” props, treat the value as a “scalar” and add JS native members:
           const treatAsScalar = stubProps.length <= 1;
           if (treatAsScalar) {
             for (const k of JS_NATIVE_MEMBERS) {
-              if (!k.startsWith(partial) || seen.has(k)) {
-                continue;
-              }
+              if (!k.startsWith(partial) || seen.has(k)) continue;
 
               const kind =
                 typeof ("" as any)[k] === "function"
@@ -1068,10 +988,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
               const it = new vscode.CompletionItem(k, kind);
               if (kind === vscode.CompletionItemKind.Method) {
-                // Insert parentheses if it’s a function
                 it.insertText = new vscode.SnippetString(`${k}()$0`);
               }
-              it.sortText = "1_" + k; // “1_” so JS natives come after project props
+              it.sortText = "1_" + k;
               out.push(it);
             }
           }
@@ -1147,7 +1066,6 @@ export async function activate(context: vscode.ExtensionContext) {
       return;
     }
 
-    // one timer per document
     const key = doc.uri.toString();
     clearTimeout(pendingTimers.get(key));
 
@@ -1186,7 +1104,6 @@ export async function activate(context: vscode.ExtensionContext) {
       nativePropertyDecorationType
     );
     validateMissingImports(document, diagnosticCollection);
-    // Add fetchFunction validation
     const fetchFunctionDiags =
       fetchFunctionDiagnosticProvider.validateDocument(document);
     fetchFunctionDiagnostics.set(document.uri, fetchFunctionDiags);
@@ -1246,7 +1163,8 @@ export async function activate(context: vscode.ExtensionContext) {
     wsFolder
   );
 
-  // PPHP Script redirect providers (for pphp.redirect() calls)
+  // NOTE: The underlying provider classes still handle parsing.
+  // If they look for "pphp.redirect", update those implementations too.
   const pphpScriptRedirectDiagnosticProvider =
     new PphpScriptRedirectDiagnosticProvider(routeProvider);
   const pphpScriptRedirectHoverProvider = new PphpScriptRedirectHoverProvider(
@@ -1258,8 +1176,6 @@ export async function activate(context: vscode.ExtensionContext) {
     new PphpScriptRedirectDefinitionProvider(routeProvider, wsFolder);
 
   // ── Register Route-related Providers ───────────────────────────
-
-  // 2. Hover provider for href values
   context.subscriptions.push(
     vscode.languages.registerHoverProvider(
       { language: "php", scheme: "file" },
@@ -1267,7 +1183,6 @@ export async function activate(context: vscode.ExtensionContext) {
     )
   );
 
-  // 3. Definition provider for href values (Ctrl+Click navigation) 👈 NEW
   context.subscriptions.push(
     vscode.languages.registerDefinitionProvider(
       { language: "php", scheme: "file" },
@@ -1275,19 +1190,15 @@ export async function activate(context: vscode.ExtensionContext) {
     )
   );
 
-  // 4. Function to validate routes in document
   const hrefDiagnostics =
     vscode.languages.createDiagnosticCollection("phpx-href");
   const validateRoutes = (document: vscode.TextDocument) => {
-    if (document.languageId !== "php") {
-      return;
-    }
+    if (document.languageId !== "php") return;
 
     const diagnostics = hrefDiagnosticProvider.validateDocument(document);
     hrefDiagnostics.set(document.uri, diagnostics);
   };
 
-  // 5. Watch for changes to files-list.json
   const filesListPattern = new vscode.RelativePattern(
     wsFolder,
     "settings/files-list.json"
@@ -1298,8 +1209,6 @@ export async function activate(context: vscode.ExtensionContext) {
   const refreshRoutes = () => {
     routeProvider.refresh();
     console.log("🔄 Routes refreshed from files-list.json");
-
-    // Re-validate all open documents
     vscode.workspace.textDocuments.forEach(validateRoutes);
   };
 
@@ -1309,7 +1218,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(filesListWatcher);
 
-  // 6. Validate routes on document events
   vscode.workspace.onDidChangeTextDocument(
     (e) => validateRoutes(e.document),
     null,
@@ -1324,56 +1232,39 @@ export async function activate(context: vscode.ExtensionContext) {
 
   vscode.window.onDidChangeActiveTextEditor(
     (editor) => {
-      if (editor) {
-        validateRoutes(editor.document);
-      }
+      if (editor) validateRoutes(editor.document);
     },
     null,
     context.subscriptions
   );
 
-  // Combined diagnostic collection for both href and PHP redirects
   const phpRoutesDiagnosticCollection =
     vscode.languages.createDiagnosticCollection("routes");
 
-  // Function to update diagnostics for a document
   const updateDiagnostics = (document: vscode.TextDocument) => {
-    if (!document) {
-      return;
-    }
-
-    if (document.languageId !== "html" && document.languageId !== "php") {
-      return;
-    }
+    if (!document) return;
+    if (document.languageId !== "html" && document.languageId !== "php") return;
 
     const diagnostics: vscode.Diagnostic[] = [];
-
     diagnostics.push(...hrefDiagnosticProvider.validateDocument(document));
-
     diagnostics.push(
       ...phpRedirectDiagnosticProvider.validateDocument(document)
     );
-
     diagnostics.push(
       ...pphpScriptRedirectDiagnosticProvider.validateDocument(document)
     );
-
     diagnostics.push(...srcDiagnosticProvider.validateDocument(document));
 
     phpRoutesDiagnosticCollection.set(document.uri, diagnostics);
   };
-  // Register href providers for HTML and PHP files
+
   const htmlPhpSelector = [
     { scheme: "file", language: "html" },
     { scheme: "file", language: "php" },
   ];
-
-  // Register PHP-only providers
   const phpSelector = { scheme: "file", language: "php" };
 
-  // Register all providers with improved triggers
   context.subscriptions.push(
-    // ── Href providers (HTML + PHP) ──
     vscode.languages.registerHoverProvider(htmlPhpSelector, hrefHoverProvider),
     vscode.languages.registerHoverProvider(["html", "php"], srcHoverProvider),
     vscode.languages.registerCompletionItemProvider(
@@ -1389,14 +1280,13 @@ export async function activate(context: vscode.ExtensionContext) {
       srcDefinitionProvider
     ),
 
-    // Href completion with triggers for quotes and equals
     vscode.languages.registerCompletionItemProvider(
       htmlPhpSelector,
       hrefCompletionProvider,
-      '"', // Trigger when typing opening quote: href="
-      "'", // Trigger when typing single quote: href='
-      "=", // Trigger when typing equals: href=
-      " " // Keep existing space trigger
+      '"',
+      "'",
+      "=",
+      " "
     ),
 
     vscode.languages.registerDefinitionProvider(
@@ -1404,20 +1294,18 @@ export async function activate(context: vscode.ExtensionContext) {
       hrefDefinitionProvider
     ),
 
-    // ── PHP redirect providers (PHP only) ──
     vscode.languages.registerHoverProvider(
       phpSelector,
       phpRedirectHoverProvider
     ),
 
-    // PHP redirect completion with triggers for quotes and parentheses
     vscode.languages.registerCompletionItemProvider(
       phpSelector,
       phpRedirectCompletionProvider,
-      '"', // Trigger when typing opening quote: Request::redirect("
-      "'", // Trigger when typing single quote: Request::redirect('
-      "(", // Trigger when typing parentheses: Request::redirect(
-      " " // Keep existing space trigger
+      '"',
+      "'",
+      "(",
+      " "
     ),
 
     vscode.languages.registerDefinitionProvider(
@@ -1425,51 +1313,41 @@ export async function activate(context: vscode.ExtensionContext) {
       phpRedirectDefinitionProvider
     ),
 
-    // ── PPHP Script redirect providers ──
+    // NOTE: Change these providers’ internals to recognize pp.redirect(…) as well
     vscode.languages.registerHoverProvider(
       phpSelector,
       pphpScriptRedirectHoverProvider
     ),
-
-    // PPHP script redirect completion with triggers for quotes and parentheses
     vscode.languages.registerCompletionItemProvider(
       phpSelector,
       pphpScriptRedirectCompletionProvider,
-      '"', // Trigger when typing opening quote: pphp.redirect("
-      "'", // Trigger when typing single quote: pphp.redirect('
-      "(", // Trigger when typing parentheses: pphp.redirect(
-      " " // Keep existing space trigger
+      '"',
+      "'",
+      "(",
+      " "
     ),
-
-    // Definition provider for pphp.redirect() values (Ctrl+Click navigation)
     vscode.languages.registerDefinitionProvider(
       phpSelector,
       pphpScriptRedirectDefinitionProvider
     ),
 
-    // ── Diagnostic collection and listeners ──
     phpRoutesDiagnosticCollection,
 
-    // Document change listeners
     vscode.workspace.onDidOpenTextDocument(updateDiagnostics),
     vscode.workspace.onDidChangeTextDocument((event) => {
       updateDiagnostics(event.document);
     }),
     vscode.workspace.onDidSaveTextDocument(updateDiagnostics),
 
-    // Refresh routes command
     vscode.commands.registerCommand("routes.refresh", () => {
       routeProvider.refresh();
-      // Re-validate all open documents
       vscode.workspace.textDocuments.forEach(updateDiagnostics);
       vscode.window.showInformationMessage("Routes refreshed successfully!");
     })
   );
 
-  // Initial validation for already open documents
   vscode.workspace.textDocuments.forEach(updateDiagnostics);
 
-  // 7. Command to refresh routes manually
   context.subscriptions.push(
     vscode.commands.registerCommand("phpx-tag-support.refreshRoutes", () => {
       refreshRoutes();
@@ -1477,7 +1355,6 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // 8. Command to show all available routes
   context.subscriptions.push(
     vscode.commands.registerCommand("phpx-tag-support.showRoutes", () => {
       const routes = routeProvider.getRoutes();
@@ -1499,28 +1376,22 @@ export async function activate(context: vscode.ExtensionContext) {
   const fetchFunctionDiagnosticProvider = new FetchFunctionDiagnosticProvider();
 
   context.subscriptions.push(
-    // Completion provider - triggers when typing quotes in fetchFunction
     vscode.languages.registerCompletionItemProvider(
       { language: "php", scheme: "file" },
       fetchFunctionCompletionProvider,
-      "'", // Trigger on single quote
-      '"' // Trigger on double quote
+      "'",
+      '"'
     ),
-
-    // Definition provider - Ctrl+Click navigation
     vscode.languages.registerDefinitionProvider(
       { language: "php", scheme: "file" },
       fetchFunctionDefinitionProvider
     ),
-
-    // Hover provider - show function info on hover
     vscode.languages.registerHoverProvider(
       { language: "php", scheme: "file" },
       fetchFunctionHoverProvider
     )
   );
 
-  // Add fetchFunction diagnostics to existing validation
   const fetchFunctionDiagnostics =
     vscode.languages.createDiagnosticCollection("fetch-function");
   context.subscriptions.push(fetchFunctionDiagnostics);
@@ -1537,7 +1408,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // ── Register PP-Sync Providers ─────────────────────────────────
   context.subscriptions.push(
-    // Completion provider for pphp.sync() calls
+    // Completion provider for pp.sync() calls
     vscode.languages.registerCompletionItemProvider(
       phpSelector,
       ppSyncCompletionProvider,
@@ -1561,27 +1432,21 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.languages.createDiagnosticCollection("pp-sync");
   context.subscriptions.push(ppSyncDiagnostics);
 
-  // ⚠️ FIXED: Ensure refresh happens BEFORE validation
   const validatePpSync = async (document: vscode.TextDocument) => {
-    if (document.languageId !== "php") {
-      return;
-    }
+    if (document.languageId !== "php") return;
 
-    // 🔄 ALWAYS refresh before validating to get latest sync tables
     await ppSyncProvider.refresh();
 
     const diagnostics = ppSyncDiagnosticProvider.validateDocument(document);
     ppSyncDiagnostics.set(document.uri, diagnostics);
   };
 
-  // ── Watch for PHP file changes to refresh PP-Sync ─────────────
   const phpFileWatcher = vscode.workspace.createFileSystemWatcher(
     new vscode.RelativePattern(wsFolder, "src/app/**/*.php")
   );
 
   const refreshPpSyncAndValidateAll = async () => {
     await ppSyncProvider.refresh();
-    // Re-validate all open PHP documents
     for (const doc of vscode.workspace.textDocuments) {
       if (doc.languageId === "php") {
         const diagnostics = ppSyncDiagnosticProvider.validateDocument(doc);
@@ -1600,7 +1465,6 @@ export async function activate(context: vscode.ExtensionContext) {
           `✅ PP-Sync refreshed! Found ${count} sync tables.`
         );
 
-        // Re-validate all open documents
         for (const doc of vscode.workspace.textDocuments) {
           if (doc.languageId === "php") {
             await validatePpSync(doc);
@@ -1609,7 +1473,6 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     ),
 
-    // ADD THIS MISSING COMMAND
     vscode.commands.registerCommand("phpx-tag-support.showPpSyncTables", () => {
       const tables = ppSyncProvider.getSyncValues();
 
@@ -1662,46 +1525,30 @@ function registerAttributeValueCompletionProvider(
         const line = document.lineAt(position.line).text;
         const cursorOffset = position.character;
 
-        // Check if cursor is inside attribute value quotes
         const valueContext = getAttributeValueContext(line, cursorOffset);
-        if (!valueContext) {
-          return [];
-        }
+        if (!valueContext) return [];
 
-        const { tagName, attributeName, currentValue } = valueContext;
+        const { tagName, attributeName } = valueContext;
 
-        // Get props for this component
         const props = propsProvider.getProps(tagName);
         const propMeta = props.find((p) => p.name === attributeName);
 
-        if (!propMeta || !propMeta.allowed) {
-          return [];
-        }
+        if (!propMeta || !propMeta.allowed) return [];
 
-        /* ──────────────────────────────────────────────────────────────
-         * COMBINE AND DEDUPLICATE VALUES (same logic as buildDynamicAttrItems)
-         * ─────────────────────────────────────────────────────────── */
         const combinedValues = new Set<string>();
 
-        // Add documentation values first
         if (propMeta.allowed) {
           if (propMeta.allowed.includes("|")) {
             propMeta.allowed.split("|").forEach((val) => {
               const trimmedVal = val.trim();
-              if (trimmedVal) {
-                // Only add non-empty values
-                combinedValues.add(trimmedVal);
-              }
+              if (trimmedVal) combinedValues.add(trimmedVal);
             });
           } else {
             const trimmedVal = propMeta.allowed.trim();
-            if (trimmedVal) {
-              combinedValues.add(trimmedVal);
-            }
+            if (trimmedVal) combinedValues.add(trimmedVal);
           }
         }
 
-        // Add property default value (ensure no duplicates)
         if (
           propMeta.default &&
           propMeta.default !== "null" &&
@@ -1710,41 +1557,37 @@ function registerAttributeValueCompletionProvider(
           combinedValues.add(propMeta.default.trim());
         }
 
-        // Convert to array and prioritize default value
         let finalValues: string[];
         if (
           propMeta.default &&
           propMeta.default !== "null" &&
           combinedValues.has(propMeta.default.trim())
         ) {
-          const defaultVal = propMeta.default.trim();
-          const otherValues = Array.from(combinedValues).filter(
-            (v) => v !== defaultVal
-          );
-          finalValues = [defaultVal, ...otherValues.sort()];
+          const def = propMeta.default.trim();
+          finalValues = [
+            def,
+            ...Array.from(combinedValues)
+              .filter((v) => v !== def)
+              .sort(),
+          ];
         } else {
           finalValues = Array.from(combinedValues).sort();
         }
 
-        // Create completion items for the combined values
         return finalValues.map((value) => {
           const item = new vscode.CompletionItem(
             value,
             vscode.CompletionItemKind.Value
           );
-
-          // Replace the entire quoted value
           item.insertText = value;
           item.detail = `${propMeta.type} value`;
 
-          // Add documentation
           const md = new vscode.MarkdownString();
           md.appendCodeblock(`${attributeName}="${value}"`, "php");
           md.appendMarkdown(
             `\n\nValid value for **${attributeName}** property`
           );
 
-          // Mark default value with special styling and preselect it
           if (propMeta.default && propMeta.default.trim() === value) {
             md.appendMarkdown(`\n\n✨ _This is the default value_`);
             item.preselect = true;
@@ -1752,14 +1595,13 @@ function registerAttributeValueCompletionProvider(
           }
 
           item.documentation = md;
-
           return item;
         });
       },
     },
-    '"', // Trigger on quote
-    "'", // Trigger on single quote
-    " " // Trigger on space
+    '"',
+    "'",
+    " "
   );
 }
 
@@ -1771,42 +1613,28 @@ function getAttributeValueContext(
   attributeName: string;
   currentValue: string;
 } | null {
-  // Look for pattern: <TagName ... attributeName="currentValue|cursor"
   const beforeCursor = line.substring(0, cursorOffset);
   const afterCursor = line.substring(cursorOffset);
 
-  // Find the opening tag
   const tagMatch = /<\s*([A-Z][A-Za-z0-9_]*)\b[^>]*$/.exec(beforeCursor);
-  if (!tagMatch) {
-    return null;
-  }
+  if (!tagMatch) return null;
 
   const tagName = tagMatch[1];
 
-  // Find the attribute we're currently in
   const attrMatch = /([A-Za-z0-9_-]+)\s*=\s*"([^"]*?)$/.exec(beforeCursor);
-  if (!attrMatch) {
-    return null;
-  }
+  if (!attrMatch) return null;
 
   const attributeName = attrMatch[1];
   const currentValue = attrMatch[2];
 
-  // Make sure we're inside quotes (not after closing quote)
   const nextQuoteIndex = afterCursor.indexOf('"');
-  if (nextQuoteIndex === -1) {
-    return null; // No closing quote found
-  }
+  if (nextQuoteIndex === -1) return null;
 
-  return {
-    tagName,
-    attributeName,
-    currentValue,
-  };
+  return { tagName, attributeName, currentValue };
 }
 
 /* ────────────────────────────────────────────────────────────── *
- *                 Native‑JS hover & signature‑help               *
+ *                 Native-JS hover & signature-help               *
  * ────────────────────────────────────────────────────────────── */
 type NativeInfo = { sig: string; jsDoc?: string };
 
@@ -1827,7 +1655,6 @@ const PARAM_TABLE: Record<string, string[]> = {
   includes: ["searchString", "position"],
 };
 
-/** Build (or return) the info for a given member name */
 function nativeInfo(name: string): NativeInfo | undefined {
   if (NATIVE_CACHE.has(name)) {
     return NATIVE_CACHE.get(name);
@@ -1862,55 +1689,41 @@ function nativeInfo(name: string): NativeInfo | undefined {
 }
 
 export function activateNativeJsHelp(ctx: vscode.ExtensionContext) {
-  // ── Hover inside {{ … }} ─────────────────────────────────────
+  // ── Hover inside { … } ─────────────────────────────────────
   ctx.subscriptions.push(
     vscode.languages.registerHoverProvider("php", {
       provideHover(doc, pos) {
-        if (!insideMustache(doc, pos)) {
-          return;
-        }
+        if (!insideMustache(doc, pos)) return;
 
         const wr = doc.getWordRangeAtPosition(pos, /\w+/);
-        if (!wr) {
-          return;
-        }
+        if (!wr) return;
         const word = doc.getText(wr);
         const info = nativeInfo(word);
-        if (!info) {
-          return;
-        }
+        if (!info) return;
 
         const md = new vscode.MarkdownString();
         md.appendCodeblock(info.sig, "javascript");
-        if (info.jsDoc) {
-          md.appendMarkdown("\n" + info.jsDoc);
-        }
+        if (info.jsDoc) md.appendMarkdown("\n" + info.jsDoc);
         return new vscode.Hover(md, wr);
       },
     })
   );
 
-  // ── Signature‑help: foo.substring(|) ─────────────────────────
+  // ── Signature-help: foo.substring(|) ─────────────────────────
   ctx.subscriptions.push(
     vscode.languages.registerSignatureHelpProvider(
       "php",
       {
         provideSignatureHelp(doc, pos) {
-          if (!insideMustache(doc, pos)) {
-            return null;
-          }
+          if (!insideMustache(doc, pos)) return null;
 
           const line = doc.lineAt(pos.line).text.slice(0, pos.character);
           const m = /(?:\.)([A-Za-z_$][\w$]*)\(/.exec(line);
-          if (!m) {
-            return null;
-          }
+          if (!m) return null;
 
           const name = m[1];
           const info = nativeInfo(name);
-          if (!info) {
-            return null;
-          }
+          if (!info) return null;
 
           const paramLabels = info.sig
             .replace(/^[^(]+\(([^)]*)\).*/, "$1")
@@ -1921,7 +1734,6 @@ export function activateNativeJsHelp(ctx: vscode.ExtensionContext) {
           const sig = new SignatureInformation(info.sig);
           sig.parameters = paramLabels.map((p) => new ParameterInformation(p));
 
-          /* which arg? – count commas since the last '(' */
           const callSoFar = line.slice(line.lastIndexOf("(") + 1);
           const active = Math.min(
             callSoFar.split(",").length - 1,
@@ -1935,72 +1747,18 @@ export function activateNativeJsHelp(ctx: vscode.ExtensionContext) {
           return sh;
         },
       },
-      "(", // trigger when user types “(”
-      "," // update on “,”
+      "(",
+      ","
     )
   );
 }
 
 /* ────────────────────────────────────────────────────────────── *
- *                    EDITOR CONFIGURATION UPDATE                   *
- * ────────────────────────────────────────────────────────────── */
-
-/* ── 0️⃣  A flat list of native members you want to offer ───────────── */
-const JS_NATIVE_MEMBERS = [
-  ...NATIVE_STRING_METHODS,
-  ...NATIVE_STRING_PROPS,
-  ...Object.getOwnPropertyNames(Array.prototype),
-  ...Object.getOwnPropertyNames(Number.prototype),
-  ...Object.getOwnPropertyNames(Boolean.prototype),
-].filter((k) => /^[a-z]/i.test(k)); // ignore the weird symbols
-
-/* ── 1️⃣  Utility: is the position inside an *open* {{ … }} pair? ───── */
-function insideMustache(
-  doc: vscode.TextDocument,
-  pos: vscode.Position
-): boolean {
-  const before = doc.getText(new vscode.Range(new vscode.Position(0, 0), pos));
-  const open = before.lastIndexOf("{{");
-  const close = before.lastIndexOf("}}");
-  return open !== -1 && open > close;
-}
-
-function updateStringDecorations(document: vscode.TextDocument) {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor || editor.document !== document) {
-    return;
-  }
-  const text = document.getText();
-  const decos: vscode.DecorationOptions[] = [];
-  let mustacheMatch: RegExpExecArray | null;
-  // reuse your JS_EXPR_REGEX = /{{\s*(.*?)\s*}}/g
-  while ((mustacheMatch = JS_EXPR_REGEX.exec(text))) {
-    const inner = mustacheMatch[1];
-    const baseOffset = mustacheMatch.index + mustacheMatch[0].indexOf(inner);
-    // match single or double-quoted strings
-    const stringRegex = /(['"])(?:(?=(\\?))\2.)*?\1/g;
-    let strMatch: RegExpExecArray | null;
-    while ((strMatch = stringRegex.exec(inner))) {
-      const start = baseOffset + strMatch.index;
-      const end = start + strMatch[0].length;
-      decos.push({
-        range: new vscode.Range(
-          document.positionAt(start),
-          document.positionAt(end)
-        ),
-      });
-    }
-  }
-  editor.setDecorations(stringDecorationType, decos);
-}
-
-/* ────────────────────────────────────────────────────────────── *
- *                        LANGUAGE PROVIDERS                        *
+ *                        LANGUAGE PROVIDERS                      *
  * ────────────────────────────────────────────────────────────── */
 
 const updateEditorConfiguration = (): void => {
   const editorConfig = vscode.workspace.getConfiguration("editor");
-  // Use peek for single and multiple go-to definition actions.
   editorConfig.update(
     "gotoLocation.single",
     "peek",
@@ -2018,9 +1776,7 @@ const registerPhpHoverProvider = () => {
   return vscode.languages.registerHoverProvider(PHP_LANGUAGE, {
     provideHover(document, position) {
       const range = document.getWordRangeAtPosition(position, PHP_TAG_REGEX);
-      if (!range) {
-        return;
-      }
+      if (!range) return;
       const word = document.getText(range);
       const tagName = word.replace(/[</]/g, "");
       const useMap = parsePhpUseStatements(document.getText());
@@ -2042,15 +1798,11 @@ const registerPhpDefinitionProvider = () => {
   return vscode.languages.registerDefinitionProvider(PHP_LANGUAGE, {
     async provideDefinition(document, position) {
       const range = document.getWordRangeAtPosition(position, PHP_TAG_REGEX);
-      if (!range) {
-        return;
-      }
+      if (!range) return;
       const word = document.getText(range);
       const tagName = word.replace(/[</]/g, "");
       const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-      if (!workspaceFolder) {
-        return;
-      }
+      if (!workspaceFolder) return;
       const jsonUri = vscode.Uri.joinPath(
         workspaceFolder.uri,
         "settings",
@@ -2077,9 +1829,7 @@ const registerPhpDefinitionProvider = () => {
       }
       if (!mapping) {
         const useMap = parsePhpUseStatements(document.getText());
-        if (!useMap.has(tagName)) {
-          return;
-        }
+        if (!useMap.has(tagName)) return;
         const fullClass = useMap.get(tagName)!;
         mapping = { filePath: fullClass.replace(/\\\\/g, "/") + ".php" };
       } else {
@@ -2097,16 +1847,16 @@ const registerPhpDefinitionProvider = () => {
 };
 
 const PHP_SELECTOR: vscode.DocumentSelector = [
-  { language: PHP_LANGUAGE, scheme: "file" }, // saved *.php
-  { language: PHP_LANGUAGE, scheme: "untitled" }, // unsaved but already PHP
-  { language: "plaintext", scheme: "untitled" }, // brand-new Untitled-x
+  { language: PHP_LANGUAGE, scheme: "file" },
+  { language: PHP_LANGUAGE, scheme: "untitled" },
+  { language: "plaintext", scheme: "untitled" },
 ];
 
-const VAR_NAMES = ["pphp", "store", "searchParams"] as const;
+const VAR_NAMES = ["pp", "store", "searchParams"] as const;
 type VarName = (typeof VAR_NAMES)[number];
 
 const CLS_MAP: Record<VarName, keyof typeof classStubs> = {
-  pphp: "PPHP",
+  pp: "PPHP",
   store: "PPHPLocalStore",
   searchParams: "SearchParamsManager",
 };
@@ -2128,12 +1878,10 @@ const variableItems = (prefix: string) =>
     (v) => new vscode.CompletionItem(v, vscode.CompletionItemKind.Variable)
   );
 
-/* member completions  pphp.|store.|… ------------------------------------ */
+/* member completions  pp.|store.|… -------------------------------------- */
 const memberItems = (line: string) => {
-  const m = /(pphp|store|searchParams)\.\w*$/.exec(line);
-  if (!m) {
-    return;
-  }
+  const m = /(pp|store|searchParams)\.\w*$/.exec(line);
+  if (!m) return;
   const cls = CLS_MAP[m[1] as VarName];
   return classStubs[cls].map((stub) => {
     const kind = stub.signature.includes("(")
@@ -2154,34 +1902,28 @@ const registerPhpScriptCompletionProvider = () =>
     PHP_SELECTOR,
     {
       provideCompletionItems(doc, pos) {
-        if (!insideScript(doc, pos)) {
-          return;
-        }
+        if (!insideScript(doc, pos)) return;
 
         const line = doc.lineAt(pos.line).text;
         const uptoCursor = line.slice(0, pos.character);
 
         /* a) member list after the dot */
         const mem = memberItems(uptoCursor);
-        if (mem?.length) {
-          return mem;
-        }
+        if (mem?.length) return mem;
 
-        /* b) variable list while typing “pph…” etc. */
+        /* b) variable list while typing “pp…” etc. */
         const prefix = uptoCursor.match(/([A-Za-z_]*)$/)?.[1] ?? "";
-        if (prefix.length) {
-          return variableItems(prefix);
-        }
+        if (prefix.length) return variableItems(prefix);
 
         return;
       },
     },
-    ".", // trigger for member list
-    ..."abcdefghijklmnopqrstuvwxyz".split("") // make vars appear on letters
+    ".",
+    ..."abcdefghijklmnopqrstuvwxyz".split("")
   );
 
 /* ────────────────────────────────────────────────────────────── *
- *  2️⃣  completions OUTSIDE <script>  (existing behaviour)       *
+ *  2️⃣  completions OUTSIDE <script>                             *
  * ────────────────────────────────────────────────────────────── */
 
 const registerPhpMarkupCompletionProvider = () =>
@@ -2189,9 +1931,7 @@ const registerPhpMarkupCompletionProvider = () =>
     PHP_SELECTOR,
     {
       async provideCompletionItems(doc, pos) {
-        if (insideScript(doc, pos)) {
-          return;
-        }
+        if (insideScript(doc, pos)) return;
 
         const fullBefore = doc.getText(
           new vscode.Range(new vscode.Position(0, 0), pos)
@@ -2199,33 +1939,19 @@ const registerPhpMarkupCompletionProvider = () =>
         const line = doc.lineAt(pos.line).text;
         const uptoCursor = line.slice(0, pos.character);
 
-        /* ⓵ bail-outs that existed before ----------------------- */
-        if (isInsidePrismaCall(fullBefore)) {
-          return [];
-        }
-        if (/^\s*<\?[A-Za-z=]*$/i.test(uptoCursor)) {
-          return [];
-        }
-        if (isInsideMustache(fullBefore)) {
-          return [];
-        }
+        if (isInsidePrismaCall(fullBefore)) return [];
+        if (/^\s*<\?[A-Za-z=]*$/i.test(uptoCursor)) return [];
+        if (isInsideMustacheText(fullBefore)) return [];
 
-        /* ⓶ member completions  (phpx.prop inside HTML attr JS?) */
         const mem = memberItems(uptoCursor);
-        if (mem?.length) {
-          return mem;
-        }
+        if (mem?.length) return mem;
 
-        /* ⓷ top-level var names */
         const prefix = uptoCursor.match(/([A-Za-z_]*)$/)?.[1] ?? "";
         if (prefix.length) {
           const vars = variableItems(prefix);
-          if (vars.length) {
-            return vars;
-          }
+          if (vars.length) return vars;
         }
 
-        /* ⓸ component + snippet completions (unchanged) -------- */
         const items = await buildComponentCompletions(doc, line, pos);
         items.push(...maybeAddPhpXClassSnippet(doc, line, pos));
         return items;
@@ -2234,7 +1960,7 @@ const registerPhpMarkupCompletionProvider = () =>
     ".",
     "p",
     "s",
-    "_" // triggers as before
+    "_"
   );
 
 function isInsidePrismaCall(fullBefore: string): boolean {
@@ -2251,11 +1977,19 @@ function isInsidePrismaCall(fullBefore: string): boolean {
   return false;
 }
 
-function isInsideMustache(before: string): boolean {
-  const lastOpen = before.lastIndexOf("{{");
-  const lastClose = before.lastIndexOf("}}");
-  return lastOpen > lastClose;
+/** Double-brace legacy helper replaced by single-brace aware check */
+function isInsideMustacheText(before: string): boolean {
+  // We consider inside if the last unmatched single “{” appears after the last “}”
+  // and it’s not part of a “{{”.
+  const lastOpen = before.lastIndexOf("{");
+  const lastClose = before.lastIndexOf("}");
+  if (lastOpen <= lastClose) return false;
+  return before[lastOpen - 1] !== "{"; // guard against legacy "{{"
 }
+
+/* ────────────────────────────────────────────────────────────── *
+ *   Component completions (unchanged behavior)                   *
+ * ────────────────────────────────────────────────────────────── */
 
 async function buildComponentCompletions(
   document: vscode.TextDocument,
@@ -2264,28 +1998,15 @@ async function buildComponentCompletions(
 ): Promise<vscode.CompletionItem[]> {
   await loadComponentsFromClassLog();
 
-  /* ‼️ EARLY-EXIT – only suggest components when we are **at** the tag name */
   const lineText = line.slice(0, position.character);
   const lt = lineText.lastIndexOf("<");
 
   if (lt !== -1) {
-    /* ── Case ① we are inside an opening tag -------------------------------- */
-    let head = lineText.slice(lt + 1); // text after the "<"
-    if (head.startsWith("/")) {
-      head = head.slice(1);
-    } // ignore closing-slash
-
-    // any blank OR quote ⇒ we're past the tag name (attrs or value) – bail out
-    if (/\s|['"]/.test(head)) {
-      return [];
-    }
+    let head = lineText.slice(lt + 1);
+    if (head.startsWith("/")) head = head.slice(1);
+    if (/\s|['"]/.test(head)) return [];
   } else {
-    /* ── Case ② no "<" to the left – user typed "Acco|" first --------------- */
-    // We allow this only if everything before the word is just whitespace.
-    // Otherwise we'd be in the middle of text/JS and shouldn't offer tags.
-    if (!/^\s*$/.test(lineText.replace(/\w*$/, ""))) {
-      return [];
-    }
+    if (!/^\s*$/.test(lineText.replace(/\w*$/, ""))) return [];
   }
 
   const completions: vscode.CompletionItem[] = [];
@@ -2294,7 +2015,6 @@ async function buildComponentCompletions(
   const lessThan: number = line.lastIndexOf("<", position.character);
   let replaceRange: vscode.Range | undefined;
 
-  // Check if there's already a '<' character present
   const hasOpeningBracket = lessThan !== -1;
 
   if (hasOpeningBracket) {
@@ -2310,8 +2030,6 @@ async function buildComponentCompletions(
       vscode.CompletionItemKind.Class
     );
     item.detail = `Component from ${fullClass}`;
-
-    // Only include '<' if there isn't already one
     item.insertText = new vscode.SnippetString(
       hasOpeningBracket ? shortName : `<${shortName}`
     );
@@ -2327,8 +2045,6 @@ async function buildComponentCompletions(
       vscode.CompletionItemKind.Class
     );
     compItem.detail = `Component (from class-log)`;
-
-    // Only include '<' if there isn't already one
     compItem.insertText = new vscode.SnippetString(
       hasOpeningBracket ? shortName : `<${shortName}`
     );
@@ -2349,9 +2065,7 @@ function maybeAddPhpXClassSnippet(
   position: vscode.Position
 ): vscode.CompletionItem[] {
   const prefixLine: string = line.match(/([A-Za-z_]*)$/)![1];
-  if (!/^\s*phpx?c?l?a?s?s?$/i.test(prefixLine)) {
-    return [];
-  }
+  if (!/^\s*phpx?c?l?a?s?s?$/i.test(prefixLine)) return [];
 
   const wsFolder: vscode.WorkspaceFolder | undefined =
     vscode.workspace.getWorkspaceFolder(document.uri);
@@ -2429,12 +2143,9 @@ class ${classNamePlaceholder} extends PHPX
 }
 
 /* ────────────────────────────────────────────────────────────── *
- *                     HELPER: READ COMPONENTS FROM CLASS LOG       *
+ *                     HELPERS / DIAGNOSTICS                      *
  * ────────────────────────────────────────────────────────────── */
 
-/**
- * Converts fast-xml-parser error strings to simpler, IDE-friendly text.
- */
 function prettifyXmlError(raw: string): string {
   // ①  Unclosed tag
   let m = /Expected closing tag '([^']+)'/.exec(raw);
@@ -2463,10 +2174,6 @@ function prettifyXmlError(raw: string): string {
   // ④  Generic fallback
   return raw.replace(/^.*XML:?/i, "XML error:");
 }
-
-/* ────────────────────────────────────────────────────────────── *
- *                    XML & TAG PAIR DIAGNOSTICS                    *
- * ────────────────────────────────────────────────────────────── */
 
 export const getFxpDiagnostics = (
   doc: vscode.TextDocument
@@ -2614,27 +2321,15 @@ export const getFxpDiagnostics = (
 };
 
 function hasRealClosingTagOrHeredocHtml(src: string): boolean {
-  // 1) Si existe `?>` FUERA de strings → necesitamos validar
-  if (hasRealClosingTag(src)) {
-    return true;
-  }
+  if (hasRealClosingTag(src)) return true;
+  if (hasHtmlInHeredoc(src)) return true;
 
-  // 2) Si hay heredoc con HTML → también validar
-  if (hasHtmlInHeredoc(src)) {
-    return true;
-  }
-
-  // 3) Check for HTML tags, but exclude regex patterns
   const sanitized = sanitizeForDiagnosticsXML(src);
   const hasHtmlTags = /[<][A-Za-z][A-Za-z0-9-]*(\s|>)/.test(sanitized);
-
   if (hasHtmlTags) {
-    // Additional check: make sure we're not just seeing regex patterns
-    // Look for actual HTML-like structures
     const htmlLikePattern = /<[A-Za-z][A-Za-z0-9-]*(?:\s+[^>]*)?>/;
     return htmlLikePattern.test(sanitized);
   }
-
   return false;
 }
 
@@ -2644,7 +2339,6 @@ function hasRealClosingTag(src: string): boolean {
   for (let i = 0; i < src.length; i++) {
     const ch = src[i];
 
-    /* dentro de string → solo salgo cuando veo la misma comilla sin escape */
     if (inS) {
       if (esc) {
         esc = false;
@@ -2660,13 +2354,11 @@ function hasRealClosingTag(src: string): boolean {
       continue;
     }
 
-    /* inicio de string */
     if (ch === "'" || ch === '"') {
       inS = ch;
       continue;
     }
 
-    /* encontramos `?>` estando FUERA de comillas */
     if (ch === "?" && src[i + 1] === ">") {
       return true;
     }
@@ -2687,136 +2379,111 @@ function hasHtmlInHeredoc(src: string): boolean {
   return false;
 }
 
-/* ------------------------------------------------------------- */
-/*  sanitizeForDiagnostics  ——  ejemplo mínimo con el helper     */
-/* ------------------------------------------------------------- */
-
-/**
- * Return a string of identical length – every character except newlines
- * becomes a space.
- */
+/** Return a string of identical length – every char except newlines becomes a space. */
 const spacer = (s: string) => s.replace(/[^\n]/g, " ");
 
-/** Blanks “// …” sequences that live in the HTML part (outside PHP). */
+/** Blank “// …” sequences that live in the HTML part (outside PHP). */
 const stripInlineSlashes = (txt: string): string =>
   txt.replace(
     /(^|>|[)\]}"'` \t])\s*\/\/.*?(?=<|\r?\n|$)/g,
     (m, p) => p + spacer(m.slice(p.length))
   );
 
-/** Blanks the interior of a {{ … }} expression but keeps the braces. */
+/** Blank the interior of { … } expression but keep the braces. */
 const blankMustaches = (txt: string) =>
-  txt.replace(/{{([\s\S]*?)}}/g, (_m, inner) => "{{" + spacer(inner) + "}}");
+  txt.replace(/\{([\s\S]*?)\}/g, (m, inner, idx, full) => {
+    // Skip legacy double-brace: if neighbor indicates "{{ … }}"
+    if (full[idx - 1] === "{" || full[idx + m.length] === "}") return m;
+    return "{" + spacer(inner) + "}";
+  });
 
 function sanitizeForDiagnosticsXML(raw: string): string {
   let text = raw;
 
   text = preprocessFragmentShortSyntax(text);
 
-  // ── 0️⃣ FIRST: Remove all PHP code including short tags ──
+  // 0) Remove all PHP blocks including short tags
   text = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (m) => " ".repeat(m.length));
   text = text.replace(/<\?(?:php|=)?(?:[^?]|\?(?!>))*$/g, (m) =>
     " ".repeat(m.length)
   );
 
-  // ── 1️⃣ THEN: hide JS inside <script> … </script>  ──
-  text = text.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gi, (full, body) => {
-    return full.replace(body, spacer(body));
-  });
+  // 1) hide JS inside <script> … </script>
+  text = text.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gi, (full, body) =>
+    full.replace(body, spacer(body))
+  );
 
-  /* 0️⃣ NEW: hide content inside <pre> … </pre> and <code> … </code> */
-  text = text.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (full, body) => {
-    return full.replace(body, spacer(body));
-  });
+  // Hide <pre> and <code> bodies
+  text = text.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (full, body) =>
+    full.replace(body, spacer(body))
+  );
+  text = text.replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (full, body) =>
+    full.replace(body, spacer(body))
+  );
 
-  text = text.replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (full, body) => {
-    return full.replace(body, spacer(body));
-  });
-
-  // ── 0️⃣ Remove PHP variable assignments with regex patterns first ──
   text = sanitizePhpVariableAssignments(text);
 
-  // ── 1️⃣ Preserve heredoc/nowdoc interior ─────────────────────────
-  // Blank only the opening <<<… and closing …; lines; keep the real HTML intact.
+  // Preserve heredoc/nowdoc interior
   text = text.replace(
     /<<<['"]?([A-Za-z_]\w*)['"]?\r?\n([\s\S]*?)\r?\n\s*\1\s*;?/g,
     (fullMatch) => {
       const lines = fullMatch.split(/\r?\n/);
       return lines
-        .map(
-          (line, i) =>
-            i === 0 || i === lines.length - 1
-              ? " ".repeat(line.length) // blank only the markers
-              : line // keep interior
+        .map((line, i) =>
+          i === 0 || i === lines.length - 1 ? " ".repeat(line.length) : line
         )
         .join("\n");
     }
   );
 
-  // ── 2️⃣ Strip out PHP-style /* … */ comments ────────────────────
+  // Remove /* … */ comments
   text = text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
-
-  // ── 3️⃣ Strip out single-line // comments in PHP ────────────────
+  // Remove PHP // comments
   text = text.replace(/^[ \t]*\/\/.*$/gm, (m) => " ".repeat(m.length));
 
-  // ── 4️⃣ Strip any <?php … ?> blocks but only the tags ─────────────
-  //    (we blank the <?php / ?> markers, not the entire content)
+  // Remove only the tags of PHP blocks (already blanked above)
   text = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (m) => " ".repeat(m.length));
   text = text.replace(/<\?(?:php|=)?/g, (m) => " ".repeat(m.length));
 
-  // ── 5️⃣ Strip HTML-style “//…” comments (outside PHP) ────────────
+  // Strip HTML-style // (outside PHP)
   text = stripInlineSlashes(text);
 
-  // ── 6️⃣ Blank out all normal '…' and "…" string literals ─────────
+  // Blank '…' and "…" strings
   text = text.replace(
     /(['"])(?:\\.|[^\\])*?\1/g,
     (m, q) => q + " ".repeat(m.length - 2) + q
   );
 
-  // ── 7️⃣ Blank {{ … }} JS-in-Mustache ─────────────────────────────
+  // Blank { … } mustaches (single brace)
   text = blankMustaches(text);
 
-  // ── 8️⃣ Blank any PHP interpolation `{$…}` ───────────────────────
+  // Blank any PHP interpolation {$…}
   text = text.replace(/\{\$[^}]+\}/g, (m) => " ".repeat(m.length));
 
-  // ── 9️⃣ Remove && and single & operators ─────────────────────────────
+  // Remove && and &
   text = text.replace(/&&|&/g, (match) => " ".repeat(match.length));
   return text;
 }
 
 const preprocessFragmentShortSyntax = (text: string): string => {
-  // Convert <></> to <Fragment></Fragment> but be careful about nesting
   let result = text;
-
-  // Handle self-closing fragments: <> becomes <Fragment>
   result = result.replace(/<>/g, "<Fragment>");
-
-  // Handle closing fragments: </> becomes </Fragment>
   result = result.replace(/<\/>/g, "</Fragment>");
-
   return result;
 };
 
-const sanitizePhpVariableAssignments = (text: string): string => {
-  // Match PHP variable assignments that contain regex patterns
-  // This catches: $variable = '/regex/flags';
-  return text.replace(
+const sanitizePhpVariableAssignments = (text: string): string =>
+  text.replace(
     /\$[A-Za-z_]\w*\s*=\s*(['"])\/.*?\/[gimsuyx]*\1\s*;/gi,
     (match) => " ".repeat(match.length)
   );
-};
 
 // Global cache for components
 let componentsCache = new Map<string, string>();
 
-/**
- * Asynchronously loads the components from class-log.json and caches them.
- */
 async function loadComponentsFromClassLog(): Promise<void> {
   const workspaceFolders = vscode.workspace.workspaceFolders;
-  if (!workspaceFolders || workspaceFolders.length === 0) {
-    return;
-  }
+  if (!workspaceFolders || workspaceFolders.length === 0) return;
   const workspaceFolder = workspaceFolders[0];
   const jsonUri = vscode.Uri.joinPath(
     workspaceFolder.uri,
@@ -2828,9 +2495,7 @@ async function loadComponentsFromClassLog(): Promise<void> {
     const jsonStr = Buffer.from(data).toString("utf8").trim();
     if (jsonStr) {
       const jsonMapping = JSON.parse(jsonStr);
-      // Iterate over each fully qualified component name in the JSON
       Object.keys(jsonMapping).forEach((fqcn) => {
-        // Use your helper to get the short name (e.g. "Collapsible" from "Lib\\PHPX\\PHPXUI\\Collapsible")
         const shortName = getLastPart(fqcn);
         componentsCache.set(shortName, fqcn);
       });
@@ -2840,86 +2505,98 @@ async function loadComponentsFromClassLog(): Promise<void> {
   }
 }
 
-/**
- * Returns the cached components map.
- */
 export function getComponentsFromClassLog(): Map<string, string> {
   return componentsCache;
 }
 
 /* ────────────────────────────────────────────────────────────── *
- *                     DECORATION AND VALIDATION                     *
+ *                     DECORATION AND VALIDATION                  *
  * ────────────────────────────────────────────────────────────── */
-// Update curly brace decorations within JS expressions.
+
 function updateJsVariableDecorations(
   document: vscode.TextDocument,
   decorationType: vscode.TextEditorDecorationType
 ): void {
   const editor = vscode.window.activeTextEditor;
-  if (!editor) {
-    return;
-  }
+  if (!editor) return;
 
   const text = document.getText();
   const decorations: vscode.DecorationOptions[] = [];
   let m: RegExpExecArray | null;
 
-  // 1️⃣ for each {{ … }} block
-  while ((m = JS_EXPR_REGEX.exec(text)) !== null) {
-    const wholeMatch = m[0];
-    const blockStart = m.index;
-    const blockLength = wholeMatch.length;
+  while ((m = JS_EXPR_REGEX.exec(text))) {
+    const whole = m[0];
+    const startIdx = m.index;
+    const endIdx = startIdx + whole.length;
 
-    // highlight the "{{"
-    decorations.push({
-      range: new vscode.Range(
-        document.positionAt(blockStart),
-        document.positionAt(blockStart + 2)
-      ),
-    });
+    // Skip legacy double-brace blocks
+    if (text[startIdx - 1] === "{" || text[endIdx] === "}") continue;
 
-    // highlight the "}}"
-    decorations.push({
-      range: new vscode.Range(
-        document.positionAt(blockStart + blockLength - 2),
-        document.positionAt(blockStart + blockLength)
-      ),
-    });
+    const inner = m[1];
+    const baseOffset = startIdx + whole.indexOf(inner);
 
-    // 2️⃣ *inside* that same mustache text, look for `${…}`
-    for (const ph of findPlaceholders(wholeMatch)) {
-      // opening “${”
+    // match single or double-quoted strings
+    const stringRegex = /(['"])(?:(?=(\\?))\2.)*?\1/g;
+    let strMatch: RegExpExecArray | null;
+    while ((strMatch = stringRegex.exec(inner))) {
+      const s = baseOffset + strMatch.index;
+      const e = s + strMatch[0].length;
       decorations.push({
-        range: new vscode.Range(
-          document.positionAt(blockStart + ph.start),
-          document.positionAt(blockStart + ph.start + 2)
-        ),
-      });
-
-      // matching “}”
-      decorations.push({
-        range: new vscode.Range(
-          document.positionAt(blockStart + ph.end - 1),
-          document.positionAt(blockStart + ph.end)
-        ),
+        range: new vscode.Range(document.positionAt(s), document.positionAt(e)),
       });
     }
   }
-
-  editor.setDecorations(decorationType, decorations);
+  editor.setDecorations(stringDecorationType, decorations);
 }
 
-const isValidJsExpression = (expr: string): boolean => {
-  if (containsJsAssignment(expr)) {
-    return false;
+const JS_NATIVE_MEMBERS = [
+  ...NATIVE_STRING_METHODS,
+  ...NATIVE_STRING_PROPS,
+  ...Object.getOwnPropertyNames(Array.prototype),
+  ...Object.getOwnPropertyNames(Number.prototype),
+  ...Object.getOwnPropertyNames(Boolean.prototype),
+].filter((k) => /^[a-z]/i.test(k));
+
+function insideMustache(
+  doc: vscode.TextDocument,
+  pos: vscode.Position
+): boolean {
+  const before = doc.getText(new vscode.Range(new vscode.Position(0, 0), pos));
+  const open = before.lastIndexOf("{");
+  const close = before.lastIndexOf("}");
+  if (open === -1 || open <= close) return false;
+  // Not a legacy double brace
+  return before[open - 1] !== "{";
+}
+
+function updateStringDecorations(document: vscode.TextDocument) {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document !== document) return;
+
+  const text = document.getText();
+  const decos: vscode.DecorationOptions[] = [];
+  let mustacheMatch: RegExpExecArray | null;
+
+  while ((mustacheMatch = JS_EXPR_REGEX.exec(text))) {
+    const startIdx = mustacheMatch.index;
+    const endIdx = startIdx + mustacheMatch[0].length;
+    if (text[startIdx - 1] === "{" || text[endIdx] === "}") continue;
+
+    const inner = mustacheMatch[1];
+    const baseOffset = startIdx + mustacheMatch[0].indexOf(inner);
+
+    const stringRegex = /(['"])(?:\\.|[^\\])*?\1/g;
+    let strMatch: RegExpExecArray | null;
+    while ((strMatch = stringRegex.exec(inner))) {
+      const s = baseOffset + strMatch.index;
+      const e = s + strMatch[0].length;
+      decos.push({
+        range: new vscode.Range(document.positionAt(s), document.positionAt(e)),
+      });
+    }
   }
-  try {
-    new Function(`return (${expr});`);
-    return true;
-  } catch {
-    return false;
-  }
-};
+  editor.setDecorations(stringDecorationType, decos);
+}
 
 const ASSIGNMENT_KINDS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.EqualsToken,
@@ -2940,26 +2617,19 @@ const ASSIGNMENT_KINDS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.QuestionQuestionEqualsToken,
 ]);
 
-/**
- * Devuelve true si la expresión contiene **cualquier** operador de asignación.
- * Usa el AST de TypeScript, sin dependencias internas.
- */
 export function containsJsAssignment(expr: string): boolean {
-  // envolvemos la expresión para garantizar código completo
   const sf = ts.createSourceFile(
     "tmp.ts",
     `(${expr});`,
     ts.ScriptTarget.Latest,
-    /*setParentNodes*/ false,
+    false,
     ts.ScriptKind.TSX
   );
 
   let found = false;
 
   const visit = (node: ts.Node): void => {
-    if (found) {
-      return;
-    } // corto‑circuito
+    if (found) return;
 
     if (
       ts.isBinaryExpression(node) &&
@@ -2968,7 +2638,6 @@ export function containsJsAssignment(expr: string): boolean {
       found = true;
       return;
     }
-
     node.forEachChild(visit);
   };
 
@@ -2976,48 +2645,29 @@ export function containsJsAssignment(expr: string): boolean {
   return found;
 }
 
-/**
- * Turn PHP-style variables into JS identifiers:
- *   {$foo} → foo
- *   $bar   → bar
- */
 function preNormalizePhpVars(text: string): string {
-  return text.replace(/{{([\s\S]*?)}}/g, (_, inside) => {
+  return text.replace(/\{([\s\S]*?)\}/g, (full, inside, idx, src) => {
+    // skip legacy {{ … }}
+    if (src[idx - 1] === "{" || src[idx + full.length] === "}") return full;
+
     const normal = inside
-      /* ①  {$this->index}   →   this.index */
       .replace(/\{\s*\$([A-Za-z_]\w*)\s*->\s*([A-Za-z_]\w*)\s*\}/g, "$1.$2")
-
-      /* ②  {$foo}           →   foo */
       .replace(/\{\s*\$([A-Za-z_]\w*)\s*\}/g, "$1")
-
-      /* ③  variables sueltas $bar → bar */
       .replace(/\$([A-Za-z_]\w*)/g, "$1")
-
-      /* ④  flechas restantes  ->  →  .  */
       .replace(/->/g, ".")
-
-      /* ⑤  quita llaves residuales {this.index} → this.index */
       .replace(/\{([A-Za-z_][\w$.]*)\}/g, "$1");
 
-    return "{{" + normal + "}}";
+    return "{" + normal + "}";
   });
 }
 
-// A cache to remember the last set of diagnostics per document URI
 const prevMustacheDiags = new Map<string, vscode.Diagnostic[]>();
 
-/**
- * Compare two arrays of Diagnostic objects for equality.
- * Returns true if both arrays have the same length, and each Diagnostic
- * at the same index has identical range, message, and severity.
- */
 function diagnosticsEqual(
   a: vscode.Diagnostic[],
   b: vscode.Diagnostic[]
 ): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
+  if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
     const da = a[i];
     const db = b[i];
@@ -3036,69 +2686,154 @@ const validateJsVariablesInCurlyBraces = (
   document: vscode.TextDocument,
   diagnosticCollection: vscode.DiagnosticCollection
 ): void => {
-  if (document.languageId !== PHP_LANGUAGE) {
-    return;
-  }
+  if (document.languageId !== PHP_LANGUAGE) return;
 
   const originalText = document.getText();
 
-  // 1️⃣ Normalize away PHP-style variables inside mustaches: {$foo} → foo, $bar → bar
+  // Build [start,end) ranges for <script> content
+  const scriptRanges: Array<[number, number]> = [];
+  {
+    const re = /<script\b[^>]*>[\s\S]*?<\/script>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(originalText)) !== null) {
+      const openTagEnd = originalText.indexOf(">", m.index) + 1;
+      if (openTagEnd <= 0) continue;
+      const closeTagStart = m.index + m[0].length - "</script>".length;
+      if (closeTagStart <= openTagEnd) continue;
+      scriptRanges.push([openTagEnd, closeTagStart]);
+    }
+  }
+
+  // ✅ NEW: Build [start,end) ranges for PHP blocks
+  const phpRanges: Array<[number, number]> = [];
+  {
+    // Match closed PHP blocks: <?php ... ?> or <?= ... ?>
+    const closedRe = /<\?(?:php|=)?[\s\S]*?\?>/g;
+    let m: RegExpExecArray | null;
+    while ((m = closedRe.exec(originalText)) !== null) {
+      phpRanges.push([m.index, m.index + m[0].length]);
+    }
+
+    // Match open-ended PHP blocks: <?php ... (no closing ?>)
+    const openRe = /<\?(?:php|=)?(?:[^?]|\?(?!>))*$/g;
+    while ((m = openRe.exec(originalText)) !== null) {
+      phpRanges.push([m.index, originalText.length]);
+    }
+  }
+
+  const isInsideScript = (idx: number) =>
+    scriptRanges.some(([s, e]) => idx >= s && idx < e);
+
+  // ✅ NEW: Check if inside PHP block
+  const isInsidePhp = (idx: number) =>
+    phpRanges.some(([s, e]) => idx >= s && idx < e);
+
   const normalized = preNormalizePhpVars(originalText);
-
-  // 2️⃣ Blank out all PHP literals/comments/regex so we don't pick up "{{…}}" in those
-  const sanitizedText = sanitizeForDiagnostics(normalized);
-
   const diagnostics: vscode.Diagnostic[] = [];
-  let match: RegExpExecArray | null;
 
-  // 3️⃣ Run the JS_EXPR_REGEX against the sanitized text
-  while ((match = JS_EXPR_REGEX.exec(sanitizedText)) !== null) {
-    const expr = match[1].trim();
+  for (const match of extractMustacheExpressions(normalized)) {
+    const { full, inner, index: startIdx } = match;
+    const endIdx = startIdx + full.length;
 
-    // 🚩 1) Disallow any assignment operator inside {{ … }}
+    // ✅ UPDATED: Skip mustaches inside <script> OR <?php blocks
+    if (isInsideScript(startIdx) || isInsidePhp(startIdx)) continue;
+
+    const expr = inner.trim();
+
+    // Disallow assignments
     if (containsJsAssignment(expr)) {
-      const start = document.positionAt(match.index + 2); // after "{{"
-      const end = document.positionAt(match.index + match[0].length - 2); // before "}}"
+      const start = document.positionAt(startIdx + 1);
+      const end = document.positionAt(endIdx - 1);
       diagnostics.push(
         new vscode.Diagnostic(
           new vscode.Range(start, end),
-          "⚠️  Assignments are not allowed inside {{ … }}. Use values or pure expressions.",
+          "⚠️  Assignments are not allowed inside { … }. Use values or pure expressions.",
           vscode.DiagnosticSeverity.Warning
         )
       );
       continue;
     }
 
-    // 🚩 2) Check if expression is valid JS syntax
+    // Validate JS syntax
     if (!isValidJsExpression(expr)) {
-      // Calculate positions in the original text (indexes line up because sanitizeForDiagnostics only blanks, not shifts)
-      const startIndex = match.index + match[0].indexOf(expr);
-      const endIndex = startIndex + expr.length;
-      const startPos = document.positionAt(startIndex);
-      const endPos = document.positionAt(endIndex);
+      const innerStart = startIdx + 1;
+      const startPos = document.positionAt(innerStart);
+      const endPos = document.positionAt(innerStart + inner.length);
       diagnostics.push(
         new vscode.Diagnostic(
           new vscode.Range(startPos, endPos),
-          `⚠️ Invalid JavaScript expression in {{ … }}.`,
+          "⚠️ Invalid JavaScript expression in { … }.",
           vscode.DiagnosticSeverity.Warning
         )
       );
     }
   }
 
-  // 4️⃣ Only update the DiagnosticCollection if the new array differs from the last cached one
   const uriKey = document.uri.toString();
   const oldDiags = prevMustacheDiags.get(uriKey) || [];
-
   if (!diagnosticsEqual(oldDiags, diagnostics)) {
     prevMustacheDiags.set(uriKey, diagnostics);
     diagnosticCollection.set(document.uri, diagnostics);
   }
 };
 
-// ── at module‐scope ────────────────────────────────────────────────
+/**
+ * Extract all {...} expressions while respecting nested braces and strings
+ */
+function* extractMustacheExpressions(text: string): Generator<{
+  full: string;
+  inner: string;
+  index: number;
+}> {
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "{" && text[i - 1] !== "{") {
+      let depth = 1;
+      let j = i + 1;
+      let inString: string | null = null;
+      let escaped = false;
 
-// build your two regexes once…
+      while (j < text.length && depth > 0) {
+        const ch = text[j];
+
+        if (escaped) {
+          escaped = false;
+          j++;
+          continue;
+        }
+
+        if (ch === "\\" && inString) {
+          escaped = true;
+          j++;
+          continue;
+        }
+
+        // Handle string boundaries
+        if ((ch === '"' || ch === "'" || ch === "`") && !inString) {
+          inString = ch;
+        } else if (ch === inString) {
+          inString = null;
+        }
+
+        // Only count braces outside of strings
+        if (!inString) {
+          if (ch === "{") depth++;
+          if (ch === "}") depth--;
+        }
+
+        j++;
+      }
+
+      // Check if we found a complete match and it's not a legacy double-brace
+      if (depth === 0 && text[j] !== "}") {
+        const full = text.slice(i, j);
+        const inner = text.slice(i + 1, j - 1);
+        yield { full, inner, index: i };
+        i = j - 1; // Skip past this match
+      }
+    }
+  }
+}
+
 const nativeFuncRegex = new RegExp(
   `\\b(${NATIVE_STRING_METHODS.join("|")})\\b`,
   "g"
@@ -3107,16 +2842,12 @@ const nativePropRegex = new RegExp(
   `\\b(${NATIVE_STRING_PROPS.join("|")})\\b`,
   "g"
 );
-
-// a generic “object.property” regex to catch anything else
 const objectPropRegex = /(?<=\.)[A-Za-z_$][\w$]*/g;
 
 const objectPropertyDecorationType =
-  vscode.window.createTextEditorDecorationType({
-    color: "#9CDCFE", // pick whatever color you like
-  });
+  vscode.window.createTextEditorDecorationType({ color: "#9CDCFE" });
 
-const STRING_COLOR = "#CE9178"; // or whatever your theme’s string color is
+const STRING_COLOR = "#CE9178";
 const stringDecorationType = vscode.window.createTextEditorDecorationType({
   color: STRING_COLOR,
 });
@@ -3124,31 +2855,26 @@ const tplLiteralDecorationType = vscode.window.createTextEditorDecorationType({
   color: STRING_COLOR,
 });
 
-// integer or decimal, e.g. 42 or 3.1415
 const numberRegex = /\b\d+(\.\d+)?\b/g;
 const numberDecorationType = vscode.window.createTextEditorDecorationType({
   color: "#B5CEA8",
 });
 
-// catch anything between back-ticks, including escaped ones
 const templateLiteralRegex = /`(?:\\[\s\S]|[^\\`])*`/g;
 
 export function* findPlaceholders(src: string) {
   for (let i = 0; i < src.length - 1; i++) {
     if (src[i] === "$" && src[i + 1] === "{") {
       let depth = 1;
-      let j = i + 2; // jump *after* the opening “{”
+      let j = i + 2;
       while (j < src.length && depth) {
         const ch = src[j++];
-        if (ch === "{") {
-          depth++;
-        } else if (ch === "}") {
-          depth--;
-        }
+        if (ch === "{") depth++;
+        else if (ch === "}") depth--;
       }
       if (depth === 0) {
-        yield { start: i, end: j }; // j is already past the “}”
-        i = j - 1; // resume scanning *after* it
+        yield { start: i, end: j };
+        i = j - 1;
       }
     }
   }
@@ -3157,9 +2883,7 @@ export function* findPlaceholders(src: string) {
 const functionCallRegex = /(?<![.$])\b([A-Za-z_$][\w$]*)\b(?=\s*\()/g;
 const FUNCTION_CALL_COLOR = "#DCDCAA";
 const functionCallDecorationType = vscode.window.createTextEditorDecorationType(
-  {
-    color: FUNCTION_CALL_COLOR,
-  }
+  { color: FUNCTION_CALL_COLOR }
 );
 
 function updateNativeTokenDecorations(
@@ -3168,13 +2892,10 @@ function updateNativeTokenDecorations(
   propDecoType: vscode.TextEditorDecorationType
 ): void {
   const editor = vscode.window.activeTextEditor;
-  if (!editor || document.languageId !== PHP_LANGUAGE) {
-    return;
-  }
+  if (!editor || document.languageId !== PHP_LANGUAGE) return;
 
   const text = document.getText();
 
-  /* ── 0️⃣  colecciones de rangos por tipo de token ──────────────── */
   const funcDecorations: vscode.DecorationOptions[] = [];
   const nativePropDecorations: vscode.DecorationOptions[] = [];
   const objectPropDecorations: vscode.DecorationOptions[] = [];
@@ -3182,91 +2903,73 @@ function updateNativeTokenDecorations(
   const stringSpans: vscode.DecorationOptions[] = [];
   const functionCallDecos: vscode.DecorationOptions[] = [];
 
-  /* ── 1️⃣  recorra cada expresión {{ … }} encontrada ─────────────── */
   for (const exprMatch of text.matchAll(JS_EXPR_REGEX)) {
+    const whole = exprMatch[0];
+    const base = exprMatch.index!;
+    const end = base + whole.length;
+    if (text[base - 1] === "{" || text[end] === "}") continue;
+
     const jsExpr = exprMatch[1];
-    const baseIndex = exprMatch.index! + exprMatch[0].indexOf(jsExpr);
+    const baseIndex = base + whole.indexOf(jsExpr);
 
-    /* — a) métodos nativos de String (substring, padEnd, …) — */
     for (const m of jsExpr.matchAll(nativeFuncRegex)) {
-      const start = baseIndex + m.index!;
-      const end = start + m[0].length;
+      const s = baseIndex + m.index!;
+      const e = s + m[0].length;
       funcDecorations.push({
-        range: new vscode.Range(
-          document.positionAt(start),
-          document.positionAt(end)
-        ),
+        range: new vscode.Range(document.positionAt(s), document.positionAt(e)),
       });
     }
 
-    /* — b) propiedades nativas de String (length, …) — */
     for (const m of jsExpr.matchAll(nativePropRegex)) {
-      const start = baseIndex + m.index!;
-      const end = start + m[0].length;
+      const s = baseIndex + m.index!;
+      const e = s + m[0].length;
       nativePropDecorations.push({
-        range: new vscode.Range(
-          document.positionAt(start),
-          document.positionAt(end)
-        ),
+        range: new vscode.Range(document.positionAt(s), document.positionAt(e)),
       });
     }
 
-    /* — c) propiedades de objetos de usuario (foo.bar) — */
     for (const m of jsExpr.matchAll(objectPropRegex)) {
       if (
         NATIVE_STRING_METHODS.includes(m[0]) ||
         NATIVE_STRING_PROPS.includes(m[0])
       ) {
-        continue; // ya coloreadas como nativas
+        continue;
       }
-      const start = baseIndex + m.index!;
-      const end = start + m[0].length;
+      const s = baseIndex + m.index!;
+      const e = s + m[0].length;
       objectPropDecorations.push({
-        range: new vscode.Range(
-          document.positionAt(start),
-          document.positionAt(end)
-        ),
+        range: new vscode.Range(document.positionAt(s), document.positionAt(e)),
       });
     }
 
-    /* — d) literales numéricos — */
     for (const numMatch of jsExpr.matchAll(numberRegex)) {
-      const start = baseIndex + numMatch.index!;
-      const end = start + numMatch[0].length;
+      const s = baseIndex + numMatch.index!;
+      const e = s + numMatch[0].length;
       numberDecorations.push({
-        range: new vscode.Range(
-          document.positionAt(start),
-          document.positionAt(end)
-        ),
+        range: new vscode.Range(document.positionAt(s), document.positionAt(e)),
       });
     }
 
-    /* — e) llamadas de función:  myFunc(arg1)  — */
     for (const fc of jsExpr.matchAll(functionCallRegex)) {
       const ident = fc[1];
       if (
         NATIVE_STRING_METHODS.includes(ident) ||
         NATIVE_STRING_PROPS.includes(ident)
       ) {
-        continue; // evitar duplicar nativas
+        continue;
       }
-      const start = baseIndex + fc.index!;
-      const end = start + ident.length;
+      const s = baseIndex + fc.index!;
+      const e = s + ident.length;
       functionCallDecos.push({
-        range: new vscode.Range(
-          document.positionAt(start),
-          document.positionAt(end)
-        ),
+        range: new vscode.Range(document.positionAt(s), document.positionAt(e)),
       });
     }
 
-    /* — f) template literals  `Hola ${name}` — */
     for (const tl of jsExpr.matchAll(templateLiteralRegex)) {
       const tplBase = baseIndex + tl.index!;
       const raw = tl[0];
       const inner = raw.slice(1, -1);
 
-      // tildes de apertura y cierre
       stringSpans.push({
         range: new vscode.Range(
           document.positionAt(tplBase),
@@ -3280,7 +2983,6 @@ function updateNativeTokenDecorations(
         ),
       });
 
-      // fragmentos literales entre ${ … }
       let last = 0;
       for (const ph of findPlaceholders(inner)) {
         const litStart = tplBase + 1 + last;
@@ -3308,7 +3010,6 @@ function updateNativeTokenDecorations(
     }
   }
 
-  /* ── 2️⃣  aplicar todas las decoraciones ───────────────────────── */
   editor.setDecorations(funcDecoType, funcDecorations);
   editor.setDecorations(propDecoType, nativePropDecorations);
   editor.setDecorations(objectPropertyDecorationType, objectPropDecorations);
@@ -3318,24 +3019,20 @@ function updateNativeTokenDecorations(
 }
 
 /* ────────────────────────────────────────────────────────────── *
- *                      PHP DIAGNOSTIC FUNCTIONS                    *
+ *                      PHP DIAGNOSTIC FUNCTIONS                  *
  * ────────────────────────────────────────────────────────────── */
 
 const validateMissingImports = (
   document: vscode.TextDocument,
   diagnosticCollection: vscode.DiagnosticCollection
 ): void => {
-  if (document.languageId !== PHP_LANGUAGE) {
-    return;
-  }
+  if (document.languageId !== PHP_LANGUAGE) return;
+
   const originalText = document.getText();
   let noCommentsText = removePhpComments(originalText);
   noCommentsText = blankOutHeredocOpeners(noCommentsText);
-
-  // 🔧 NEW: Remove PHP string literals to avoid matching components inside them
   noCommentsText = removePhpStringLiterals(noCommentsText);
 
-  // Use the sanitized version (without comments and strings) to parse imports.
   const useMap = parsePhpUseStatements(noCommentsText);
 
   const diagnostics: vscode.Diagnostic[] = [];
@@ -3354,10 +3051,10 @@ const validateMissingImports = (
       );
     }
   });
+
   const heredocBlocks = extractAllHeredocBlocks(originalText);
   heredocBlocks.forEach((block) => {
     let blockContent = blankOutHeredocOpeners(block.content);
-    // 🔧 NEW: Also remove string literals from heredoc content
     blockContent = removePhpStringLiterals(blockContent);
 
     const blockTagMatches = [
@@ -3382,20 +3079,19 @@ const validateMissingImports = (
       }
     });
   });
+
   diagnostics.push(...getFxpDiagnostics(document));
   diagnosticCollection.set(document.uri, diagnostics);
 };
 
 /* ────────────────────────────────────────────────────────────── *
- *                       PHP SANITIZATION UTILS                     *
+ *                       PHP SANITIZATION UTILS                   *
  * ────────────────────────────────────────────────────────────── */
 
 const removePhpStringLiterals = (text: string): string => {
-  // Remove single quoted strings
   text = text.replace(/'(?:[^'\\]|\\.)*'/g, (match) =>
     " ".repeat(match.length)
   );
-  // Remove double quoted strings
   text = text.replace(/"(?:[^"\\]|\\.)*"/g, (match) =>
     " ".repeat(match.length)
   );
@@ -3433,25 +3129,18 @@ const removePhpComments = (text: string): string => {
 
 const removePhpRegexLiterals = (text: string): string => {
   let result = text;
-
-  // Handle regex patterns in variable assignments like $pattern = '/.../'
   result = result.replace(
     /\$\w+\s*=\s*(['"])\/.*?\/[gimsuyx]*\1\s*;/gi,
     (match) => " ".repeat(match.length)
   );
-
-  // Handle regex patterns in preg_* function calls
   result = result.replace(
     /\b(preg_\w+)\s*\(\s*(['"])\/.*?\/[gimsuyx]*\2/gi,
     (match) => " ".repeat(match.length)
   );
-
-  // Handle standalone quoted regex patterns
   result = result.replace(
     /(['"])\/(?:\\.|[^\\\/\r\n])*?\/[gimsuyx]*\1/gi,
     (match) => " ".repeat(match.length)
   );
-
   return result;
 };
 
@@ -3464,19 +3153,35 @@ const removeNormalPhpStrings = (text: string): string =>
   text.replace(/\\(['"])/g, "$1");
 
 const sanitizeForDiagnostics = (text: string): string => {
+  // 1) Remove PHP blocks – both closed and open-to-EOF
   text = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (block) =>
     " ".repeat(block.length)
   );
+  text = text.replace(/<\?(?:php|=)?(?:[^?]|\?(?!>))*$/g, (m) =>
+    " ".repeat(m.length)
+  ); // ⟵ NEW
+
+  // 2) Strip comments early
   text = removePhpComments(text);
+
+  // 3) Blank HEREDOC openers (keeps length)
   text = blankOutHeredocOpeners(text);
+
+  // 4) Remove regex literals and interpolations
   text = removePhpRegexLiterals(text);
   text = removePhpInterpolations(text);
+
+  // 5) Blank PHP string literals completely (this was missing before)
+  text = removePhpStringLiterals(text); // ⟵ NEW
+
+  // 6) Normalize escaped quotes (length already preserved above)
   text = removeNormalPhpStrings(text);
+
   return text;
 };
 
 /* ────────────────────────────────────────────────────────────── *
- *                    PHP IMPORT STATEMENT PARSING                   *
+ *                    PHP IMPORT STATEMENT PARSING                *
  * ────────────────────────────────────────────────────────────── */
 
 const parsePhpUseStatements = (text: string): Map<string, string> => {
@@ -3485,9 +3190,7 @@ const parsePhpUseStatements = (text: string): Map<string, string> => {
   let match: RegExpExecArray | null;
   while ((match = useRegex.exec(text)) !== null) {
     const importBody = match[1].trim();
-    if (!importBody) {
-      continue;
-    }
+    if (!importBody) continue;
     const braceOpenIndex = importBody.indexOf("{");
     const braceCloseIndex = importBody.lastIndexOf("}");
     if (braceOpenIndex !== -1 && braceCloseIndex !== -1) {
@@ -3497,9 +3200,7 @@ const parsePhpUseStatements = (text: string): Map<string, string> => {
         .trim();
       insideBraces.split(",").forEach((rawItem) => {
         const item = rawItem.trim();
-        if (item) {
-          processSingleImport(prefix, item, shortNameMap);
-        }
+        if (item) processSingleImport(prefix, item, shortNameMap);
       });
     } else {
       processSingleImport("", importBody, shortNameMap);
@@ -3535,19 +3236,16 @@ const getLastPart = (path: string): string => {
 };
 
 export function parseArgsWithTs(args: string): string[] {
-  // ① envolver en una llamada ficticia
   const wrapper = `__dummy__(${args});`;
 
-  // ② parsear a AST
   const sf = ts.createSourceFile(
     "args.ts",
     wrapper,
     ts.ScriptTarget.Latest,
-    /*setParentNodes*/ false,
+    false,
     ts.ScriptKind.TS
   );
 
-  // ③ localizar el CallExpression
   let call: CallExpression | undefined;
   sf.forEachChild((node) => {
     if (
@@ -3558,42 +3256,30 @@ export function parseArgsWithTs(args: string): string[] {
     }
   });
 
-  if (!call) {
-    return [];
-  } // nunca debería ocurrir
+  if (!call) return [];
 
-  // ④ extraer texto de cada argumento
   return call.arguments.map((arg) => arg.getText(sf));
 }
 
 function parseStubsWithTS(source: string) {
-  // 1) build a lookup of the class-names we care about
   const stubNames = new Set<keyof typeof classStubs>(
     Object.keys(classStubs) as (keyof typeof classStubs)[]
   );
 
-  // 2) parse into a TS SourceFile
   const sf = ts.createSourceFile(
     "pphp.d.ts",
     source,
     ts.ScriptTarget.Latest,
-    /*setParentNodes*/ true
+    true
   );
 
-  // 3) scan every top-level declaration
   sf.statements.forEach((stmt) => {
-    if (!ts.isClassDeclaration(stmt) || !stmt.name) {
-      return;
-    }
+    if (!ts.isClassDeclaration(stmt) || !stmt.name) return;
 
     const name = stmt.name.text as keyof typeof classStubs;
-    if (!stubNames.has(name)) {
-      return;
-    }
+    if (!stubNames.has(name)) return;
 
-    // 4) for each member in that class…
     stmt.members.forEach((member) => {
-      // skip any private members
       if (
         ts.canHaveModifiers(member) &&
         ts
@@ -3603,20 +3289,16 @@ function parseStubsWithTS(source: string) {
         return;
       }
 
-      // METHOD?
       if (ts.isMethodSignature(member) || ts.isMethodDeclaration(member)) {
         const mName = (member.name as ts.Identifier).text;
         const sig = member.getText(sf).trim();
         classStubs[name].push({ name: mName, signature: sig });
-      }
-      // PROPERTY?
-      else if (
+      } else if (
         ts.isPropertySignature(member) ||
         ts.isPropertyDeclaration(member)
       ) {
         const pName = (member.name as ts.Identifier).text;
         const pType = member.type?.getText(sf).trim() ?? "any";
-        // avoid duplicate if a method of same name already ran
         if (!classStubs[name].some((e) => e.name === pName)) {
           classStubs[name].push({ name: pName, signature: `: ${pType}` });
         }
@@ -3626,7 +3308,7 @@ function parseStubsWithTS(source: string) {
 }
 
 /* ────────────────────────────────────────────────────────────── *
- *                          EXTENSION DEACTIVATION                  *
+ *                          EXTENSION DEACTIVATION                *
  * ────────────────────────────────────────────────────────────── */
 
 export function deactivate(): void {}

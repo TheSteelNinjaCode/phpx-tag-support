@@ -44,8 +44,7 @@ export function validateStateTupleUsage(
       /*setParentNodes*/ true,
       ts.ScriptKind.TS
     );
-  } catch (error) {
-    // If parsing fails, don't show diagnostics
+  } catch {
     return;
   }
 
@@ -60,22 +59,22 @@ export function validateStateTupleUsage(
     ) {
       const call = node.initializer;
       const expr = call.expression;
+
+      // NOW: pp.state(...)
       if (
         ts.isPropertyAccessExpression(expr) &&
         ts.isIdentifier(expr.expression) &&
-        expr.expression.text === "pphp" &&
+        expr.expression.text === "pp" &&
         expr.name.text === "state"
       ) {
         // Tuple form must have exactly one argument
         if (call.arguments.length > 1) {
-          // Map positions back to original document
           const start = document.positionAt(call.getStart());
           const end = document.positionAt(call.getEnd());
-          const range = new vscode.Range(start, end);
           diags.push(
             new vscode.Diagnostic(
-              range,
-              "Tuple-style pphp.state(...) must be called with a single initial value argument, not multiple.",
+              new vscode.Range(start, end),
+              "Tuple-style pp.state(...) must be called with a single initial value argument, not multiple.",
               vscode.DiagnosticSeverity.Error
             )
           );
