@@ -3210,7 +3210,9 @@ const validateMissingImports = (
   document: vscode.TextDocument,
   diagnosticCollection: vscode.DiagnosticCollection
 ): void => {
-  if (document.languageId !== PHP_LANGUAGE) return;
+  if (document.languageId !== PHP_LANGUAGE) {
+    return;
+  }
 
   const originalText = document.getText();
 
