@@ -585,7 +585,9 @@ export async function activate(context: vscode.ExtensionContext) {
           const line = document
             .lineAt(position.line)
             .text.slice(0, position.character);
-          if (!/\bon[A-Za-z]+\s*=\s*"[^"]*$/.test(line)) return;
+          if (!/\bon[A-Za-z]+\s*=\s*"[^"]*$/.test(line)) {
+            return;
+          }
 
           // 2) What the user’s already typed
           const wordRange = document.getWordRangeAtPosition(
@@ -617,7 +619,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 fn,
                 vscode.CompletionItemKind.Function
               );
-              if (wordRange) item.range = wordRange;
+              if (wordRange) {
+                item.range = wordRange;
+              }
               return item;
             });
         },
@@ -636,16 +640,24 @@ export async function activate(context: vscode.ExtensionContext) {
 
           /* ① must be inside an open tag -------------------------------- */
           const lt = uptoCursor.lastIndexOf("<");
-          if (lt === -1) return;
+          if (lt === -1) {
+            return;
+          }
 
           // Skip PHP open tags
-          if (/^<\?(php|=)?/.test(uptoCursor.slice(lt))) return;
+          if (/^<\?(php|=)?/.test(uptoCursor.slice(lt))) {
+            return;
+          }
 
           // Ensure not inside closing tag
-          if (uptoCursor[lt + 1] === "/") return;
+          if (uptoCursor[lt + 1] === "/") {
+            return;
+          }
 
           // Ensure not already closed
-          if (uptoCursor.slice(lt).includes(">")) return;
+          if (uptoCursor.slice(lt).includes(">")) {
+            return;
+          }
 
           /* 0️⃣  bail out if we’re already inside an attribute value  */
           const eq = uptoCursor.lastIndexOf("=");
@@ -653,7 +665,9 @@ export async function activate(context: vscode.ExtensionContext) {
             const afterEq = uptoCursor.slice(eq + 1);
             const openQuote = afterEq.match(/['"]/);
             const closeQuote = afterEq.match(/(['"])[^'"]*\1\s*$/);
-            if (openQuote && !closeQuote) return; // inside  foo="|"
+            if (openQuote && !closeQuote) {
+              return; // inside  foo="|"
+            }
           }
 
           /* ② figure out which <Tag … ---------------------------------- */
@@ -690,7 +704,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 (it.label as string).startsWith(partial)
             )
             .map((it) => {
-              if (word) it.range = word;
+              if (word) {
+                it.range = word;
+              }
               return it;
             });
 
@@ -702,7 +718,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 partial,
                 propsProvider
               ).map((it) => {
-                if (word) it.range = word;
+                if (word) {
+                  it.range = word;
+                }
                 return it;
               })
             : [];
@@ -770,21 +788,31 @@ export async function activate(context: vscode.ExtensionContext) {
         const line = doc.lineAt(pos.line).text;
         const uptoCur = line.slice(0, pos.character);
         const lt = uptoCur.lastIndexOf("<");
-        if (lt === -1 || uptoCur[lt + 1] === "/") return;
-        if (uptoCur.slice(lt).includes(">")) return;
+        if (lt === -1 || uptoCur[lt + 1] === "/") {
+          return;
+        }
+        if (uptoCur.slice(lt).includes(">")) {
+          return;
+        }
 
         const tagMatch = uptoCur.slice(lt).match(/^<\s*([A-Za-z0-9_]+)/);
         const tagName = tagMatch?.[1];
-        if (!tagName) return;
+        if (!tagName) {
+          return;
+        }
 
         const wr = doc.getWordRangeAtPosition(pos, /[\w-]+/);
-        if (!wr) return;
+        if (!wr) {
+          return;
+        }
         const attr = doc.getText(wr);
 
         const meta = propsProvider
           .getProps(tagName)
           .find((p) => p.name === attr);
-        if (!meta) return;
+        if (!meta) {
+          return;
+        }
 
         const md = new vscode.MarkdownString();
         md.appendCodeblock(
@@ -793,7 +821,9 @@ export async function activate(context: vscode.ExtensionContext) {
             : `${meta.name}: ${meta.type}`,
           "php"
         );
-        if (meta.doc) md.appendMarkdown("\n\n" + meta.doc);
+        if (meta.doc) {
+          md.appendMarkdown("\n\n" + meta.doc);
+        }
 
         return new vscode.Hover(md, wr);
       },
@@ -802,7 +832,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
   const fqcnToFile: FqcnToFile = (fqcn) => {
     const wsFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!wsFolder) return undefined;
+    if (!wsFolder) {
+      return undefined;
+    }
 
     const jsonUri = vscode.Uri.joinPath(
       wsFolder.uri,
@@ -814,7 +846,9 @@ export async function activate(context: vscode.ExtensionContext) {
       const data = fs.readFileSync(jsonUri.fsPath, "utf8");
       const jsonMapping = JSON.parse(data);
       const entry = jsonMapping[fqcn];
-      if (!entry) return undefined;
+      if (!entry) {
+        return undefined;
+      }
 
       const sourceRoot = vscode.workspace
         .getConfiguration("phpx-tag-support")
@@ -926,16 +960,22 @@ export async function activate(context: vscode.ExtensionContext) {
           const m = /([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.\s*(\w*)$/.exec(
             exprPrefix
           );
-          if (!m) return;
+          if (!m) {
+            return;
+          }
 
           const [, root, partial] = m;
 
           const special = new Set(["pp", "store", "searchParams"]);
-          if (special.has(root)) return;
+          if (special.has(root)) {
+            return;
+          }
 
           const parts = root.split(".");
           let typeNode = globalStubTypes[parts[0]];
-          if (!typeNode) return;
+          if (!typeNode) {
+            return;
+          }
 
           for (let i = 1; i < parts.length; i++) {
             const propName = parts[i];
@@ -979,7 +1019,9 @@ export async function activate(context: vscode.ExtensionContext) {
           const treatAsScalar = stubProps.length <= 1;
           if (treatAsScalar) {
             for (const k of JS_NATIVE_MEMBERS) {
-              if (!k.startsWith(partial) || seen.has(k)) continue;
+              if (!k.startsWith(partial) || seen.has(k)) {
+                continue;
+              }
 
               const kind =
                 typeof ("" as any)[k] === "function"
@@ -1193,7 +1235,9 @@ export async function activate(context: vscode.ExtensionContext) {
   const hrefDiagnostics =
     vscode.languages.createDiagnosticCollection("phpx-href");
   const validateRoutes = (document: vscode.TextDocument) => {
-    if (document.languageId !== "php") return;
+    if (document.languageId !== "php") {
+      return;
+    }
 
     const diagnostics = hrefDiagnosticProvider.validateDocument(document);
     hrefDiagnostics.set(document.uri, diagnostics);
@@ -1232,7 +1276,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
   vscode.window.onDidChangeActiveTextEditor(
     (editor) => {
-      if (editor) validateRoutes(editor.document);
+      if (editor) {
+        validateRoutes(editor.document);
+      }
     },
     null,
     context.subscriptions
@@ -1242,8 +1288,12 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.languages.createDiagnosticCollection("routes");
 
   const updateDiagnostics = (document: vscode.TextDocument) => {
-    if (!document) return;
-    if (document.languageId !== "html" && document.languageId !== "php") return;
+    if (!document) {
+      return;
+    }
+    if (document.languageId !== "html" && document.languageId !== "php") {
+      return;
+    }
 
     const diagnostics: vscode.Diagnostic[] = [];
     diagnostics.push(...hrefDiagnosticProvider.validateDocument(document));
@@ -1433,7 +1483,9 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(ppSyncDiagnostics);
 
   const validatePpSync = async (document: vscode.TextDocument) => {
-    if (document.languageId !== "php") return;
+    if (document.languageId !== "php") {
+      return;
+    }
 
     await ppSyncProvider.refresh();
 
@@ -1526,14 +1578,18 @@ function registerAttributeValueCompletionProvider(
         const cursorOffset = position.character;
 
         const valueContext = getAttributeValueContext(line, cursorOffset);
-        if (!valueContext) return [];
+        if (!valueContext) {
+          return [];
+        }
 
         const { tagName, attributeName } = valueContext;
 
         const props = propsProvider.getProps(tagName);
         const propMeta = props.find((p) => p.name === attributeName);
 
-        if (!propMeta || !propMeta.allowed) return [];
+        if (!propMeta || !propMeta.allowed) {
+          return [];
+        }
 
         const combinedValues = new Set<string>();
 
@@ -1541,11 +1597,15 @@ function registerAttributeValueCompletionProvider(
           if (propMeta.allowed.includes("|")) {
             propMeta.allowed.split("|").forEach((val) => {
               const trimmedVal = val.trim();
-              if (trimmedVal) combinedValues.add(trimmedVal);
+              if (trimmedVal) {
+                combinedValues.add(trimmedVal);
+              }
             });
           } else {
             const trimmedVal = propMeta.allowed.trim();
-            if (trimmedVal) combinedValues.add(trimmedVal);
+            if (trimmedVal) {
+              combinedValues.add(trimmedVal);
+            }
           }
         }
 
@@ -1617,18 +1677,24 @@ function getAttributeValueContext(
   const afterCursor = line.substring(cursorOffset);
 
   const tagMatch = /<\s*([A-Z][A-Za-z0-9_]*)\b[^>]*$/.exec(beforeCursor);
-  if (!tagMatch) return null;
+  if (!tagMatch) {
+    return null;
+  }
 
   const tagName = tagMatch[1];
 
   const attrMatch = /([A-Za-z0-9_-]+)\s*=\s*"([^"]*?)$/.exec(beforeCursor);
-  if (!attrMatch) return null;
+  if (!attrMatch) {
+    return null;
+  }
 
   const attributeName = attrMatch[1];
   const currentValue = attrMatch[2];
 
   const nextQuoteIndex = afterCursor.indexOf('"');
-  if (nextQuoteIndex === -1) return null;
+  if (nextQuoteIndex === -1) {
+    return null;
+  }
 
   return { tagName, attributeName, currentValue };
 }
@@ -1693,17 +1759,25 @@ export function activateNativeJsHelp(ctx: vscode.ExtensionContext) {
   ctx.subscriptions.push(
     vscode.languages.registerHoverProvider("php", {
       provideHover(doc, pos) {
-        if (!insideMustache(doc, pos)) return;
+        if (!insideMustache(doc, pos)) {
+          return;
+        }
 
         const wr = doc.getWordRangeAtPosition(pos, /\w+/);
-        if (!wr) return;
+        if (!wr) {
+          return;
+        }
         const word = doc.getText(wr);
         const info = nativeInfo(word);
-        if (!info) return;
+        if (!info) {
+          return;
+        }
 
         const md = new vscode.MarkdownString();
         md.appendCodeblock(info.sig, "javascript");
-        if (info.jsDoc) md.appendMarkdown("\n" + info.jsDoc);
+        if (info.jsDoc) {
+          md.appendMarkdown("\n" + info.jsDoc);
+        }
         return new vscode.Hover(md, wr);
       },
     })
@@ -1715,15 +1789,21 @@ export function activateNativeJsHelp(ctx: vscode.ExtensionContext) {
       "php",
       {
         provideSignatureHelp(doc, pos) {
-          if (!insideMustache(doc, pos)) return null;
+          if (!insideMustache(doc, pos)) {
+            return null;
+          }
 
           const line = doc.lineAt(pos.line).text.slice(0, pos.character);
           const m = /(?:\.)([A-Za-z_$][\w$]*)\(/.exec(line);
-          if (!m) return null;
+          if (!m) {
+            return null;
+          }
 
           const name = m[1];
           const info = nativeInfo(name);
-          if (!info) return null;
+          if (!info) {
+            return null;
+          }
 
           const paramLabels = info.sig
             .replace(/^[^(]+\(([^)]*)\).*/, "$1")
@@ -1776,7 +1856,9 @@ const registerPhpHoverProvider = () => {
   return vscode.languages.registerHoverProvider(PHP_LANGUAGE, {
     provideHover(document, position) {
       const range = document.getWordRangeAtPosition(position, PHP_TAG_REGEX);
-      if (!range) return;
+      if (!range) {
+        return;
+      }
       const word = document.getText(range);
       const tagName = word.replace(/[</]/g, "");
       const useMap = parsePhpUseStatements(document.getText());
@@ -1798,11 +1880,15 @@ const registerPhpDefinitionProvider = () => {
   return vscode.languages.registerDefinitionProvider(PHP_LANGUAGE, {
     async provideDefinition(document, position) {
       const range = document.getWordRangeAtPosition(position, PHP_TAG_REGEX);
-      if (!range) return;
+      if (!range) {
+        return;
+      }
       const word = document.getText(range);
       const tagName = word.replace(/[</]/g, "");
       const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-      if (!workspaceFolder) return;
+      if (!workspaceFolder) {
+        return;
+      }
       const jsonUri = vscode.Uri.joinPath(
         workspaceFolder.uri,
         "settings",
@@ -1829,7 +1915,9 @@ const registerPhpDefinitionProvider = () => {
       }
       if (!mapping) {
         const useMap = parsePhpUseStatements(document.getText());
-        if (!useMap.has(tagName)) return;
+        if (!useMap.has(tagName)) {
+          return;
+        }
         const fullClass = useMap.get(tagName)!;
         mapping = { filePath: fullClass.replace(/\\\\/g, "/") + ".php" };
       } else {
@@ -1881,7 +1969,9 @@ const variableItems = (prefix: string) =>
 /* member completions  pp.|store.|… -------------------------------------- */
 const memberItems = (line: string) => {
   const m = /(pp|store|searchParams)\.\w*$/.exec(line);
-  if (!m) return;
+  if (!m) {
+    return;
+  }
   const cls = CLS_MAP[m[1] as VarName];
   return classStubs[cls].map((stub) => {
     const kind = stub.signature.includes("(")
@@ -1902,18 +1992,24 @@ const registerPhpScriptCompletionProvider = () =>
     PHP_SELECTOR,
     {
       provideCompletionItems(doc, pos) {
-        if (!insideScript(doc, pos)) return;
+        if (!insideScript(doc, pos)) {
+          return;
+        }
 
         const line = doc.lineAt(pos.line).text;
         const uptoCursor = line.slice(0, pos.character);
 
         /* a) member list after the dot */
         const mem = memberItems(uptoCursor);
-        if (mem?.length) return mem;
+        if (mem?.length) {
+          return mem;
+        }
 
         /* b) variable list while typing “pp…” etc. */
         const prefix = uptoCursor.match(/([A-Za-z_]*)$/)?.[1] ?? "";
-        if (prefix.length) return variableItems(prefix);
+        if (prefix.length) {
+          return variableItems(prefix);
+        }
 
         return;
       },
@@ -1931,7 +2027,9 @@ const registerPhpMarkupCompletionProvider = () =>
     PHP_SELECTOR,
     {
       async provideCompletionItems(doc, pos) {
-        if (insideScript(doc, pos)) return;
+        if (insideScript(doc, pos)) {
+          return;
+        }
 
         const fullBefore = doc.getText(
           new vscode.Range(new vscode.Position(0, 0), pos)
@@ -1939,7 +2037,9 @@ const registerPhpMarkupCompletionProvider = () =>
         const line = doc.lineAt(pos.line).text;
         const uptoCursor = line.slice(0, pos.character);
 
-        if (isInsidePrismaCall(fullBefore)) return [];
+        if (isInsidePrismaCall(fullBefore)) {
+          return [];
+        }
         if (/^\s*<\?[A-Za-z=]*$/i.test(uptoCursor)) return [];
         if (isInsideMustacheText(fullBefore)) return [];
 
