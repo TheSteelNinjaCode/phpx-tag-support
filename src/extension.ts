@@ -68,6 +68,7 @@ import {
   PpSyncHoverProvider,
   PpSyncProvider,
 } from "./analysis/pp-sync";
+import { getTypeCache, InferredType } from "./analysis/type-chache";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                  *
@@ -940,24 +941,16 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.languages.registerCompletionItemProvider(
       selector,
       {
-        provideCompletionItems(
-          doc: vscode.TextDocument,
-          pos: vscode.Position
-        ): vscode.CompletionItem[] | undefined {
-          // ① Grab the entire “root” chain within a single-brace context
+        provideCompletionItems(doc, pos): vscode.CompletionItem[] | undefined {
           const line = doc.lineAt(pos.line).text;
           const uptoCursor = line.slice(0, pos.character);
 
-          // Find last single "{", but ignore if it’s a double "{{"
           const lastOpen = uptoCursor.lastIndexOf("{");
-          if (
-            lastOpen === -1 ||
-            uptoCursor[lastOpen - 1] === "{" // it’s actually "{{"
-          ) {
+          if (lastOpen === -1 || uptoCursor[lastOpen - 1] === "{") {
             return;
           }
-          const exprPrefix = uptoCursor.slice(lastOpen + 1);
 
+          const exprPrefix = uptoCursor.slice(lastOpen + 1);
           const m = /([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.\s*(\w*)$/.exec(
             exprPrefix
           );
@@ -966,82 +959,65 @@ export async function activate(context: vscode.ExtensionContext) {
           }
 
           const [, root, partial] = m;
-
-          const special = new Set(["pp", "store", "searchParams"]);
-          if (special.has(root)) {
-            return;
-          }
-
           const parts = root.split(".");
-          let typeNode = globalStubTypes[parts[0]];
-          if (!typeNode) {
-            return;
-          }
 
-          for (let i = 1; i < parts.length; i++) {
-            const propName = parts[i];
-            const memberSig = typeNode.members.find(
-              (member) =>
-                ts.isPropertySignature(member) &&
-                (member.name as ts.Identifier).text === propName
-            ) as ts.PropertySignature | undefined;
-
-            if (
-              !memberSig ||
-              !memberSig.type ||
-              !ts.isTypeLiteralNode(memberSig.type)
-            ) {
-              typeNode = null as any;
-              break;
-            }
-            typeNode = memberSig.type;
-          }
-
-          let stubProps: string[] = [];
-          if (typeNode) {
-            stubProps = typeNode.members
-              .filter(ts.isPropertySignature)
-              .map((ps) => (ps.name as ts.Identifier).text);
-          }
+          const inferredType = getInferredTypeForChain(parts);
 
           const out: vscode.CompletionItem[] = [];
-          const seen = new Set<string>();
 
-          for (const p of stubProps.filter((p) => p.startsWith(partial))) {
-            const it = new vscode.CompletionItem(
-              p,
-              vscode.CompletionItemKind.Property
-            );
-            it.sortText = "0_" + p;
-            out.push(it);
-            seen.add(p);
-          }
-
-          const treatAsScalar = stubProps.length <= 1;
-          if (treatAsScalar) {
-            for (const k of JS_NATIVE_MEMBERS) {
-              if (!k.startsWith(partial) || seen.has(k)) {
-                continue;
-              }
-
+          if (inferredType === "string") {
+            const stringMethods = [
+              "toUpperCase",
+              "toLowerCase",
+              "trim",
+              "split",
+              "slice",
+            ];
+            for (const method of stringMethods.filter((m) =>
+              m.startsWith(partial)
+            )) {
+              const item = new vscode.CompletionItem(
+                method,
+                vscode.CompletionItemKind.Method
+              );
+              item.insertText = new vscode.SnippetString(`${method}()$0`);
+              item.detail = `(method) string.${method}()`;
+              out.push(item);
+            }
+          } else if (inferredType === "number") {
+            const numberMethods = ["toFixed", "toPrecision", "toString"];
+            for (const method of numberMethods.filter((m) =>
+              m.startsWith(partial)
+            )) {
+              const item = new vscode.CompletionItem(
+                method,
+                vscode.CompletionItemKind.Method
+              );
+              item.insertText = new vscode.SnippetString(`${method}()$0`);
+              item.detail = `(method) number.${method}()`;
+              out.push(item);
+            }
+          } else {
+            // Fallback to showing all JS native members
+            for (const k of JS_NATIVE_MEMBERS.filter((k) =>
+              k.startsWith(partial)
+            )) {
               const kind =
                 typeof ("" as any)[k] === "function"
                   ? vscode.CompletionItemKind.Method
                   : vscode.CompletionItemKind.Property;
-
-              const it = new vscode.CompletionItem(k, kind);
+              const item = new vscode.CompletionItem(k, kind);
               if (kind === vscode.CompletionItemKind.Method) {
-                it.insertText = new vscode.SnippetString(`${k}()$0`);
+                item.insertText = new vscode.SnippetString(`${k}()$0`);
               }
-              it.sortText = "1_" + k;
-              out.push(it);
+              out.push(item);
             }
           }
 
           return out;
         },
       },
-      "." // Trigger on “.”
+      "."
     )
   );
 
@@ -1127,6 +1103,10 @@ export async function activate(context: vscode.ExtensionContext) {
     );
   }
 
+  const mustacheTypeDiags =
+    vscode.languages.createDiagnosticCollection("mustache-types");
+  context.subscriptions.push(mustacheTypeDiags);
+
   // Combined update validations function.
   const updateAllValidations = async (document: vscode.TextDocument) => {
     scheduleValidation(document);
@@ -1139,6 +1119,8 @@ export async function activate(context: vscode.ExtensionContext) {
     await validateGroupByCall(document, groupByDiags);
     await validateAggregateCall(document, aggregateDiags);
     await validatePpSync(document);
+
+    validateMustacheTypeSafety(document, mustacheTypeDiags);
 
     updateStringDecorations(document);
     updateMustacheBraceDecorations(document, braceDecorationType);
@@ -1566,6 +1548,115 @@ export async function activate(context: vscode.ExtensionContext) {
 /* ────────────────────────────────────────────────────────────── *
  *        🎯  ATTRIBUTE VALUE COMPLETION PROVIDER                  *
  * ────────────────────────────────────────────────────────────── */
+function validateMustacheTypeSafety(
+  document: vscode.TextDocument,
+  diagCollection: vscode.DiagnosticCollection
+) {
+  const text = document.getText();
+  const diags: vscode.Diagnostic[] = [];
+
+  // ✅ Use getTypeCache() instead
+  const typeMap = getTypeCache();
+
+  // Match expressions like {user.age.toUpperCase()}
+  const exprRegex =
+    /\{([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.([A-Za-z_$][\w$]*)\([^)]*\))\}/g;
+
+  let match: RegExpExecArray | null;
+  while ((match = exprRegex.exec(text))) {
+    const fullExpr = match[1];
+    const methodName = match[2];
+
+    // Parse chain: user.age.toUpperCase
+    const parts = fullExpr.split(".");
+    const root = parts[0];
+
+    // Walk type chain
+    let currentType = typeMap.get(root);
+    for (let i = 1; i < parts.length - 1; i++) {
+      const prop = parts[i];
+      currentType = currentType?.properties?.get(prop);
+    }
+
+    // Check if method is valid for type
+    if (currentType) {
+      const inferredType = currentType.type as InferredType;
+      const isValidMethod = isMethodValidForType(methodName, inferredType);
+
+      if (!isValidMethod) {
+        const startPos = document.positionAt(match.index + 1);
+        const endPos = document.positionAt(match.index + match[0].length - 1);
+
+        diags.push(
+          new vscode.Diagnostic(
+            new vscode.Range(startPos, endPos),
+            `⚠️ Method '${methodName}()' does not exist on type '${inferredType}'.\n` +
+              `Available methods: ${getMethodsForType(inferredType).join(
+                ", "
+              )}`,
+            vscode.DiagnosticSeverity.Warning
+          )
+        );
+      }
+    }
+  }
+
+  diagCollection.set(document.uri, diags);
+}
+
+function isMethodValidForType(
+  method: string,
+  type: InferredType | "any"
+): boolean {
+  const stringMethods = [
+    "toUpperCase",
+    "toLowerCase",
+    "trim",
+    "split",
+    "slice",
+    "substring",
+  ];
+  const numberMethods = ["toFixed", "toPrecision", "toString"];
+  const arrayMethods = ["map", "filter", "reduce", "forEach", "join"];
+
+  switch (type) {
+    case "string":
+      return stringMethods.includes(method);
+    case "number":
+      return numberMethods.includes(method);
+    case "array":
+      return arrayMethods.includes(method);
+    default:
+      return true;
+  }
+}
+
+function getMethodsForType(type: InferredType | "any"): string[] {
+  switch (type) {
+    case "string":
+      return ["toUpperCase", "toLowerCase", "trim", "split", "substring"];
+    case "number":
+      return ["toFixed", "toPrecision", "toString"];
+    case "array":
+      return ["map", "filter", "join", "slice"];
+    default:
+      return [];
+  }
+}
+
+// ✅ Replace getInferredTypeForChain function
+function getInferredTypeForChain(
+  parts: string[]
+): InferredType | "any" | undefined {
+  const typeMap = getTypeCache(); // ✅ Use getTypeCache()
+  let current = typeMap.get(parts[0]);
+
+  for (let i = 1; i < parts.length; i++) {
+    current = current?.properties?.get(parts[i]);
+  }
+
+  return current?.type;
+}
 
 function registerAttributeValueCompletionProvider(
   propsProvider: ComponentPropsProvider

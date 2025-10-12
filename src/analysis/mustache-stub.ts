@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import ts from "typescript";
 import { parseGlobalsWithTS } from "../extension";
+import { updateTypeCache } from "./type-chache";
 
 const isBuiltIn: (name: string) => boolean = (() => {
   const cache = new Map<string, boolean>();
@@ -105,6 +106,7 @@ const DESTRUCTURED_RE =
 
 interface PropNode {
   children: Map<string, PropNode>;
+  inferredType?: "string" | "number" | "boolean" | "object" | "array";
 }
 
 function createPropNode(): PropNode {
@@ -127,6 +129,7 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
   if (newText !== lastStubText) {
     lastStubText = newText;
     await writeStubFile(newText);
+    updateTypeCache(propMap);
   }
 }
 
@@ -192,9 +195,6 @@ function extractScriptBlocks(text: string): { start: number; end: number }[] {
   return blocks;
 }
 
-/**
- * Extracts PHP block ranges (<?php ?>, <?= ?>, <? ?>)
- */
 function extractPhpBlocks(text: string): { start: number; end: number }[] {
   const blocks: { start: number; end: number }[] = [];
   const regex = /<\?(?:php|=)?([\s\S]*?)(?:\?>|$)/g;
@@ -210,9 +210,6 @@ function extractPhpBlocks(text: string): { start: number; end: number }[] {
   return blocks;
 }
 
-/**
- * Checks if index is within any excluded block
- */
 function isInExcludedBlock(
   index: number,
   blocks: { start: number; end: number }[]
@@ -275,6 +272,30 @@ async function collectObjectLiteralProps(
   }
 }
 
+function inferTypeFromInitializer(
+  init: ts.Expression
+): "string" | "number" | "boolean" | "object" | "array" | "any" {
+  if (ts.isStringLiteral(init)) {
+    return "string";
+  }
+  if (ts.isNumericLiteral(init)) {
+    return "number";
+  }
+  if (
+    init.kind === ts.SyntaxKind.TrueKeyword ||
+    init.kind === ts.SyntaxKind.FalseKeyword
+  ) {
+    return "boolean";
+  }
+  if (ts.isObjectLiteralExpression(init)) {
+    return "object";
+  }
+  if (ts.isArrayLiteralExpression(init)) {
+    return "array";
+  }
+  return "any";
+}
+
 function processObjectLiteral(
   expr: ts.ObjectLiteralExpression,
   node: PropNode
@@ -291,11 +312,16 @@ function processObjectLiteral(
       }
       const childNode = node.children.get(name)!;
 
-      if (
-        propNode.initializer &&
-        ts.isObjectLiteralExpression(propNode.initializer)
-      ) {
-        processObjectLiteral(propNode.initializer, childNode);
+      if (propNode.initializer) {
+        const inferredType = inferTypeFromInitializer(propNode.initializer);
+
+        if (inferredType !== "any") {
+          childNode.inferredType = inferredType;
+        }
+
+        if (ts.isObjectLiteralExpression(propNode.initializer)) {
+          processObjectLiteral(propNode.initializer, childNode);
+        }
       }
     } else if (
       ts.isShorthandPropertyAssignment(propNode) &&
@@ -375,12 +401,19 @@ function printNode(node: PropNode, indentLevel: number): string {
   const parts: string[] = [];
 
   for (const [propKey, childNode] of node.children) {
-    if (childNode.children.size === 0) {
-      parts.push(`${indent}${propKey}: any;`);
-    } else {
-      const nestedLiteral = printNode(childNode, indentLevel + 1);
-      parts.push(`${indent}${propKey}: ${nestedLiteral};`);
+    let typeAnnotation = "any";
+
+    if (childNode.inferredType === "string") {
+      typeAnnotation = "string";
+    } else if (childNode.inferredType === "number") {
+      typeAnnotation = "number";
+    } else if (childNode.inferredType === "boolean") {
+      typeAnnotation = "boolean";
+    } else if (childNode.inferredType === "object") {
+      typeAnnotation = printNode(childNode, indentLevel + 1);
     }
+
+    parts.push(`${indent}${propKey}: ${typeAnnotation};`);
   }
 
   parts.push(`${indent}[key: string]: any;`);
