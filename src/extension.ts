@@ -961,11 +961,7 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(pphpSigDiags);
 
   // ③ *** register your mustache‐stub completion provider here ***
-  const selector: vscode.DocumentSelector = [
-    { language: "php" },
-    { language: "javascript" },
-    { language: "typescript" },
-  ];
+  const selector: vscode.DocumentSelector = [{ language: "php" }];
 
   context.subscriptions.push(
     vscode.languages.registerCompletionItemProvider(
@@ -1306,7 +1302,7 @@ export async function activate(context: vscode.ExtensionContext) {
     if (!document) {
       return;
     }
-    if (document.languageId !== "html" && document.languageId !== "php") {
+    if (document.languageId !== "php") {
       return;
     }
 
@@ -1323,30 +1319,23 @@ export async function activate(context: vscode.ExtensionContext) {
     phpRoutesDiagnosticCollection.set(document.uri, diagnostics);
   };
 
-  const htmlPhpSelector = [
-    { scheme: "file", language: "html" },
-    { scheme: "file", language: "php" },
-  ];
   const phpSelector = { scheme: "file", language: "php" };
 
   context.subscriptions.push(
-    vscode.languages.registerHoverProvider(htmlPhpSelector, hrefHoverProvider),
-    vscode.languages.registerHoverProvider(["html", "php"], srcHoverProvider),
+    vscode.languages.registerHoverProvider(phpSelector, hrefHoverProvider),
+    vscode.languages.registerHoverProvider(phpSelector, srcHoverProvider),
     vscode.languages.registerCompletionItemProvider(
-      ["html", "php"],
+      phpSelector,
       srcCompletionProvider,
       '"',
       "'",
       "=",
       " "
     ),
-    vscode.languages.registerDefinitionProvider(
-      ["html", "php"],
-      srcDefinitionProvider
-    ),
+    vscode.languages.registerDefinitionProvider(["php"], srcDefinitionProvider),
 
     vscode.languages.registerCompletionItemProvider(
-      htmlPhpSelector,
+      phpSelector,
       hrefCompletionProvider,
       '"',
       "'",
@@ -1355,7 +1344,7 @@ export async function activate(context: vscode.ExtensionContext) {
     ),
 
     vscode.languages.registerDefinitionProvider(
-      htmlPhpSelector,
+      phpSelector,
       hrefDefinitionProvider
     ),
 
