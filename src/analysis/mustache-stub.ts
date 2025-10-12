@@ -115,6 +115,8 @@ function createPropNode(): PropNode {
 
 let lastStubText = "";
 
+const explicitTypes = new Map<string, string>();
+
 export async function rebuildMustacheStub(document: vscode.TextDocument) {
   const text = document.getText();
   const propMap = new Map<string, PropNode>();
@@ -124,6 +126,8 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
   await collectObjectLiteralProps(text, propMap);
   await collectDestructuredLiteralProps(text, propMap);
 
+  collectExplicitTypes(text);
+
   const newText = buildStubLines(propMap);
 
   if (newText !== lastStubText) {
@@ -131,6 +135,148 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
     await writeStubFile(newText);
     updateTypeCache(propMap);
   }
+}
+
+// ✅ NEW: Extract explicit type declarations from <script> blocks
+// ✅ NEW: Extract type from pp.state() calls
+// ✅ FIXED: Extract type from pp.state() calls by looking at the argument
+function collectExplicitTypes(text: string): void {
+  explicitTypes.clear();
+
+  const scriptRegex = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+  let scriptMatch: RegExpExecArray | null;
+
+  while ((scriptMatch = scriptRegex.exec(text)) !== null) {
+    const scriptContent = scriptMatch[1];
+
+    const sf = ts.createSourceFile(
+      "temp.ts",
+      scriptContent,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS
+    );
+
+    sf.forEachChild((node) => {
+      if (ts.isVariableStatement(node)) {
+        for (const decl of node.declarationList.declarations) {
+          // Handle: const myVar: string = ...
+          if (ts.isIdentifier(decl.name) && decl.type) {
+            const varName = decl.name.text;
+            const typeStr = decl.type.getText(sf);
+            explicitTypes.set(varName, typeStr);
+          }
+          // ✅ Handle destructured: const [count, setCount] = pp.state(...)
+          else if (ts.isArrayBindingPattern(decl.name) && decl.initializer) {
+            const pattern = decl.name;
+            if (pattern.elements.length > 0) {
+              const firstElement = pattern.elements[0];
+              if (
+                ts.isBindingElement(firstElement) &&
+                ts.isIdentifier(firstElement.name)
+              ) {
+                const varName = firstElement.name.text;
+
+                // ✅ Check if it's a pp.state() call and infer from the ARGUMENT
+                if (ts.isCallExpression(decl.initializer)) {
+                  const callExpr = decl.initializer;
+
+                  // Check if it's pp.state() or state()
+                  let isStateCall = false;
+                  if (ts.isPropertyAccessExpression(callExpr.expression)) {
+                    // pp.state()
+                    if (
+                      ts.isIdentifier(callExpr.expression.expression) &&
+                      callExpr.expression.expression.text === "pp" &&
+                      ts.isIdentifier(callExpr.expression.name) &&
+                      callExpr.expression.name.text === "state"
+                    ) {
+                      isStateCall = true;
+                    }
+                  } else if (ts.isIdentifier(callExpr.expression)) {
+                    // state()
+                    if (callExpr.expression.text === "state") {
+                      isStateCall = true;
+                    }
+                  }
+
+                  // ✅ Get type from the first ARGUMENT, not the call itself
+                  if (isStateCall && callExpr.arguments.length > 0) {
+                    const firstArg = callExpr.arguments[0];
+                    const inferredType = inferTypeFromExpression(firstArg, sf);
+                    explicitTypes.set(varName, inferredType);
+                  }
+                }
+              }
+            }
+          }
+          // Handle regular const with initializer but no explicit type
+          else if (
+            ts.isIdentifier(decl.name) &&
+            !decl.type &&
+            decl.initializer
+          ) {
+            const varName = decl.name.text;
+            const inferredType = inferTypeFromExpression(decl.initializer, sf);
+            explicitTypes.set(varName, inferredType);
+          }
+        }
+      }
+    });
+  }
+}
+
+// ✅ NEW: Infer type from any expression
+function inferTypeFromExpression(
+  expr: ts.Expression,
+  sf: ts.SourceFile
+): string {
+  if (ts.isStringLiteral(expr)) {
+    return "string";
+  }
+  if (ts.isNumericLiteral(expr)) {
+    return "number";
+  }
+  if (
+    expr.kind === ts.SyntaxKind.TrueKeyword ||
+    expr.kind === ts.SyntaxKind.FalseKeyword
+  ) {
+    return "boolean";
+  }
+  if (ts.isObjectLiteralExpression(expr)) {
+    // Build object type from literal
+    return buildObjectType(expr, sf);
+  }
+  if (ts.isArrayLiteralExpression(expr)) {
+    return "any[]";
+  }
+  return "any";
+}
+
+// ✅ NEW: Build object type literal from object expression
+function buildObjectType(
+  expr: ts.ObjectLiteralExpression,
+  sf: ts.SourceFile
+): string {
+  const props: string[] = [];
+
+  for (const prop of expr.properties) {
+    if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name)) {
+      const propName = prop.name.text;
+      const propType = inferTypeFromExpression(prop.initializer, sf);
+      props.push(`  ${propName}: ${propType};`);
+    } else if (
+      ts.isShorthandPropertyAssignment(prop) &&
+      ts.isIdentifier(prop.name)
+    ) {
+      const propName = prop.name.text;
+      props.push(`  ${propName}: any;`);
+    }
+  }
+
+  props.push("  [key: string]: any;");
+
+  return `{\n${props.join("\n")}\n}`;
 }
 
 function collectMustacheRootsAndProps(
@@ -381,15 +527,34 @@ async function collectDestructuredLiteralProps(
   }
 }
 
+// ✅ MODIFIED: Use explicit types when available
+// ✅ MODIFIED: Include explicit types even if not in propMap
 function buildStubLines(map: Map<string, PropNode>): string {
   const lines: string[] = [];
+  const processedVars = new Set<string>();
 
+  // First, process variables from propMap
   for (const [root, node] of map) {
-    if (node.children.size === 0) {
+    processedVars.add(root);
+
+    // ✅ Check if we have an explicit type for this variable
+    const explicitType = explicitTypes.get(root);
+
+    if (explicitType) {
+      // Use the explicit type directly
+      lines.push(`declare var ${root}: ${explicitType};`);
+    } else if (node.children.size === 0) {
       lines.push(`declare var ${root}: any;`);
     } else {
       const typeLiteral = printNode(node, 1);
       lines.push(`declare var ${root}: ${typeLiteral};`);
+    }
+  }
+
+  // ✅ NEW: Add explicit types that weren't in propMap
+  for (const [varName, typeStr] of explicitTypes) {
+    if (!processedVars.has(varName)) {
+      lines.push(`declare var ${varName}: ${typeStr};`);
     }
   }
 

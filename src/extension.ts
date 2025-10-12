@@ -68,7 +68,12 @@ import {
   PpSyncHoverProvider,
   PpSyncProvider,
 } from "./analysis/pp-sync";
-import { getTypeCache, InferredType } from "./analysis/type-chache";
+import {
+  getTypeCache,
+  InferredType,
+  updateTypeCacheFromSimpleTypes,
+  updateTypeCacheFromTS,
+} from "./analysis/type-chache";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                  *
@@ -271,7 +276,9 @@ export function parseGlobalsWithTS(source: string) {
   );
 
   globalStubs = {};
-  globalStubTypes = {}; // ← clear it too
+  globalStubTypes = {};
+
+  const simpleTypes = new Map<string, string>();
 
   sf.forEachChild((node) => {
     if (
@@ -284,18 +291,24 @@ export function parseGlobalsWithTS(source: string) {
       if (ts.isIdentifier(decl.name)) {
         const name = decl.name.text;
         const type = decl.type;
+
         if (type && ts.isTypeLiteralNode(type)) {
           globalStubs[name] = type.members
             .filter(ts.isPropertySignature)
             .map((ps) => (ps.name as ts.Identifier).text);
-
           globalStubTypes[name] = type;
+        } else if (type) {
+          globalStubs[name] = [];
+          simpleTypes.set(name, type.getText());
         } else {
           globalStubs[name] = [];
         }
       }
     }
   });
+
+  updateTypeCacheFromTS(globalStubTypes);
+  updateTypeCacheFromSimpleTypes(simpleTypes);
 }
 
 /**
@@ -320,7 +333,6 @@ const addImportCommand = async (
     return;
   }
 
-  // Compute the group prefix and the short component name.
   const lastSlash = fullComponent.lastIndexOf("\\");
   const groupPrefix = fullComponent.substring(0, lastSlash);
   const componentName = fullComponent.substring(lastSlash + 1);
