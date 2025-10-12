@@ -127,19 +127,40 @@ export async function rebuildMustacheStub(document: vscode.TextDocument) {
   await collectDestructuredLiteralProps(text, propMap);
 
   collectExplicitTypes(text);
+  mergeExplicitTypesIntoPropMap(propMap);
 
   const newText = buildStubLines(propMap);
 
   if (newText !== lastStubText) {
     lastStubText = newText;
     await writeStubFile(newText);
-    updateTypeCache(propMap);
+  }
+
+  updateTypeCache(propMap);
+}
+
+function mergeExplicitTypesIntoPropMap(map: Map<string, PropNode>): void {
+  for (const [varName, typeStr] of explicitTypes) {
+    if (!map.has(varName)) {
+      map.set(varName, createPropNode());
+    }
+
+    const node = map.get(varName)!;
+
+    if (typeStr === "string") {
+      node.inferredType = "string";
+    } else if (typeStr === "number") {
+      node.inferredType = "number";
+    } else if (typeStr === "boolean") {
+      node.inferredType = "boolean";
+    } else if (typeStr.includes("{")) {
+      node.inferredType = "object";
+    } else if (typeStr.includes("[]")) {
+      node.inferredType = "array";
+    }
   }
 }
 
-// ✅ NEW: Extract explicit type declarations from <script> blocks
-// ✅ NEW: Extract type from pp.state() calls
-// ✅ FIXED: Extract type from pp.state() calls by looking at the argument
 function collectExplicitTypes(text: string): void {
   explicitTypes.clear();
 
@@ -160,14 +181,11 @@ function collectExplicitTypes(text: string): void {
     sf.forEachChild((node) => {
       if (ts.isVariableStatement(node)) {
         for (const decl of node.declarationList.declarations) {
-          // Handle: const myVar: string = ...
           if (ts.isIdentifier(decl.name) && decl.type) {
             const varName = decl.name.text;
             const typeStr = decl.type.getText(sf);
             explicitTypes.set(varName, typeStr);
-          }
-          // ✅ Handle destructured: const [count, setCount] = pp.state(...)
-          else if (ts.isArrayBindingPattern(decl.name) && decl.initializer) {
+          } else if (ts.isArrayBindingPattern(decl.name) && decl.initializer) {
             const pattern = decl.name;
             if (pattern.elements.length > 0) {
               const firstElement = pattern.elements[0];
@@ -177,14 +195,11 @@ function collectExplicitTypes(text: string): void {
               ) {
                 const varName = firstElement.name.text;
 
-                // ✅ Check if it's a pp.state() call and infer from the ARGUMENT
                 if (ts.isCallExpression(decl.initializer)) {
                   const callExpr = decl.initializer;
 
-                  // Check if it's pp.state() or state()
                   let isStateCall = false;
                   if (ts.isPropertyAccessExpression(callExpr.expression)) {
-                    // pp.state()
                     if (
                       ts.isIdentifier(callExpr.expression.expression) &&
                       callExpr.expression.expression.text === "pp" &&
@@ -194,13 +209,11 @@ function collectExplicitTypes(text: string): void {
                       isStateCall = true;
                     }
                   } else if (ts.isIdentifier(callExpr.expression)) {
-                    // state()
                     if (callExpr.expression.text === "state") {
                       isStateCall = true;
                     }
                   }
 
-                  // ✅ Get type from the first ARGUMENT, not the call itself
                   if (isStateCall && callExpr.arguments.length > 0) {
                     const firstArg = callExpr.arguments[0];
                     const inferredType = inferTypeFromExpression(firstArg, sf);
@@ -209,9 +222,7 @@ function collectExplicitTypes(text: string): void {
                 }
               }
             }
-          }
-          // Handle regular const with initializer but no explicit type
-          else if (
+          } else if (
             ts.isIdentifier(decl.name) &&
             !decl.type &&
             decl.initializer
@@ -226,7 +237,6 @@ function collectExplicitTypes(text: string): void {
   }
 }
 
-// ✅ NEW: Infer type from any expression
 function inferTypeFromExpression(
   expr: ts.Expression,
   sf: ts.SourceFile
@@ -244,7 +254,6 @@ function inferTypeFromExpression(
     return "boolean";
   }
   if (ts.isObjectLiteralExpression(expr)) {
-    // Build object type from literal
     return buildObjectType(expr, sf);
   }
   if (ts.isArrayLiteralExpression(expr)) {
@@ -253,7 +262,6 @@ function inferTypeFromExpression(
   return "any";
 }
 
-// ✅ NEW: Build object type literal from object expression
 function buildObjectType(
   expr: ts.ObjectLiteralExpression,
   sf: ts.SourceFile

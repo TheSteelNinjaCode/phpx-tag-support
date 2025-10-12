@@ -1133,7 +1133,6 @@ export async function activate(context: vscode.ExtensionContext) {
         validateStateTupleUsage(doc, pphpSigDiags);
         rebuildMustacheStub(doc);
         validateComponentPropValues(doc, propsProvider);
-
         validateJsVariablesInCurlyBraces(doc, jsVarDiagnostics);
         updateJsVariableDecorations(doc, braceDecorationType);
         pendingTimers.delete(key);
@@ -1145,7 +1144,6 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.languages.createDiagnosticCollection("mustache-types");
   context.subscriptions.push(mustacheTypeDiags);
 
-  // Combined update validations function.
   const updateAllValidations = async (document: vscode.TextDocument) => {
     scheduleValidation(document);
 
@@ -1157,7 +1155,6 @@ export async function activate(context: vscode.ExtensionContext) {
     await validateGroupByCall(document, groupByDiags);
     await validateAggregateCall(document, aggregateDiags);
     await validatePpSync(document);
-
     validateMustacheTypeSafety(document, mustacheTypeDiags);
 
     updateStringDecorations(document);
@@ -1174,7 +1171,7 @@ export async function activate(context: vscode.ExtensionContext) {
     fetchFunctionDiagnostics.set(document.uri, fetchFunctionDiags);
   };
 
-  context.subscriptions.push(objectPropertyDecorationType);
+  context.subscriptions.push(propertyDecorationType);
 
   // Register event listeners.
   vscode.workspace.onDidChangeTextDocument(
@@ -2147,9 +2144,6 @@ const registerPhpScriptCompletionProvider = () =>
  *  2️⃣  completions OUTSIDE <script>                             *
  * ────────────────────────────────────────────────────────────── */
 
-/**
- * Decorates variable names and object properties inside mustache expressions
- */
 function updateMustacheVariableDecorations(
   document: vscode.TextDocument
 ): void {
@@ -2164,7 +2158,6 @@ function updateMustacheVariableDecorations(
 
   const text = document.getText();
 
-  // ✅ Build exclusion ranges (same as validation)
   const scriptRanges: Array<[number, number]> = [];
   {
     const re = /<script\b[^>]*>[\s\S]*?<\/script>/gi;
@@ -2212,7 +2205,7 @@ function updateMustacheVariableDecorations(
   for (const match of extractMustacheExpressions(text)) {
     const { inner, index: startIdx } = match;
 
-    // ✅ Skip if inside script, style, or PHP blocks
+    // Skip if inside script, style, or PHP blocks
     if (
       isInsideScript(startIdx) ||
       isInsideStyle(startIdx) ||
@@ -2221,24 +2214,20 @@ function updateMustacheVariableDecorations(
       continue;
     }
 
-    const baseOffset = startIdx + 1; // Skip opening brace
+    const baseOffset = startIdx + 1;
 
-    // Normalize the expression
-    const normalized = preNormalizePhpVars("{" + inner + "}")
-      .slice(1, -1)
-      .trim();
+    const trimmed = inner.trim();
+    const trimOffset = baseOffset + inner.indexOf(trimmed);
 
-    // Match root variables and property chains: myVar, user.name, user.address.city
     const chainRegex = /([A-Za-z_$][\w$]*)(\s*\.\s*[A-Za-z_$][\w$]*)*/g;
     let chainMatch: RegExpExecArray | null;
 
-    while ((chainMatch = chainRegex.exec(normalized)) !== null) {
+    while ((chainMatch = chainRegex.exec(trimmed)) !== null) {
       const fullChain = chainMatch[0];
       const parts = fullChain.split(/\s*\.\s*/);
 
-      // Decorate root variable
       const rootVar = parts[0];
-      const rootStart = baseOffset + chainMatch.index;
+      const rootStart = trimOffset + chainMatch.index;
       const rootEnd = rootStart + rootVar.length;
 
       variableDecorations.push({
@@ -2248,45 +2237,48 @@ function updateMustacheVariableDecorations(
         ),
       });
 
-      // Decorate properties
-      let offset = rootVar.length;
+      let searchStart = chainMatch.index + rootVar.length;
+
       for (let i = 1; i < parts.length; i++) {
         const prop = parts[i];
-        // Find the actual position (accounting for whitespace around dots)
-        const dotIndex = normalized.indexOf(".", chainMatch.index + offset);
-        const propStart = baseOffset + dotIndex + 1;
-        // Skip whitespace after dot
-        let actualPropStart = propStart;
-        while (
-          actualPropStart < baseOffset + normalized.length &&
-          /\s/.test(normalized[actualPropStart - baseOffset])
-        ) {
-          actualPropStart++;
+
+        const dotIndex = trimmed.indexOf(".", searchStart);
+        if (dotIndex === -1) {
+          break;
         }
+
+        let propStart = dotIndex + 1;
+        while (propStart < trimmed.length && /\s/.test(trimmed[propStart])) {
+          propStart++;
+        }
+
+        const actualPropStart = trimOffset + propStart;
         const propEnd = actualPropStart + prop.length;
 
-        propertyDecorations.push({
-          range: new vscode.Range(
-            document.positionAt(actualPropStart),
-            document.positionAt(propEnd)
-          ),
-        });
+        const nextCharIndex = propStart + prop.length;
+        let nextChar = "";
+        for (let j = nextCharIndex; j < trimmed.length; j++) {
+          if (!/\s/.test(trimmed[j])) {
+            nextChar = trimmed[j];
+            break;
+          }
+        }
 
-        offset = dotIndex + 1 + prop.length - chainMatch.index;
+        if (nextChar !== "(") {
+          propertyDecorations.push({
+            range: new vscode.Range(
+              document.positionAt(actualPropStart),
+              document.positionAt(propEnd)
+            ),
+          });
+        }
+
+        searchStart = propStart + prop.length;
       }
     }
   }
 
-  // Create decoration types
-  const variableDecorationType = vscode.window.createTextEditorDecorationType({
-    color: "#9CDCFE", // Light blue for variables
-  });
-
-  const propertyDecorationType = vscode.window.createTextEditorDecorationType({
-    color: "#9CDCFE", // Same color for properties
-  });
-
-  editor.setDecorations(variableDecorationType, variableDecorations);
+  editor.setDecorations(propertyDecorationType, variableDecorations);
   editor.setDecorations(propertyDecorationType, propertyDecorations);
 }
 
@@ -3399,8 +3391,12 @@ const nativePropRegex = new RegExp(
 );
 const objectPropRegex = /(?<=\.)[A-Za-z_$][\w$]*/g;
 
-const objectPropertyDecorationType =
+const propertyDecorationType =
   vscode.window.createTextEditorDecorationType({ color: "#9CDCFE" });
+    // Create decoration types
+  const variableDecorationType = vscode.window.createTextEditorDecorationType({
+    color: "#9CDCFE", // Light blue for variables
+  });
 
 const STRING_COLOR = "#CE9178";
 const stringDecorationType = vscode.window.createTextEditorDecorationType({
@@ -3574,7 +3570,7 @@ function updateNativeTokenDecorations(
 
   editor.setDecorations(funcDecoType, funcDecorations);
   editor.setDecorations(propDecoType, nativePropDecorations);
-  editor.setDecorations(objectPropertyDecorationType, objectPropDecorations);
+  editor.setDecorations(propertyDecorationType, objectPropDecorations);
   editor.setDecorations(numberDecorationType, numberDecorations);
   editor.setDecorations(tplLiteralDecorationType, stringSpans);
   editor.setDecorations(functionCallDecorationType, functionCallDecos);
