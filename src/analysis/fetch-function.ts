@@ -115,7 +115,7 @@ function isInPhpBlock(
 }
 
 /**
- * Checks if the cursor is inside a pphp.fetchFunction call
+ * Checks if the cursor is inside a pp.fetchFunction call
  */
 function isInsideFetchFunctionCall(
   document: vscode.TextDocument,
@@ -124,8 +124,8 @@ function isInsideFetchFunctionCall(
   const line = document.lineAt(position.line).text;
   const beforeCursor = line.substring(0, position.character);
 
-  // Check if we're inside pphp.fetchFunction('...' or pphp.fetchFunction("..."
-  const fetchFunctionPattern = /pphp\.fetchFunction\s*\(\s*['"][^'"]*$/;
+  // Check if we're inside pp.fetchFunction('...' or pp.fetchFunction("..."
+  const fetchFunctionPattern = /pp\.fetchFunction\s*\(\s*['"][^'"]*$/;
   return fetchFunctionPattern.test(beforeCursor);
 }
 
@@ -140,8 +140,8 @@ function getFunctionNameFromCall(
   const beforeCursor = line.substring(0, position.character);
   const afterCursor = line.substring(position.character);
 
-  // Match: pphp.fetchFunction('functionName' with cursor potentially in the middle
-  const match = /pphp\.fetchFunction\s*\(\s*['"]([^'"]*?)$/.exec(beforeCursor);
+  // Match: pp.fetchFunction('functionName' with cursor potentially in the middle
+  const match = /pp\.fetchFunction\s*\(\s*['"]([^'"]*?)$/.exec(beforeCursor);
   if (!match) {
     return null;
   }
@@ -159,7 +159,7 @@ function getFunctionNameFromCall(
 }
 
 /**
- * Completion provider for pphp.fetchFunction
+ * Completion provider for pp.fetchFunction
  */
 export class FetchFunctionCompletionProvider
   implements vscode.CompletionItemProvider
@@ -194,7 +194,7 @@ export class FetchFunctionCompletionProvider
 }
 
 /**
- * Definition provider for pphp.fetchFunction
+ * Definition provider for pp.fetchFunction
  */
 export class FetchFunctionDefinitionProvider
   implements vscode.DefinitionProvider
@@ -221,7 +221,7 @@ export class FetchFunctionDefinitionProvider
 }
 
 /**
- * Hover provider for pphp.fetchFunction
+ * Hover provider for pp.fetchFunction
  */
 export class FetchFunctionHoverProvider implements vscode.HoverProvider {
   provideHover(
@@ -255,7 +255,7 @@ export class FetchFunctionHoverProvider implements vscode.HoverProvider {
 }
 
 /**
- * Diagnostic provider for pphp.fetchFunction
+ * Diagnostic provider for pp.fetchFunction
  */
 export class FetchFunctionDiagnosticProvider {
   validateDocument(document: vscode.TextDocument): vscode.Diagnostic[] {
@@ -265,7 +265,7 @@ export class FetchFunctionDiagnosticProvider {
     // const availableFunctions = new Set(functions.map((f) => f.name));
 
     // // Find all fetchFunction calls
-    // const fetchFunctionRegex = /pphp\.fetchFunction\s*\(\s*['"]([^'"]+)['"]/g;
+    // const fetchFunctionRegex = /pp\.fetchFunction\s*\(\s*['"]([^'"]+)['"]/g;
     // let match: RegExpExecArray | null;
 
     // while ((match = fetchFunctionRegex.exec(text)) !== null) {
