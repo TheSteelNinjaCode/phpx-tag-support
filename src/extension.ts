@@ -1150,7 +1150,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     updateStringDecorations(document);
     updateMustacheBraceDecorations(document, braceDecorationType);
-    updateMustacheVariableDecorations(document); // ← ADD THIS
+    updateMustacheVariableDecorations(document);
     updateNativeTokenDecorations(
       document,
       nativeFunctionDecorationType,
@@ -2142,7 +2142,11 @@ function updateMustacheVariableDecorations(
   document: vscode.TextDocument
 ): void {
   const editor = vscode.window.activeTextEditor;
-  if (!editor || editor.document !== document) {
+  if (
+    !editor ||
+    editor.document !== document ||
+    document.languageId !== PHP_LANGUAGE
+  ) {
     return;
   }
 
