@@ -94,7 +94,7 @@ const ADD_IMPORT_COMMAND = "phpx.addImport";
 
 // Colors for decorations
 const BRACE_COLOR = "#569CD6";
-const NATIVE_FUNC_COLOR = "#D16969";
+const NATIVE_FUNC_COLOR = "#dcdcaa";
 const NATIVE_PROP_COLOR = "#4EC9B0";
 
 let classStubs: Record<
@@ -113,15 +113,45 @@ const PHP_TAG_REGEX = /<\/?[A-Z][A-Za-z0-9]*/;
 const JS_EXPR_REGEX = /\{\s*([\s\S]*?)\s*\}/g;
 const HEREDOC_PATTERN =
   /<<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
-// grab every key on String.prototype…
+// ──────────────────────────────────────────────────────────────
+// Native method/property collection
+// ──────────────────────────────────────────────────────────────
+
+// String
 const _STRING_PROTO_KEYS = Object.getOwnPropertyNames(String.prototype);
-// methods vs. non-method props
 const NATIVE_STRING_METHODS = _STRING_PROTO_KEYS.filter(
   (key) => typeof ("" as any)[key] === "function"
 );
 const NATIVE_STRING_PROPS = _STRING_PROTO_KEYS.filter(
   (key) => typeof ("" as any)[key] !== "function"
 );
+
+// Number
+const _NUMBER_PROTO_KEYS = Object.getOwnPropertyNames(Number.prototype);
+const NATIVE_NUMBER_METHODS = _NUMBER_PROTO_KEYS.filter(
+  (key) => typeof (0 as any)[key] === "function"
+);
+const NATIVE_NUMBER_PROPS = _NUMBER_PROTO_KEYS.filter(
+  (key) => typeof (0 as any)[key] !== "function"
+);
+
+// Array
+const _ARRAY_PROTO_KEYS = Object.getOwnPropertyNames(Array.prototype);
+const NATIVE_ARRAY_METHODS = _ARRAY_PROTO_KEYS.filter(
+  (key) => typeof ([] as any)[key] === "function"
+);
+
+// Combined lists
+const ALL_NATIVE_METHODS = [
+  ...NATIVE_STRING_METHODS,
+  ...NATIVE_NUMBER_METHODS,
+  ...NATIVE_ARRAY_METHODS,
+].filter((k) => /^[a-z]/i.test(k));
+
+const ALL_NATIVE_PROPS = [
+  ...NATIVE_STRING_PROPS,
+  ...NATIVE_NUMBER_PROPS,
+].filter((k) => /^[a-z]/i.test(k));
 
 class PphpHoverProvider implements vscode.HoverProvider {
   provideHover(
@@ -3009,13 +3039,9 @@ function updateJsVariableDecorations(
   editor.setDecorations(stringDecorationType, decorations);
 }
 
-const JS_NATIVE_MEMBERS = [
-  ...NATIVE_STRING_METHODS,
-  ...NATIVE_STRING_PROPS,
-  ...Object.getOwnPropertyNames(Array.prototype),
-  ...Object.getOwnPropertyNames(Number.prototype),
-  ...Object.getOwnPropertyNames(Boolean.prototype),
-].filter((k) => /^[a-z]/i.test(k));
+const JS_NATIVE_MEMBERS = [...ALL_NATIVE_METHODS, ...ALL_NATIVE_PROPS].filter(
+  (k) => /^[a-z]/i.test(k)
+);
 
 function insideMustache(
   doc: vscode.TextDocument,
@@ -3359,11 +3385,11 @@ function* extractMustacheExpressions(text: string): Generator<{
 }
 
 const nativeFuncRegex = new RegExp(
-  `\\b(${NATIVE_STRING_METHODS.join("|")})\\b`,
+  `\\b(${ALL_NATIVE_METHODS.join("|")})\\b`,
   "g"
 );
 const nativePropRegex = new RegExp(
-  `\\b(${NATIVE_STRING_PROPS.join("|")})\\b`,
+  `\\b(${ALL_NATIVE_PROPS.join("|")})\\b`,
   "g"
 );
 const objectPropRegex = /(?<=\.)[A-Za-z_$][\w$]*/g;
@@ -3461,8 +3487,8 @@ function updateNativeTokenDecorations(
 
     for (const m of jsExpr.matchAll(objectPropRegex)) {
       if (
-        NATIVE_STRING_METHODS.includes(m[0]) ||
-        NATIVE_STRING_PROPS.includes(m[0])
+        ALL_NATIVE_METHODS.includes(m[0]) ||
+        ALL_NATIVE_PROPS.includes(m[0])
       ) {
         continue;
       }
@@ -3484,8 +3510,8 @@ function updateNativeTokenDecorations(
     for (const fc of jsExpr.matchAll(functionCallRegex)) {
       const ident = fc[1];
       if (
-        NATIVE_STRING_METHODS.includes(ident) ||
-        NATIVE_STRING_PROPS.includes(ident)
+        ALL_NATIVE_METHODS.includes(ident) ||
+        ALL_NATIVE_PROPS.includes(ident)
       ) {
         continue;
       }
