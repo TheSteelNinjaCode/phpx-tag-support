@@ -2037,11 +2037,64 @@ function updateMustacheVariableDecorations(
   }
 
   const text = document.getText();
+
+  // ✅ Build exclusion ranges (same as validation)
+  const scriptRanges: Array<[number, number]> = [];
+  {
+    const re = /<script\b[^>]*>[\s\S]*?<\/script>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      scriptRanges.push([m.index, m.index + m[0].length]);
+    }
+  }
+
+  const styleRanges: Array<[number, number]> = [];
+  {
+    const re = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      styleRanges.push([m.index, m.index + m[0].length]);
+    }
+  }
+
+  const phpRanges: Array<[number, number]> = [];
+  {
+    const closedRe = /<\?(?:php|=)?[\s\S]*?\?>/g;
+    let m: RegExpExecArray | null;
+    while ((m = closedRe.exec(text)) !== null) {
+      phpRanges.push([m.index, m.index + m[0].length]);
+    }
+
+    const openRe = /<\?(?:php|=)?(?:[^?]|\?(?!>))*$/g;
+    while ((m = openRe.exec(text)) !== null) {
+      phpRanges.push([m.index, text.length]);
+    }
+  }
+
+  const isInsideScript = (idx: number) =>
+    scriptRanges.some(([s, e]) => idx >= s && idx < e);
+
+  const isInsideStyle = (idx: number) =>
+    styleRanges.some(([s, e]) => idx >= s && idx < e);
+
+  const isInsidePhp = (idx: number) =>
+    phpRanges.some(([s, e]) => idx >= s && idx < e);
+
   const variableDecorations: vscode.DecorationOptions[] = [];
   const propertyDecorations: vscode.DecorationOptions[] = [];
 
   for (const match of extractMustacheExpressions(text)) {
     const { inner, index: startIdx } = match;
+
+    // ✅ Skip if inside script, style, or PHP blocks
+    if (
+      isInsideScript(startIdx) ||
+      isInsideStyle(startIdx) ||
+      isInsidePhp(startIdx)
+    ) {
+      continue;
+    }
+
     const baseOffset = startIdx + 1; // Skip opening brace
 
     // Normalize the expression
@@ -2124,6 +2177,49 @@ function updateMustacheBraceDecorations(
   }
 
   const text = document.getText();
+
+  // ✅ Build exclusion ranges
+  const scriptRanges: Array<[number, number]> = [];
+  {
+    const re = /<script\b[^>]*>[\s\S]*?<\/script>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      scriptRanges.push([m.index, m.index + m[0].length]);
+    }
+  }
+
+  const styleRanges: Array<[number, number]> = [];
+  {
+    const re = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      styleRanges.push([m.index, m.index + m[0].length]);
+    }
+  }
+
+  const phpRanges: Array<[number, number]> = [];
+  {
+    const closedRe = /<\?(?:php|=)?[\s\S]*?\?>/g;
+    let m: RegExpExecArray | null;
+    while ((m = closedRe.exec(text)) !== null) {
+      phpRanges.push([m.index, m.index + m[0].length]);
+    }
+
+    const openRe = /<\?(?:php|=)?(?:[^?]|\?(?!>))*$/g;
+    while ((m = openRe.exec(text)) !== null) {
+      phpRanges.push([m.index, text.length]);
+    }
+  }
+
+  const isInsideScript = (idx: number) =>
+    scriptRanges.some(([s, e]) => idx >= s && idx < e);
+
+  const isInsideStyle = (idx: number) =>
+    styleRanges.some(([s, e]) => idx >= s && idx < e);
+
+  const isInsidePhp = (idx: number) =>
+    phpRanges.some(([s, e]) => idx >= s && idx < e);
+
   const decorations: vscode.DecorationOptions[] = [];
 
   // Extract mustache expressions and decorate their braces
@@ -2133,6 +2229,15 @@ function updateMustacheBraceDecorations(
 
     // Skip legacy double braces
     if (text[startIdx - 1] === "{" || text[endIdx] === "}") {
+      continue;
+    }
+
+    // ✅ Skip if inside script, style, or PHP blocks
+    if (
+      isInsideScript(startIdx) ||
+      isInsideStyle(startIdx) ||
+      isInsidePhp(startIdx)
+    ) {
       continue;
     }
 
