@@ -1,29 +1,30 @@
-interface EffectOptions {
-    deps?: (string | StateGetter<any>)[];
-    immediate?: boolean;
-    detectDeps?: boolean;
-}
-type StateValue<T> = T extends undefined ? T | undefined : T;
-type StateSetter<T> = (value: T | ((prev: T) => T)) => void;
-type StateGetter<T> = (() => T) & {
-    value: T;
-    __pphp_key?: string;
-    __pphp_fullKey?: string;
-    __pphp_component?: string;
-};
-declare global {
-    interface Window {
-        [key: string]: any;
-    }
-}
 export declare class PPHP {
+    protected static instance: PPHP | null;
     private stateManager;
     private expressionEvaluator;
     private componentManager;
     private domBindingManager;
+    private hydrationCallbacks;
+    private portalManager;
     private initialized;
+    private hydrationDone;
+    private hydrationResolve;
+    private hydrationPromise;
+    private portalHydrationPromises;
+    private portalHydrationResolvers;
     constructor();
     private initialize;
+    createPortal(content: HTMLElement | DocumentFragment | string, container: Element | string, options?: PortalOptions): string;
+    removePortal(portalId: string): boolean;
+    private markPortalHydrated;
+    updatePortal(portalId: string, content: HTMLElement | DocumentFragment | string, options?: PortalOptions): boolean;
+    protected cleanup(): void;
+    ref<T = any>(initialValue?: T | null): Ref<T>;
+    hydrated(): Promise<void>;
+    onHydrated(cb: () => void): void;
+    get isHydrated(): boolean;
+    private markHydrationStart;
+    private markHydrated;
     state<T>(keyOrInitialValue: string | T, initialValue?: T): [StateGetter<StateValue<T>>, StateSetter<StateValue<T>>];
     private currentLoopContext;
     private getLoopExecutionContext;
@@ -33,7 +34,77 @@ export declare class PPHP {
     private extractDependencyNames;
     private resolveDependencies;
     private createComponentScopedGlobals;
+    protected deleteAllComponentObjects(): void;
+    static resetInstance(): void;
+    destroy(): void;
+}
+export declare class PPHPUtilities extends PPHP {
+    protected static instance: PPHPUtilities | null;
+    private cryptoKey;
+    private activeAbortController;
+    private navigationEnabled;
+    private boundHandleLinkClick;
+    private boundHandlePopState;
+    private isNavigating;
+    private constructor();
+    static resetInstance(): void;
+    static getInstance(): PPHPUtilities;
+    enableSPANavigation(): void;
+    disableSPANavigation(): void;
+    private handleLinkClick;
+    private handlePopState;
+    navigateTo(url: string, pushState?: boolean): Promise<void>;
+    private updatePageContentWithViewTransition;
+    private dispatchNavigationEvent;
+    private showLoadingTransition;
+    private fetchPageContent;
+    private performCleanup;
+    private updateBrowserHistory;
+    private updatePageContent;
+    private reinitializeApp;
+    private handleNavigationCompletion;
+    private handleNavigationError;
+    private findLoadingElement;
+    private updateContentWithTransition;
+    private parseTransition;
+    private fadeOut;
+    private fadeIn;
+    private parseTime;
+    private reconcileHead;
+    redirect(url: string): Promise<void>;
+    private initCryptoKey;
+    private encryptCallbackName;
+    private createFetchOptions;
     fetchFunction<T = any>(functionName: string, data?: Record<string, any>, abortPrevious?: boolean): Promise<T | string>;
 }
-declare const pp: PPHP;
-export { pp };
+export declare class PPHPLocalStore {
+    state: LocalStoreState;
+    private static instance;
+    private listeners;
+    private pp;
+    private STORAGE_KEY;
+    private lastSyncedState;
+    private constructor();
+    static getInstance(initialState?: LocalStoreState): PPHPLocalStore;
+    private getCookie;
+    setState(update: Partial<LocalStoreState>, syncWithBackend?: boolean): void;
+    private saveState;
+    private loadState;
+    resetState(id?: string, syncWithBackend?: boolean): void;
+}
+export declare class SearchParamsManager {
+    private static instance;
+    private listeners;
+    private constructor();
+    static getInstance(): SearchParamsManager;
+    get params(): URLSearchParams;
+    get(key: string): string | null;
+    set(key: string, value: string): void;
+    delete(key: string): void;
+    replace(params: Record<string, string | null>): void;
+    private updateURL;
+    listen(callback: SearchParamsListener): void;
+    private notifyListeners;
+    enablePopStateListener(): void;
+}
+export {};

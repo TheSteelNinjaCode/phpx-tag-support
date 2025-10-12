@@ -80,9 +80,9 @@ interface HeredocBlock {
 
 const classNameMap: Record<
   VarName,
-  "PPHP" | "PPHPLocalStore" | "SearchParamsManager"
+  "PPHP" | "PPHPLocalStore" | "SearchParamsManager" | "PPHPUtilities"
 > = {
-  pp: "PPHP",
+  pp: "PPHPUtilities",
   store: "PPHPLocalStore",
   searchParams: "SearchParamsManager",
 };
@@ -97,10 +97,11 @@ const NATIVE_FUNC_COLOR = "#D16969";
 const NATIVE_PROP_COLOR = "#4EC9B0";
 
 let classStubs: Record<
-  "PPHP" | "PPHPLocalStore" | "SearchParamsManager",
+  "PPHP" | "PPHPLocalStore" | "SearchParamsManager" | "PPHPUtilities",
   { name: string; signature: string }[]
 > = {
   PPHP: [],
+  PPHPUtilities: [],
   PPHPLocalStore: [],
   SearchParamsManager: [],
 };
@@ -1944,7 +1945,7 @@ const VAR_NAMES = ["pp", "store", "searchParams"] as const;
 type VarName = (typeof VAR_NAMES)[number];
 
 const CLS_MAP: Record<VarName, keyof typeof classStubs> = {
-  pp: "PPHP",
+  pp: "PPHPUtilities",
   store: "PPHPLocalStore",
   searchParams: "SearchParamsManager",
 };
@@ -2852,7 +2853,7 @@ const validateJsVariablesInCurlyBraces = (
     }
   }
 
-  // ✅ NEW: Build [start,end) ranges for <style> content
+  // Build [start,end) ranges for <style> content
   const styleRanges: Array<[number, number]> = [];
   {
     const re = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
@@ -2888,21 +2889,20 @@ const validateJsVariablesInCurlyBraces = (
   const isInsideScript = (idx: number) =>
     scriptRanges.some(([s, e]) => idx >= s && idx < e);
 
-  // ✅ NEW: Check if inside <style> tag
   const isInsideStyle = (idx: number) =>
     styleRanges.some(([s, e]) => idx >= s && idx < e);
 
   const isInsidePhp = (idx: number) =>
     phpRanges.some(([s, e]) => idx >= s && idx < e);
 
-  const normalized = preNormalizePhpVars(originalText);
   const diagnostics: vscode.Diagnostic[] = [];
 
-  for (const match of extractMustacheExpressions(normalized)) {
+  // ✅ FIX: Extract mustache expressions from ORIGINAL text, not normalized
+  for (const match of extractMustacheExpressions(originalText)) {
     const { full, inner, index: startIdx } = match;
     const endIdx = startIdx + full.length;
 
-    // ✅ UPDATED: Skip mustaches inside <script>, <style>, OR <?php blocks
+    // Skip mustaches inside <script>, <style>, OR <?php blocks
     if (
       isInsideScript(startIdx) ||
       isInsideStyle(startIdx) ||
@@ -2911,10 +2911,13 @@ const validateJsVariablesInCurlyBraces = (
       continue;
     }
 
-    const expr = inner.trim();
+    // ✅ Normalize only the inner expression for validation
+    const normalizedInner = preNormalizePhpVars("{" + inner + "}")
+      .slice(1, -1)
+      .trim();
 
     // Disallow assignments
-    if (containsJsAssignment(expr)) {
+    if (containsJsAssignment(normalizedInner)) {
       const start = document.positionAt(startIdx + 1);
       const end = document.positionAt(endIdx - 1);
       diagnostics.push(
@@ -2928,7 +2931,7 @@ const validateJsVariablesInCurlyBraces = (
     }
 
     // Validate JS syntax
-    if (!isValidJsExpression(expr)) {
+    if (!isValidJsExpression(normalizedInner)) {
       const innerStart = startIdx + 1;
       const startPos = document.positionAt(innerStart);
       const endPos = document.positionAt(innerStart + inner.length);
@@ -3483,22 +3486,50 @@ function parseStubsWithTS(source: string) {
     true
   );
 
+  // Track inheritance: child -> parent
+  const extendsMap = new Map<string, string>();
+
+  // First pass: collect all methods/properties for each class
+  const tempStubs: Record<string, { name: string; signature: string }[]> = {};
+
   sf.statements.forEach((stmt) => {
     if (!ts.isClassDeclaration(stmt) || !stmt.name) {
       return;
     }
 
-    const name = stmt.name.text as keyof typeof classStubs;
-    if (!stubNames.has(name)) {
+    const name = stmt.name.text;
+    if (!stubNames.has(name as keyof typeof classStubs)) {
       return;
     }
 
+    // Track inheritance
+    if (stmt.heritageClauses) {
+      for (const clause of stmt.heritageClauses) {
+        if (clause.token === ts.SyntaxKind.ExtendsKeyword) {
+          const parentType = clause.types[0];
+          if (ts.isIdentifier(parentType.expression)) {
+            extendsMap.set(name, parentType.expression.text);
+          }
+        }
+      }
+    }
+
+    // Collect members
+    const members: { name: string; signature: string }[] = [];
+
     stmt.members.forEach((member) => {
+      const modifiers = ts.canHaveModifiers(member)
+        ? ts.getModifiers(member)
+        : undefined;
+
+      // Skip if private, protected, or static
       if (
-        ts.canHaveModifiers(member) &&
-        ts
-          .getModifiers(member)
-          ?.some((m) => m.kind === ts.SyntaxKind.PrivateKeyword)
+        modifiers?.some(
+          (m) =>
+            m.kind === ts.SyntaxKind.PrivateKeyword ||
+            m.kind === ts.SyntaxKind.ProtectedKeyword ||
+            m.kind === ts.SyntaxKind.StaticKeyword
+        )
       ) {
         return;
       }
@@ -3506,18 +3537,56 @@ function parseStubsWithTS(source: string) {
       if (ts.isMethodSignature(member) || ts.isMethodDeclaration(member)) {
         const mName = (member.name as ts.Identifier).text;
         const sig = member.getText(sf).trim();
-        classStubs[name].push({ name: mName, signature: sig });
+        members.push({ name: mName, signature: sig });
       } else if (
         ts.isPropertySignature(member) ||
         ts.isPropertyDeclaration(member)
       ) {
         const pName = (member.name as ts.Identifier).text;
         const pType = member.type?.getText(sf).trim() ?? "any";
-        if (!classStubs[name].some((e) => e.name === pName)) {
-          classStubs[name].push({ name: pName, signature: `: ${pType}` });
-        }
+        members.push({ name: pName, signature: `: ${pType}` });
       }
     });
+
+    tempStubs[name] = members;
+  });
+
+  // Second pass: merge inherited members
+  const getMembersWithInheritance = (
+    className: string,
+    visited = new Set<string>()
+  ): { name: string; signature: string }[] => {
+    if (visited.has(className)) {
+      return []; // Prevent circular inheritance
+    }
+    visited.add(className);
+
+    const ownMembers = tempStubs[className] || [];
+    const parentName = extendsMap.get(className);
+
+    if (!parentName || !tempStubs[parentName]) {
+      return ownMembers;
+    }
+
+    // Get parent members recursively
+    const parentMembers = getMembersWithInheritance(parentName, visited);
+
+    // Merge: own members override parent members with same name
+    const memberMap = new Map<string, { name: string; signature: string }>();
+
+    // Add parent members first
+    parentMembers.forEach((m) => memberMap.set(m.name, m));
+
+    // Override with own members
+    ownMembers.forEach((m) => memberMap.set(m.name, m));
+
+    return Array.from(memberMap.values());
+  };
+
+  // Populate classStubs with merged members
+  stubNames.forEach((name) => {
+    const key = name as keyof typeof classStubs;
+    classStubs[key] = getMembersWithInheritance(name);
   });
 }
 
