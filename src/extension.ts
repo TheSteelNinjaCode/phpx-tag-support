@@ -1141,7 +1141,8 @@ export async function activate(context: vscode.ExtensionContext) {
     await validatePpSync(document);
 
     updateStringDecorations(document);
-    updateMustacheBraceDecorations(document, braceDecorationType); // ← ADD THIS
+    updateMustacheBraceDecorations(document, braceDecorationType);
+    updateMustacheVariableDecorations(document); // ← ADD THIS
     updateNativeTokenDecorations(
       document,
       nativeFunctionDecorationType,
@@ -2023,6 +2024,92 @@ const registerPhpScriptCompletionProvider = () =>
 /* ────────────────────────────────────────────────────────────── *
  *  2️⃣  completions OUTSIDE <script>                             *
  * ────────────────────────────────────────────────────────────── */
+
+/**
+ * Decorates variable names and object properties inside mustache expressions
+ */
+function updateMustacheVariableDecorations(
+  document: vscode.TextDocument
+): void {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document !== document) {
+    return;
+  }
+
+  const text = document.getText();
+  const variableDecorations: vscode.DecorationOptions[] = [];
+  const propertyDecorations: vscode.DecorationOptions[] = [];
+
+  for (const match of extractMustacheExpressions(text)) {
+    const { inner, index: startIdx } = match;
+    const baseOffset = startIdx + 1; // Skip opening brace
+
+    // Normalize the expression
+    const normalized = preNormalizePhpVars("{" + inner + "}")
+      .slice(1, -1)
+      .trim();
+
+    // Match root variables and property chains: myVar, user.name, user.address.city
+    const chainRegex = /([A-Za-z_$][\w$]*)(\s*\.\s*[A-Za-z_$][\w$]*)*/g;
+    let chainMatch: RegExpExecArray | null;
+
+    while ((chainMatch = chainRegex.exec(normalized)) !== null) {
+      const fullChain = chainMatch[0];
+      const parts = fullChain.split(/\s*\.\s*/);
+
+      // Decorate root variable
+      const rootVar = parts[0];
+      const rootStart = baseOffset + chainMatch.index;
+      const rootEnd = rootStart + rootVar.length;
+
+      variableDecorations.push({
+        range: new vscode.Range(
+          document.positionAt(rootStart),
+          document.positionAt(rootEnd)
+        ),
+      });
+
+      // Decorate properties
+      let offset = rootVar.length;
+      for (let i = 1; i < parts.length; i++) {
+        const prop = parts[i];
+        // Find the actual position (accounting for whitespace around dots)
+        const dotIndex = normalized.indexOf(".", chainMatch.index + offset);
+        const propStart = baseOffset + dotIndex + 1;
+        // Skip whitespace after dot
+        let actualPropStart = propStart;
+        while (
+          actualPropStart < baseOffset + normalized.length &&
+          /\s/.test(normalized[actualPropStart - baseOffset])
+        ) {
+          actualPropStart++;
+        }
+        const propEnd = actualPropStart + prop.length;
+
+        propertyDecorations.push({
+          range: new vscode.Range(
+            document.positionAt(actualPropStart),
+            document.positionAt(propEnd)
+          ),
+        });
+
+        offset = dotIndex + 1 + prop.length - chainMatch.index;
+      }
+    }
+  }
+
+  // Create decoration types
+  const variableDecorationType = vscode.window.createTextEditorDecorationType({
+    color: "#9CDCFE", // Light blue for variables
+  });
+
+  const propertyDecorationType = vscode.window.createTextEditorDecorationType({
+    color: "#9CDCFE", // Same color for properties
+  });
+
+  editor.setDecorations(variableDecorationType, variableDecorations);
+  editor.setDecorations(propertyDecorationType, propertyDecorations);
+}
 
 /**
  * Decorates opening and closing braces of mustache expressions
