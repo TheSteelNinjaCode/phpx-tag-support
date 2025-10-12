@@ -1141,6 +1141,7 @@ export async function activate(context: vscode.ExtensionContext) {
     await validatePpSync(document);
 
     updateStringDecorations(document);
+    updateMustacheBraceDecorations(document, braceDecorationType); // ← ADD THIS
     updateNativeTokenDecorations(
       document,
       nativeFunctionDecorationType,
@@ -2023,6 +2024,51 @@ const registerPhpScriptCompletionProvider = () =>
  *  2️⃣  completions OUTSIDE <script>                             *
  * ────────────────────────────────────────────────────────────── */
 
+/**
+ * Decorates opening and closing braces of mustache expressions
+ */
+function updateMustacheBraceDecorations(
+  document: vscode.TextDocument,
+  decorationType: vscode.TextEditorDecorationType
+): void {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document !== document) {
+    return;
+  }
+
+  const text = document.getText();
+  const decorations: vscode.DecorationOptions[] = [];
+
+  // Extract mustache expressions and decorate their braces
+  for (const match of extractMustacheExpressions(text)) {
+    const { index: startIdx, full } = match;
+    const endIdx = startIdx + full.length;
+
+    // Skip legacy double braces
+    if (text[startIdx - 1] === "{" || text[endIdx] === "}") {
+      continue;
+    }
+
+    // Decorate opening brace
+    decorations.push({
+      range: new vscode.Range(
+        document.positionAt(startIdx),
+        document.positionAt(startIdx + 1)
+      ),
+    });
+
+    // Decorate closing brace
+    decorations.push({
+      range: new vscode.Range(
+        document.positionAt(endIdx - 1),
+        document.positionAt(endIdx)
+      ),
+    });
+  }
+
+  editor.setDecorations(decorationType, decorations);
+}
+
 const registerPhpMarkupCompletionProvider = () =>
   vscode.languages.registerCompletionItemProvider(
     PHP_SELECTOR,
@@ -2886,6 +2932,17 @@ const validateJsVariablesInCurlyBraces = (
     }
   }
 
+  // ✅ NEW: Build ranges for HTML attribute values (onclick, onchange, etc.)
+  const attrRanges: Array<[number, number]> = [];
+  {
+    const attrRe = /\bon\w+\s*=\s*["']([^"']*?)["']/gi;
+    let m: RegExpExecArray | null;
+    while ((m = attrRe.exec(originalText)) !== null) {
+      const valueStart = m.index + m[0].indexOf(m[1]);
+      attrRanges.push([valueStart, valueStart + m[1].length]);
+    }
+  }
+
   const isInsideScript = (idx: number) =>
     scriptRanges.some(([s, e]) => idx >= s && idx < e);
 
@@ -2895,18 +2952,22 @@ const validateJsVariablesInCurlyBraces = (
   const isInsidePhp = (idx: number) =>
     phpRanges.some(([s, e]) => idx >= s && idx < e);
 
+  // ✅ NEW: Check if inside HTML attribute
+  const isInsideAttribute = (idx: number) =>
+    attrRanges.some(([s, e]) => idx >= s && idx < e);
+
   const diagnostics: vscode.Diagnostic[] = [];
 
-  // ✅ FIX: Extract mustache expressions from ORIGINAL text, not normalized
   for (const match of extractMustacheExpressions(originalText)) {
     const { full, inner, index: startIdx } = match;
     const endIdx = startIdx + full.length;
 
-    // Skip mustaches inside <script>, <style>, OR <?php blocks
+    // ✅ Skip mustaches inside <script>, <style>, PHP blocks, OR HTML attributes
     if (
       isInsideScript(startIdx) ||
       isInsideStyle(startIdx) ||
-      isInsidePhp(startIdx)
+      isInsidePhp(startIdx) ||
+      isInsideAttribute(startIdx) // ← ADD THIS
     ) {
       continue;
     }

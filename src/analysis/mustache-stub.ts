@@ -134,12 +134,18 @@ function collectMustacheRootsAndProps(
   text: string,
   map: Map<string, PropNode>
 ) {
+  // Extract blocks to exclude
+  const scriptBlocks = extractScriptBlocks(text);
+  const phpBlocks = extractPhpBlocks(text);
+  const excludedBlocks = [...scriptBlocks, ...phpBlocks];
+
   let m: RegExpExecArray | null;
 
   while ((m = MUSTACHE_RE.exec(text))) {
-    const start = m.index;
-    const end = MUSTACHE_RE.lastIndex;
-    if (text[start - 1] === "{" || text[end] === "}") {
+    const matchIndex = m.index;
+
+    // Skip if inside script or PHP blocks
+    if (isInExcludedBlock(matchIndex, excludedBlocks)) {
       continue;
     }
 
@@ -169,6 +175,49 @@ function collectMustacheRootsAndProps(
       node = node.children.get(seg)!;
     }
   }
+}
+
+function extractScriptBlocks(text: string): { start: number; end: number }[] {
+  const blocks: { start: number; end: number }[] = [];
+  const regex = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    blocks.push({
+      start: match.index,
+      end: match.index + match[0].length,
+    });
+  }
+
+  return blocks;
+}
+
+/**
+ * Extracts PHP block ranges (<?php ?>, <?= ?>, <? ?>)
+ */
+function extractPhpBlocks(text: string): { start: number; end: number }[] {
+  const blocks: { start: number; end: number }[] = [];
+  const regex = /<\?(?:php|=)?([\s\S]*?)(?:\?>|$)/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    blocks.push({
+      start: match.index,
+      end: match.index + match[0].length,
+    });
+  }
+
+  return blocks;
+}
+
+/**
+ * Checks if index is within any excluded block
+ */
+function isInExcludedBlock(
+  index: number,
+  blocks: { start: number; end: number }[]
+): boolean {
+  return blocks.some((block) => index >= block.start && index < block.end);
 }
 
 function collectGenericStateKeys(text: string, map: Map<string, PropNode>) {
