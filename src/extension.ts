@@ -2178,15 +2178,10 @@ function updateMustacheVariableDecorations(
 
   const phpRanges: Array<[number, number]> = [];
   {
-    const closedRe = /<\?(?:php|=)?[\s\S]*?\?>/g;
+    const re = /<\?(?:php|=)?([\s\S]*?)(?:\?>|$)/g;
     let m: RegExpExecArray | null;
-    while ((m = closedRe.exec(text)) !== null) {
+    while ((m = re.exec(text)) !== null) {
       phpRanges.push([m.index, m.index + m[0].length]);
-    }
-
-    const openRe = /<\?(?:php|=)?(?:[^?]|\?(?!>))*$/g;
-    while ((m = openRe.exec(text)) !== null) {
-      phpRanges.push([m.index, text.length]);
     }
   }
 
@@ -2205,7 +2200,6 @@ function updateMustacheVariableDecorations(
   for (const match of extractMustacheExpressions(text)) {
     const { inner, index: startIdx } = match;
 
-    // Skip if inside script, style, or PHP blocks
     if (
       isInsideScript(startIdx) ||
       isInsideStyle(startIdx) ||
@@ -2215,14 +2209,30 @@ function updateMustacheVariableDecorations(
     }
 
     const baseOffset = startIdx + 1;
-
     const trimmed = inner.trim();
     const trimOffset = baseOffset + inner.indexOf(trimmed);
+
+    // ✅ NEW: Build string literal ranges within this mustache expression
+    const stringRanges: Array<[number, number]> = [];
+    const stringRegex = /(['"`])(?:\\.|[^\\])*?\1/g;
+    let strMatch: RegExpExecArray | null;
+    while ((strMatch = stringRegex.exec(trimmed)) !== null) {
+      stringRanges.push([strMatch.index, strMatch.index + strMatch[0].length]);
+    }
+
+    // ✅ Helper to check if a position is inside a string
+    const isInsideString = (pos: number) =>
+      stringRanges.some(([start, end]) => pos >= start && pos < end);
 
     const chainRegex = /([A-Za-z_$][\w$]*)(\s*\.\s*[A-Za-z_$][\w$]*)*/g;
     let chainMatch: RegExpExecArray | null;
 
     while ((chainMatch = chainRegex.exec(trimmed)) !== null) {
+      // ✅ Skip if this match is inside a string literal
+      if (isInsideString(chainMatch.index)) {
+        continue;
+      }
+
       const fullChain = chainMatch[0];
       const parts = fullChain.split(/\s*\.\s*/);
 
@@ -2278,13 +2288,10 @@ function updateMustacheVariableDecorations(
     }
   }
 
-  // editor.setDecorations(variableDecorationType, variableDecorations);
+  editor.setDecorations(variableDecorationType, variableDecorations);
   editor.setDecorations(propertyDecorationType, propertyDecorations);
 }
 
-/**
- * Decorates opening and closing braces of mustache expressions
- */
 function updateMustacheBraceDecorations(
   document: vscode.TextDocument,
   decorationType: vscode.TextEditorDecorationType
@@ -2296,7 +2303,6 @@ function updateMustacheBraceDecorations(
 
   const text = document.getText();
 
-  // ✅ Build exclusion ranges
   const scriptRanges: Array<[number, number]> = [];
   {
     const re = /<script\b[^>]*>[\s\S]*?<\/script>/gi;
@@ -2315,17 +2321,13 @@ function updateMustacheBraceDecorations(
     }
   }
 
+  // ✅ FIXED: Use simpler, more reliable regex
   const phpRanges: Array<[number, number]> = [];
   {
-    const closedRe = /<\?(?:php|=)?[\s\S]*?\?>/g;
+    const re = /<\?(?:php|=)?([\s\S]*?)(?:\?>|$)/g;
     let m: RegExpExecArray | null;
-    while ((m = closedRe.exec(text)) !== null) {
+    while ((m = re.exec(text)) !== null) {
       phpRanges.push([m.index, m.index + m[0].length]);
-    }
-
-    const openRe = /<\?(?:php|=)?(?:[^?]|\?(?!>))*$/g;
-    while ((m = openRe.exec(text)) !== null) {
-      phpRanges.push([m.index, text.length]);
     }
   }
 
@@ -2340,17 +2342,14 @@ function updateMustacheBraceDecorations(
 
   const decorations: vscode.DecorationOptions[] = [];
 
-  // Extract mustache expressions and decorate their braces
   for (const match of extractMustacheExpressions(text)) {
     const { index: startIdx, full } = match;
     const endIdx = startIdx + full.length;
 
-    // Skip legacy double braces
     if (text[startIdx - 1] === "{" || text[endIdx] === "}") {
       continue;
     }
 
-    // ✅ Skip if inside script, style, or PHP blocks
     if (
       isInsideScript(startIdx) ||
       isInsideStyle(startIdx) ||
@@ -2359,7 +2358,6 @@ function updateMustacheBraceDecorations(
       continue;
     }
 
-    // Decorate opening brace
     decorations.push({
       range: new vscode.Range(
         document.positionAt(startIdx),
@@ -2367,7 +2365,6 @@ function updateMustacheBraceDecorations(
       ),
     });
 
-    // Decorate closing brace
     decorations.push({
       range: new vscode.Range(
         document.positionAt(endIdx - 1),
@@ -3006,6 +3003,44 @@ function updateJsVariableDecorations(
   }
 
   const text = document.getText();
+
+  // ✅ Build exclusion ranges
+  const scriptRanges: Array<[number, number]> = [];
+  {
+    const re = /<script\b[^>]*>[\s\S]*?<\/script>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      scriptRanges.push([m.index, m.index + m[0].length]);
+    }
+  }
+
+  const styleRanges: Array<[number, number]> = [];
+  {
+    const re = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      styleRanges.push([m.index, m.index + m[0].length]);
+    }
+  }
+
+  const phpRanges: Array<[number, number]> = [];
+  {
+    const re = /<\?(?:php|=)?([\s\S]*?)(?:\?>|$)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      phpRanges.push([m.index, m.index + m[0].length]);
+    }
+  }
+
+  const isInsideScript = (idx: number) =>
+    scriptRanges.some(([s, e]) => idx >= s && idx < e);
+
+  const isInsideStyle = (idx: number) =>
+    styleRanges.some(([s, e]) => idx >= s && idx < e);
+
+  const isInsidePhp = (idx: number) =>
+    phpRanges.some(([s, e]) => idx >= s && idx < e);
+
   const decorations: vscode.DecorationOptions[] = [];
   let m: RegExpExecArray | null;
 
@@ -3016,6 +3051,15 @@ function updateJsVariableDecorations(
 
     // Skip legacy double-brace blocks
     if (text[startIdx - 1] === "{" || text[endIdx] === "}") {
+      continue;
+    }
+
+    // ✅ Skip if inside excluded blocks
+    if (
+      isInsideScript(startIdx) ||
+      isInsideStyle(startIdx) ||
+      isInsidePhp(startIdx)
+    ) {
       continue;
     }
 
@@ -3061,13 +3105,61 @@ function updateStringDecorations(document: vscode.TextDocument) {
   }
 
   const text = document.getText();
+
+  // ✅ Build exclusion ranges
+  const scriptRanges: Array<[number, number]> = [];
+  {
+    const re = /<script\b[^>]*>[\s\S]*?<\/script>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      scriptRanges.push([m.index, m.index + m[0].length]);
+    }
+  }
+
+  const styleRanges: Array<[number, number]> = [];
+  {
+    const re = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      styleRanges.push([m.index, m.index + m[0].length]);
+    }
+  }
+
+  const phpRanges: Array<[number, number]> = [];
+  {
+    const re = /<\?(?:php|=)?([\s\S]*?)(?:\?>|$)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      phpRanges.push([m.index, m.index + m[0].length]);
+    }
+  }
+
+  const isInsideScript = (idx: number) =>
+    scriptRanges.some(([s, e]) => idx >= s && idx < e);
+
+  const isInsideStyle = (idx: number) =>
+    styleRanges.some(([s, e]) => idx >= s && idx < e);
+
+  const isInsidePhp = (idx: number) =>
+    phpRanges.some(([s, e]) => idx >= s && idx < e);
+
   const decos: vscode.DecorationOptions[] = [];
   let mustacheMatch: RegExpExecArray | null;
 
   while ((mustacheMatch = JS_EXPR_REGEX.exec(text))) {
     const startIdx = mustacheMatch.index;
     const endIdx = startIdx + mustacheMatch[0].length;
+
     if (text[startIdx - 1] === "{" || text[endIdx] === "}") {
+      continue;
+    }
+
+    // ✅ Skip if inside excluded blocks
+    if (
+      isInsideScript(startIdx) ||
+      isInsideStyle(startIdx) ||
+      isInsidePhp(startIdx)
+    ) {
       continue;
     }
 
@@ -3391,12 +3483,13 @@ const nativePropRegex = new RegExp(
 );
 const objectPropRegex = /(?<=\.)[A-Za-z_$][\w$]*/g;
 
-const propertyDecorationType =
-  vscode.window.createTextEditorDecorationType({ color: "#9CDCFE" });
-    // Create decoration types
-  const variableDecorationType = vscode.window.createTextEditorDecorationType({
-    color: "#9CDCFE", // Light blue for variables
-  });
+const propertyDecorationType = vscode.window.createTextEditorDecorationType({
+  color: "#9CDCFE",
+});
+// Create decoration types
+const variableDecorationType = vscode.window.createTextEditorDecorationType({
+  color: "#9CDCFE", // Light blue for variables
+});
 
 const STRING_COLOR = "#CE9178";
 const stringDecorationType = vscode.window.createTextEditorDecorationType({
@@ -3452,6 +3545,43 @@ function updateNativeTokenDecorations(
 
   const text = document.getText();
 
+  // ✅ Build exclusion ranges
+  const scriptRanges: Array<[number, number]> = [];
+  {
+    const re = /<script\b[^>]*>[\s\S]*?<\/script>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      scriptRanges.push([m.index, m.index + m[0].length]);
+    }
+  }
+
+  const styleRanges: Array<[number, number]> = [];
+  {
+    const re = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      styleRanges.push([m.index, m.index + m[0].length]);
+    }
+  }
+
+  const phpRanges: Array<[number, number]> = [];
+  {
+    const re = /<\?(?:php|=)?([\s\S]*?)(?:\?>|$)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      phpRanges.push([m.index, m.index + m[0].length]);
+    }
+  }
+
+  const isInsideScript = (idx: number) =>
+    scriptRanges.some(([s, e]) => idx >= s && idx < e);
+
+  const isInsideStyle = (idx: number) =>
+    styleRanges.some(([s, e]) => idx >= s && idx < e);
+
+  const isInsidePhp = (idx: number) =>
+    phpRanges.some(([s, e]) => idx >= s && idx < e);
+
   const funcDecorations: vscode.DecorationOptions[] = [];
   const nativePropDecorations: vscode.DecorationOptions[] = [];
   const objectPropDecorations: vscode.DecorationOptions[] = [];
@@ -3463,7 +3593,13 @@ function updateNativeTokenDecorations(
     const whole = exprMatch[0];
     const base = exprMatch.index!;
     const end = base + whole.length;
+
     if (text[base - 1] === "{" || text[end] === "}") {
+      continue;
+    }
+
+    // ✅ Skip if inside excluded blocks
+    if (isInsideScript(base) || isInsideStyle(base) || isInsidePhp(base)) {
       continue;
     }
 
