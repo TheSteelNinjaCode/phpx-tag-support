@@ -2278,7 +2278,7 @@ function updateMustacheVariableDecorations(
     }
   }
 
-  editor.setDecorations(propertyDecorationType, variableDecorations);
+  // editor.setDecorations(variableDecorationType, variableDecorations);
   editor.setDecorations(propertyDecorationType, propertyDecorations);
 }
 
