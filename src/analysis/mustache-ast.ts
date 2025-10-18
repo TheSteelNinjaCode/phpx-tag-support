@@ -113,9 +113,6 @@ function extractBalancedExpression(
 }
 
 /**
- * Parse JavaScript expression with acorn
- */
-/**
  * Parse JavaScript expression with acorn and add parent references
  */
 function parseExpression(expr: string): Node | null {
@@ -125,17 +122,26 @@ function parseExpression(expr: string): Node | null {
     const program = acorn.parse(wrapped, {
       ecmaVersion: "latest",
       sourceType: "module",
-    });
+    }) as any;
 
-    // Add parent references
-    addParentReferences(program as any);
+    // Extract the actual expression from: Program -> ExpressionStatement -> Expression
+    if (
+      program.body &&
+      program.body.length > 0 &&
+      program.body[0].type === "ExpressionStatement"
+    ) {
+      const exprStmt = program.body[0];
+      let actualExpr = exprStmt.expression;
 
-    // Extract the actual expression from: Program -> ExpressionStatement -> ParenthesizedExpression -> Expression
-    const body = (program as any).body;
-    if (body && body.length > 0 && body[0].type === "ExpressionStatement") {
-      const exprStmt = body[0];
-      // The expression is wrapped in parentheses, so unwrap it
-      return exprStmt.expression.expression || exprStmt.expression;
+      // Unwrap ParenthesizedExpression if present
+      while (actualExpr && actualExpr.type === "ParenthesizedExpression") {
+        actualExpr = actualExpr.expression;
+      }
+
+      // Add parent references to the entire tree
+      addParentReferences(actualExpr);
+
+      return actualExpr;
     }
 
     return null;
@@ -145,19 +151,21 @@ function parseExpression(expr: string): Node | null {
 }
 
 /**
- * Add parent references to AST nodes
+ * Add parent references to AST nodes recursively
  */
 function addParentReferences(node: any, parent: any = null): void {
+  if (!node || typeof node !== "object") return;
+
   node.parent = parent;
 
   for (const key in node) {
-    if (key === "parent") continue;
+    if (key === "parent" || key === "loc" || key === "range") continue;
 
     const child = node[key];
     if (child && typeof child === "object") {
       if (Array.isArray(child)) {
         child.forEach((item) => {
-          if (item && typeof item === "object") {
+          if (item && typeof item === "object" && item.type) {
             addParentReferences(item, node);
           }
         });
