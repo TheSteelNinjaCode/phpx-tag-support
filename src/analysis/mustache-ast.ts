@@ -45,11 +45,11 @@ export function extractMustacheExpressions(
     // Look for single `{` (not legacy `{{`)
     if (text[i] === "{" && text[i - 1] !== "{") {
       const result = extractBalancedExpression(text, i);
-      
+
       if (result && text[result.end] !== "}") {
         const full = text.slice(result.start, result.end);
         const inner = text.slice(result.start + 1, result.end - 1);
-        
+
         expressions.push({
           full,
           inner,
@@ -115,16 +115,56 @@ function extractBalancedExpression(
 /**
  * Parse JavaScript expression with acorn
  */
+/**
+ * Parse JavaScript expression with acorn and add parent references
+ */
 function parseExpression(expr: string): Node | null {
   try {
     // Wrap in parentheses to ensure it's parsed as an expression
     const wrapped = `(${expr})`;
-    return acorn.parse(wrapped, {
+    const program = acorn.parse(wrapped, {
       ecmaVersion: "latest",
       sourceType: "module",
-    }) as Node;
+    });
+
+    // Add parent references
+    addParentReferences(program as any);
+
+    // Extract the actual expression from: Program -> ExpressionStatement -> ParenthesizedExpression -> Expression
+    const body = (program as any).body;
+    if (body && body.length > 0 && body[0].type === "ExpressionStatement") {
+      const exprStmt = body[0];
+      // The expression is wrapped in parentheses, so unwrap it
+      return exprStmt.expression.expression || exprStmt.expression;
+    }
+
+    return null;
   } catch (error) {
     return null;
+  }
+}
+
+/**
+ * Add parent references to AST nodes
+ */
+function addParentReferences(node: any, parent: any = null): void {
+  node.parent = parent;
+
+  for (const key in node) {
+    if (key === "parent") continue;
+
+    const child = node[key];
+    if (child && typeof child === "object") {
+      if (Array.isArray(child)) {
+        child.forEach((item) => {
+          if (item && typeof item === "object") {
+            addParentReferences(item, node);
+          }
+        });
+      } else if (child.type) {
+        addParentReferences(child, node);
+      }
+    }
   }
 }
 
@@ -154,13 +194,15 @@ export function extractIdentifiers(
     Identifier(node: any) {
       // Determine type based on context
       let type: "variable" | "property" | "method" = "variable";
-      
+
       if (node.parent?.type === "MemberExpression") {
         type = node.parent.property === node ? "property" : "variable";
       }
-      
-      if (node.parent?.type === "CallExpression" && 
-          node.parent.callee === node) {
+
+      if (
+        node.parent?.type === "CallExpression" &&
+        node.parent.callee === node
+      ) {
         type = "method";
       }
 
@@ -199,9 +241,7 @@ export function containsAssignment(expr: MustacheExpression): boolean {
 /**
  * Extract member expression chains like `user.profile.name`
  */
-export function extractMemberChains(
-  expr: MustacheExpression
-): string[][] {
+export function extractMemberChains(expr: MustacheExpression): string[][] {
   if (!expr.ast) return [];
 
   const chains: string[][] = [];
@@ -209,7 +249,7 @@ export function extractMemberChains(
   walk.simple(expr.ast, {
     MemberExpression(node: any) {
       const chain: string[] = [];
-      
+
       let current = node;
       while (current.type === "MemberExpression") {
         if (current.property.type === "Identifier") {
@@ -217,7 +257,7 @@ export function extractMemberChains(
         }
         current = current.object;
       }
-      
+
       if (current.type === "Identifier") {
         chain.unshift(current.name);
       }
