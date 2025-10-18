@@ -74,6 +74,8 @@ import {
   updateTypeCacheFromSimpleTypes,
   updateTypeCacheFromTS,
 } from "./analysis/type-chache";
+import { validateMustacheExpressions } from "./analysis/mustache-validation";
+import { getMustacheDecorations } from "./analysis/mustache-decorations";
 
 /* ────────────────────────────────────────────────────────────── *
  *                        INTERFACES & CONSTANTS                  *
@@ -1157,14 +1159,21 @@ export async function activate(context: vscode.ExtensionContext) {
     await validatePpSync(document);
     validateMustacheTypeSafety(document, mustacheTypeDiags);
 
-    updateStringDecorations(document);
-    updateMustacheBraceDecorations(document, braceDecorationType);
-    updateMustacheVariableDecorations(document);
-    updateNativeTokenDecorations(
-      document,
-      nativeFunctionDecorationType,
-      nativePropertyDecorationType
-    );
+    // ✅ NEW: Use AST-based validation
+    const mustacheDiags = validateMustacheExpressions(document);
+    mustacheTypeDiags.set(document.uri, mustacheDiags);
+
+    // ✅ NEW: Use AST-based decorations
+    updateMustacheDecorationsAST(document);
+
+    // updateStringDecorations(document);
+    // updateMustacheBraceDecorations(document, braceDecorationType);
+    // updateMustacheVariableDecorations(document);
+    // updateNativeTokenDecorations(
+    //   document,
+    //   nativeFunctionDecorationType,
+    //   nativePropertyDecorationType
+    // );
     validateMissingImports(document, diagnosticCollection);
     const fetchFunctionDiags =
       fetchFunctionDiagnosticProvider.validateDocument(document);
@@ -1571,6 +1580,23 @@ export async function activate(context: vscode.ExtensionContext) {
   phpFileWatcher.onDidDelete(refreshPpSyncAndValidateAll);
 
   context.subscriptions.push(phpFileWatcher);
+
+  // Mustache: Validation Decoration
+  function updateMustacheDecorationsAST(document: vscode.TextDocument) {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document !== document) {
+      return;
+    }
+
+    const decorations = getMustacheDecorations(document);
+
+    editor.setDecorations(braceDecorationType, decorations.braces);
+    editor.setDecorations(variableDecorationType, decorations.variables);
+    editor.setDecorations(propertyDecorationType, decorations.properties);
+    editor.setDecorations(nativeFunctionDecorationType, decorations.methods);
+    editor.setDecorations(stringDecorationType, decorations.strings);
+    editor.setDecorations(numberDecorationType, decorations.numbers);
+  }
 }
 
 /* ────────────────────────────────────────────────────────────── *
