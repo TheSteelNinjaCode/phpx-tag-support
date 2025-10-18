@@ -99,11 +99,6 @@ const PHP_LANGUAGE = "php";
 // Command ID for auto-import.
 const ADD_IMPORT_COMMAND = "phpx.addImport";
 
-// Colors for decorations
-const BRACE_COLOR = "#569CD6";
-const NATIVE_FUNC_COLOR = "#dcdcaa";
-const NATIVE_PROP_COLOR = "#4EC9B0";
-
 let classStubs: Record<
   "PPHP" | "PPHPLocalStore" | "SearchParamsManager" | "PPHPUtilities",
   { name: string; signature: string }[]
@@ -586,6 +581,30 @@ export async function activate(context: vscode.ExtensionContext) {
   const stubText = fs.readFileSync(stubPath, "utf8");
   parseStubsWithTS(stubText);
 
+  // Update or add these decoration types
+  const variableDecorationType = vscode.window.createTextEditorDecorationType({
+    color: "#9CDCFE", // Light blue for variables
+  });
+
+  const propertyDecorationType = vscode.window.createTextEditorDecorationType({
+    color: "#4EC9B0", // Teal/cyan for properties
+  });
+
+  const nativeFunctionDecorationType =
+    vscode.window.createTextEditorDecorationType({
+      color: "#DCDCAA", // Yellow for methods
+    });
+
+  const nativePropertyDecorationType =
+    vscode.window.createTextEditorDecorationType({
+      color: "#4EC9B0", // Teal/cyan for native properties
+    });
+
+  // Create decoration types for curly braces and native tokens.
+  const braceDecorationType = vscode.window.createTextEditorDecorationType({
+    color: "#569CD6",
+  });
+
   context.subscriptions.push(
     vscode.languages.registerDefinitionProvider(
       { language: "php", scheme: "file" },
@@ -957,19 +976,6 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // Create decoration types for curly braces and native tokens.
-  const braceDecorationType = vscode.window.createTextEditorDecorationType({
-    color: BRACE_COLOR,
-  });
-  const nativeFunctionDecorationType =
-    vscode.window.createTextEditorDecorationType({
-      color: NATIVE_FUNC_COLOR,
-    });
-  const nativePropertyDecorationType =
-    vscode.window.createTextEditorDecorationType({
-      color: NATIVE_PROP_COLOR,
-    });
-
   const pphpSigDiags =
     vscode.languages.createDiagnosticCollection("pphp-signatures");
   context.subscriptions.push(pphpSigDiags);
@@ -1135,8 +1141,7 @@ export async function activate(context: vscode.ExtensionContext) {
         validateStateTupleUsage(doc, pphpSigDiags);
         rebuildMustacheStub(doc);
         validateComponentPropValues(doc, propsProvider);
-        validateJsVariablesInCurlyBraces(doc, jsVarDiagnostics);
-        updateJsVariableDecorations(doc, braceDecorationType);
+        // validateJsVariablesInCurlyBraces(doc, jsVarDiagnostics);
         pendingTimers.delete(key);
       }, 500)
     );
@@ -1581,6 +1586,17 @@ export async function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(phpFileWatcher);
 
+  context.subscriptions.push(
+    braceDecorationType,
+    variableDecorationType,
+    propertyDecorationType, // ← Add this
+    nativeFunctionDecorationType,
+    nativePropertyDecorationType,
+    stringDecorationType,
+    numberDecorationType
+    // ... other decorations
+  );
+
   // Mustache: Validation Decoration
   function updateMustacheDecorationsAST(document: vscode.TextDocument) {
     const editor = vscode.window.activeTextEditor;
@@ -1590,6 +1606,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const decorations = getMustacheDecorations(document);
 
+    // Apply all decorations
     editor.setDecorations(braceDecorationType, decorations.braces);
     editor.setDecorations(variableDecorationType, decorations.variables);
     editor.setDecorations(propertyDecorationType, decorations.properties);
@@ -2169,154 +2186,6 @@ const registerPhpScriptCompletionProvider = () =>
 /* ────────────────────────────────────────────────────────────── *
  *  2️⃣  completions OUTSIDE <script>                             *
  * ────────────────────────────────────────────────────────────── */
-
-function updateMustacheVariableDecorations(
-  document: vscode.TextDocument
-): void {
-  const editor = vscode.window.activeTextEditor;
-  if (
-    !editor ||
-    editor.document !== document ||
-    document.languageId !== PHP_LANGUAGE
-  ) {
-    return;
-  }
-
-  const text = document.getText();
-
-  const scriptRanges: Array<[number, number]> = [];
-  {
-    const re = /<script\b[^>]*>[\s\S]*?<\/script>/gi;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
-      scriptRanges.push([m.index, m.index + m[0].length]);
-    }
-  }
-
-  const styleRanges: Array<[number, number]> = [];
-  {
-    const re = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
-      styleRanges.push([m.index, m.index + m[0].length]);
-    }
-  }
-
-  const phpRanges: Array<[number, number]> = [];
-  {
-    const re = /<\?(?:php|=)?([\s\S]*?)(?:\?>|$)/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
-      phpRanges.push([m.index, m.index + m[0].length]);
-    }
-  }
-
-  const isInsideScript = (idx: number) =>
-    scriptRanges.some(([s, e]) => idx >= s && idx < e);
-
-  const isInsideStyle = (idx: number) =>
-    styleRanges.some(([s, e]) => idx >= s && idx < e);
-
-  const isInsidePhp = (idx: number) =>
-    phpRanges.some(([s, e]) => idx >= s && idx < e);
-
-  const variableDecorations: vscode.DecorationOptions[] = [];
-  const propertyDecorations: vscode.DecorationOptions[] = [];
-
-  for (const match of extractMustacheExpressions(text)) {
-    const { inner, index: startIdx } = match;
-
-    if (
-      isInsideScript(startIdx) ||
-      isInsideStyle(startIdx) ||
-      isInsidePhp(startIdx)
-    ) {
-      continue;
-    }
-
-    const baseOffset = startIdx + 1;
-    const trimmed = inner.trim();
-    const trimOffset = baseOffset + inner.indexOf(trimmed);
-
-    // ✅ NEW: Build string literal ranges within this mustache expression
-    const stringRanges: Array<[number, number]> = [];
-    const stringRegex = /(['"`])(?:\\.|[^\\])*?\1/g;
-    let strMatch: RegExpExecArray | null;
-    while ((strMatch = stringRegex.exec(trimmed)) !== null) {
-      stringRanges.push([strMatch.index, strMatch.index + strMatch[0].length]);
-    }
-
-    // ✅ Helper to check if a position is inside a string
-    const isInsideString = (pos: number) =>
-      stringRanges.some(([start, end]) => pos >= start && pos < end);
-
-    const chainRegex = /([A-Za-z_$][\w$]*)(\s*\.\s*[A-Za-z_$][\w$]*)*/g;
-    let chainMatch: RegExpExecArray | null;
-
-    while ((chainMatch = chainRegex.exec(trimmed)) !== null) {
-      // ✅ Skip if this match is inside a string literal
-      if (isInsideString(chainMatch.index)) {
-        continue;
-      }
-
-      const fullChain = chainMatch[0];
-      const parts = fullChain.split(/\s*\.\s*/);
-
-      const rootVar = parts[0];
-      const rootStart = trimOffset + chainMatch.index;
-      const rootEnd = rootStart + rootVar.length;
-
-      variableDecorations.push({
-        range: new vscode.Range(
-          document.positionAt(rootStart),
-          document.positionAt(rootEnd)
-        ),
-      });
-
-      let searchStart = chainMatch.index + rootVar.length;
-
-      for (let i = 1; i < parts.length; i++) {
-        const prop = parts[i];
-
-        const dotIndex = trimmed.indexOf(".", searchStart);
-        if (dotIndex === -1) {
-          break;
-        }
-
-        let propStart = dotIndex + 1;
-        while (propStart < trimmed.length && /\s/.test(trimmed[propStart])) {
-          propStart++;
-        }
-
-        const actualPropStart = trimOffset + propStart;
-        const propEnd = actualPropStart + prop.length;
-
-        const nextCharIndex = propStart + prop.length;
-        let nextChar = "";
-        for (let j = nextCharIndex; j < trimmed.length; j++) {
-          if (!/\s/.test(trimmed[j])) {
-            nextChar = trimmed[j];
-            break;
-          }
-        }
-
-        if (nextChar !== "(") {
-          propertyDecorations.push({
-            range: new vscode.Range(
-              document.positionAt(actualPropStart),
-              document.positionAt(propEnd)
-            ),
-          });
-        }
-
-        searchStart = propStart + prop.length;
-      }
-    }
-  }
-
-  editor.setDecorations(variableDecorationType, variableDecorations);
-  editor.setDecorations(propertyDecorationType, propertyDecorations);
-}
 
 function updateMustacheBraceDecorations(
   document: vscode.TextDocument,
@@ -3019,93 +2888,6 @@ export function getComponentsFromClassLog(): Map<string, string> {
  *                     DECORATION AND VALIDATION                  *
  * ────────────────────────────────────────────────────────────── */
 
-function updateJsVariableDecorations(
-  document: vscode.TextDocument,
-  decorationType: vscode.TextEditorDecorationType
-): void {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor) {
-    return;
-  }
-
-  const text = document.getText();
-
-  // ✅ Build exclusion ranges
-  const scriptRanges: Array<[number, number]> = [];
-  {
-    const re = /<script\b[^>]*>[\s\S]*?<\/script>/gi;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
-      scriptRanges.push([m.index, m.index + m[0].length]);
-    }
-  }
-
-  const styleRanges: Array<[number, number]> = [];
-  {
-    const re = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
-      styleRanges.push([m.index, m.index + m[0].length]);
-    }
-  }
-
-  const phpRanges: Array<[number, number]> = [];
-  {
-    const re = /<\?(?:php|=)?([\s\S]*?)(?:\?>|$)/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
-      phpRanges.push([m.index, m.index + m[0].length]);
-    }
-  }
-
-  const isInsideScript = (idx: number) =>
-    scriptRanges.some(([s, e]) => idx >= s && idx < e);
-
-  const isInsideStyle = (idx: number) =>
-    styleRanges.some(([s, e]) => idx >= s && idx < e);
-
-  const isInsidePhp = (idx: number) =>
-    phpRanges.some(([s, e]) => idx >= s && idx < e);
-
-  const decorations: vscode.DecorationOptions[] = [];
-  let m: RegExpExecArray | null;
-
-  while ((m = JS_EXPR_REGEX.exec(text))) {
-    const whole = m[0];
-    const startIdx = m.index;
-    const endIdx = startIdx + whole.length;
-
-    // Skip legacy double-brace blocks
-    if (text[startIdx - 1] === "{" || text[endIdx] === "}") {
-      continue;
-    }
-
-    // ✅ Skip if inside excluded blocks
-    if (
-      isInsideScript(startIdx) ||
-      isInsideStyle(startIdx) ||
-      isInsidePhp(startIdx)
-    ) {
-      continue;
-    }
-
-    const inner = m[1];
-    const baseOffset = startIdx + whole.indexOf(inner);
-
-    // match single or double-quoted strings
-    const stringRegex = /(['"])(?:(?=(\\?))\2.)*?\1/g;
-    let strMatch: RegExpExecArray | null;
-    while ((strMatch = stringRegex.exec(inner))) {
-      const s = baseOffset + strMatch.index;
-      const e = s + strMatch[0].length;
-      decorations.push({
-        range: new vscode.Range(document.positionAt(s), document.positionAt(e)),
-      });
-    }
-  }
-  editor.setDecorations(stringDecorationType, decorations);
-}
-
 const JS_NATIVE_MEMBERS = [...ALL_NATIVE_METHODS, ...ALL_NATIVE_PROPS].filter(
   (k) => /^[a-z]/i.test(k)
 );
@@ -3509,14 +3291,6 @@ const nativePropRegex = new RegExp(
 );
 const objectPropRegex = /(?<=\.)[A-Za-z_$][\w$]*/g;
 
-const propertyDecorationType = vscode.window.createTextEditorDecorationType({
-  color: "#9CDCFE",
-});
-// Create decoration types
-const variableDecorationType = vscode.window.createTextEditorDecorationType({
-  color: "#9CDCFE", // Light blue for variables
-});
-
 const STRING_COLOR = "#CE9178";
 const stringDecorationType = vscode.window.createTextEditorDecorationType({
   color: STRING_COLOR,
@@ -3558,185 +3332,6 @@ const FUNCTION_CALL_COLOR = "#DCDCAA";
 const functionCallDecorationType = vscode.window.createTextEditorDecorationType(
   { color: FUNCTION_CALL_COLOR }
 );
-
-function updateNativeTokenDecorations(
-  document: vscode.TextDocument,
-  funcDecoType: vscode.TextEditorDecorationType,
-  propDecoType: vscode.TextEditorDecorationType
-): void {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor || document.languageId !== PHP_LANGUAGE) {
-    return;
-  }
-
-  const text = document.getText();
-
-  // ✅ Build exclusion ranges
-  const scriptRanges: Array<[number, number]> = [];
-  {
-    const re = /<script\b[^>]*>[\s\S]*?<\/script>/gi;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
-      scriptRanges.push([m.index, m.index + m[0].length]);
-    }
-  }
-
-  const styleRanges: Array<[number, number]> = [];
-  {
-    const re = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
-      styleRanges.push([m.index, m.index + m[0].length]);
-    }
-  }
-
-  const phpRanges: Array<[number, number]> = [];
-  {
-    const re = /<\?(?:php|=)?([\s\S]*?)(?:\?>|$)/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
-      phpRanges.push([m.index, m.index + m[0].length]);
-    }
-  }
-
-  const isInsideScript = (idx: number) =>
-    scriptRanges.some(([s, e]) => idx >= s && idx < e);
-
-  const isInsideStyle = (idx: number) =>
-    styleRanges.some(([s, e]) => idx >= s && idx < e);
-
-  const isInsidePhp = (idx: number) =>
-    phpRanges.some(([s, e]) => idx >= s && idx < e);
-
-  const funcDecorations: vscode.DecorationOptions[] = [];
-  const nativePropDecorations: vscode.DecorationOptions[] = [];
-  const objectPropDecorations: vscode.DecorationOptions[] = [];
-  const numberDecorations: vscode.DecorationOptions[] = [];
-  const stringSpans: vscode.DecorationOptions[] = [];
-  const functionCallDecos: vscode.DecorationOptions[] = [];
-
-  for (const exprMatch of text.matchAll(JS_EXPR_REGEX)) {
-    const whole = exprMatch[0];
-    const base = exprMatch.index!;
-    const end = base + whole.length;
-
-    if (text[base - 1] === "{" || text[end] === "}") {
-      continue;
-    }
-
-    // ✅ Skip if inside excluded blocks
-    if (isInsideScript(base) || isInsideStyle(base) || isInsidePhp(base)) {
-      continue;
-    }
-
-    const jsExpr = exprMatch[1];
-    const baseIndex = base + whole.indexOf(jsExpr);
-
-    for (const m of jsExpr.matchAll(nativeFuncRegex)) {
-      const s = baseIndex + m.index!;
-      const e = s + m[0].length;
-      funcDecorations.push({
-        range: new vscode.Range(document.positionAt(s), document.positionAt(e)),
-      });
-    }
-
-    for (const m of jsExpr.matchAll(nativePropRegex)) {
-      const s = baseIndex + m.index!;
-      const e = s + m[0].length;
-      nativePropDecorations.push({
-        range: new vscode.Range(document.positionAt(s), document.positionAt(e)),
-      });
-    }
-
-    for (const m of jsExpr.matchAll(objectPropRegex)) {
-      if (
-        ALL_NATIVE_METHODS.includes(m[0]) ||
-        ALL_NATIVE_PROPS.includes(m[0])
-      ) {
-        continue;
-      }
-      const s = baseIndex + m.index!;
-      const e = s + m[0].length;
-      objectPropDecorations.push({
-        range: new vscode.Range(document.positionAt(s), document.positionAt(e)),
-      });
-    }
-
-    for (const numMatch of jsExpr.matchAll(numberRegex)) {
-      const s = baseIndex + numMatch.index!;
-      const e = s + numMatch[0].length;
-      numberDecorations.push({
-        range: new vscode.Range(document.positionAt(s), document.positionAt(e)),
-      });
-    }
-
-    for (const fc of jsExpr.matchAll(functionCallRegex)) {
-      const ident = fc[1];
-      if (
-        ALL_NATIVE_METHODS.includes(ident) ||
-        ALL_NATIVE_PROPS.includes(ident)
-      ) {
-        continue;
-      }
-      const s = baseIndex + fc.index!;
-      const e = s + ident.length;
-      functionCallDecos.push({
-        range: new vscode.Range(document.positionAt(s), document.positionAt(e)),
-      });
-    }
-
-    for (const tl of jsExpr.matchAll(templateLiteralRegex)) {
-      const tplBase = baseIndex + tl.index!;
-      const raw = tl[0];
-      const inner = raw.slice(1, -1);
-
-      stringSpans.push({
-        range: new vscode.Range(
-          document.positionAt(tplBase),
-          document.positionAt(tplBase + 1)
-        ),
-      });
-      stringSpans.push({
-        range: new vscode.Range(
-          document.positionAt(tplBase + raw.length - 1),
-          document.positionAt(tplBase + raw.length)
-        ),
-      });
-
-      let last = 0;
-      for (const ph of findPlaceholders(inner)) {
-        const litStart = tplBase + 1 + last;
-        const litEnd = tplBase + 1 + ph.start;
-        if (litEnd > litStart) {
-          stringSpans.push({
-            range: new vscode.Range(
-              document.positionAt(litStart),
-              document.positionAt(litEnd)
-            ),
-          });
-        }
-        last = ph.end;
-      }
-      if (last < inner.length) {
-        const litStart = tplBase + 1 + last;
-        const litEnd = tplBase + 1 + inner.length;
-        stringSpans.push({
-          range: new vscode.Range(
-            document.positionAt(litStart),
-            document.positionAt(litEnd)
-          ),
-        });
-      }
-    }
-  }
-
-  editor.setDecorations(funcDecoType, funcDecorations);
-  editor.setDecorations(propDecoType, nativePropDecorations);
-  editor.setDecorations(propertyDecorationType, objectPropDecorations);
-  editor.setDecorations(numberDecorationType, numberDecorations);
-  editor.setDecorations(tplLiteralDecorationType, stringSpans);
-  editor.setDecorations(functionCallDecorationType, functionCallDecos);
-}
 
 /* ────────────────────────────────────────────────────────────── *
  *                      PHP DIAGNOSTIC FUNCTIONS                  *
