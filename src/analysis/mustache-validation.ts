@@ -8,6 +8,10 @@ import {
 export function validateMustacheExpressions(
   document: vscode.TextDocument
 ): vscode.Diagnostic[] {
+  if (document.languageId !== "php") {
+    return [];
+  }
+
   const text = document.getText();
   const exclusions = buildExclusionRanges(text);
   const expressions = extractMustacheExpressions(text, exclusions);
