@@ -207,21 +207,6 @@ function arrayUnderCursor(
   return arr;
 }
 
-function findParentKey(arr: PhpArray, target: PhpArray): string | undefined {
-  for (const e of arr.items as Entry[]) {
-    if (e.value === target && e.key?.kind === "string") {
-      return (e.key as any).value as string;
-    }
-    if (isArray(e.value)) {
-      const sub = findParentKey(e.value, target);
-      if (sub) {
-        return sub;
-      }
-    }
-  }
-  return undefined;
-}
-
 function makeReplaceRange(
   doc: vscode.TextDocument,
   pos: vscode.Position,
@@ -800,7 +785,7 @@ function generateCompletions(
   context: CompletionContext,
   arrayContext: ArrayContext
 ): vscode.CompletionItem[] {
-  const { currentRoot, entrySide, relationChain } = arrayContext;
+  const { currentRoot, entrySide } = arrayContext;
 
   // Root key completions (top-level array)
   if (shouldProvideRootKeys(context, arrayContext)) {
@@ -1036,7 +1021,7 @@ function shouldProvideRootKeys(
 function createRootKeyCompletions(
   context: CompletionContext
 ): vscode.CompletionItem[] {
-  const { rootKeys, pos, already, doc, callNode, lastPrisma } = context;
+  const { rootKeys, pos, already, doc } = context;
 
   // Get already used keys from the current array
   const usedKeys = getUsedKeys(context);
@@ -1081,8 +1066,7 @@ function handleSpecialCompletions(
   context: CompletionContext,
   arrayContext: ArrayContext
 ): vscode.CompletionItem[] | null {
-  const { currentRoot, entrySide, nestedOperation, relationChain } =
-    arrayContext;
+  const { currentRoot, entrySide } = arrayContext;
 
   // OrderBy value completions
   if (currentRoot === "orderBy" && entrySide === "value") {
@@ -1138,8 +1122,8 @@ function createWhereCompletions(
   context: CompletionContext,
   arrayContext: ArrayContext
 ): vscode.CompletionItem[] {
-  const { fieldMap, pos, already, doc, modelMap } = context;
-  const { hostArray, parentKey, entrySide } = arrayContext;
+  const { pos, already, doc, modelMap } = context;
+  const { parentKey, entrySide } = arrayContext;
 
   // **CRITICAL FIX: Check entrySide FIRST before anything else**
   if (entrySide === "value") {
@@ -1152,27 +1136,18 @@ function createWhereCompletions(
     if (path && path.length >= 2) {
       const lastSegment = path[path.length - 1];
 
-      // **ONLY** show completions for specific operator value positions
-      // Check if we're DIRECTLY in a filter operator value position
       if (FILTER_OPERATORS.includes(lastSegment as any)) {
         return createFilterValueCompletions(context, lastSegment);
       }
 
-      // Check if we're DIRECTLY in a relation operator value position
-      // The key fix: only show field completions if the LAST segment is a relation operator
       if (RELATION_OPERATORS.includes(lastSegment as any)) {
         return createFieldCompletions(context, arrayContext);
       }
     }
 
-    // **CRITICAL: For ANY other value position (including scalar fields), return empty array**
-    // This specifically handles cases like 'title' => | inside relation contexts
     return [];
   }
 
-  // **NOW we can safely handle key-side logic**
-
-  // Top-level WHERE: columns + combinators (but only on KEY side)
   if (isTopLevelWhere(context, arrayContext)) {
     return [
       ...createFieldCompletions(context, arrayContext),
@@ -1512,7 +1487,7 @@ function isTopLevelWhere(
   context: CompletionContext,
   arrayContext: ArrayContext
 ): boolean {
-  const { callNode, lastPrisma } = context;
+  const { callNode } = context;
   const { hostArray } = arrayContext;
 
   const argsArr = callNode.arguments?.[0] as PhpArray;
@@ -1856,7 +1831,7 @@ export function validateSelectBlock(
   const selRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
   let m: RegExpExecArray | null;
   while ((m = selRe.exec(literal))) {
-    const [full, key, rawExpr] = m;
+    const [key, rawExpr] = m;
     const raw = rawExpr.trim();
     const info = fields.get(key);
     const startPos = doc.positionAt(offset + m.index);

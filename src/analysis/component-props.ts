@@ -3,23 +3,16 @@ import * as vscode from "vscode";
 import { getComponentsFromClassLog } from "../extension";
 import { phpEngine } from "../util/php-engine";
 
-/**
- * php‑parser uses bit‑flags for visibility.  Public = 4.
- * (src/const.js in the library)
- */
 const FLAG_PUBLIC = 4;
 
-/* ------------------------------------------------------------- *
- *  Types helpers
- * ------------------------------------------------------------- */
 export type FqcnToFile = (fqcn: string) => string | undefined;
-export type TagMap = Map<string, string>; // «<TagName>» -> FQCN
+export type TagMap = Map<string, string>;
 
 interface PropMeta {
   name: string;
-  type: string; //  string|int|null …
-  default?: string; //  already‑formatted literal
-  doc?: string; //  first line of PHP‑Doc
+  type: string;
+  default?: string;
+  doc?: string;
   optional: boolean; // true ↔ nullable (…|null)
   allowed?: string; //  allowed literals, e.g. "1|2|3|4|5|6"
 }
@@ -450,15 +443,13 @@ export class ComponentPropsProvider {
       props.push(finalProp);
     };
 
-    /* ——— 🔧 FIX: Find and process the specific target class ——— */
     const walkClass = (classNode: any) => {
       const className = classNode.name?.name ?? classNode.name;
 
       if (className !== targetClass) {
-        return; // Skip classes that don't match
+        return;
       }
 
-      // Only process the direct body of the target class
       for (const stmt of classNode.body ?? []) {
         if (
           stmt.kind === "propertystatement" ||
@@ -527,10 +518,6 @@ export class ComponentPropsProvider {
   }
 }
 
-/* ────────────────────────────────────────────────────────────── *
- *        1️⃣  A tiny validator for component‑prop *values*        *
- * ────────────────────────────────────────────────────────────── */
-
 const ATTR_VALUE_DIAG =
   vscode.languages.createDiagnosticCollection("phpx-attr-values");
 
@@ -545,7 +532,6 @@ export function validateComponentPropValues(
   const text = doc.getText();
   const diags: vscode.Diagnostic[] = [];
 
-  // ✅ FIXED: Better tag parsing that handles > inside quoted attributes
   const findTags = (text: string) => {
     const tags: Array<{
       fullMatch: string;
@@ -774,9 +760,6 @@ export function validateComponentPropValues(
   ATTR_VALUE_DIAG.set(doc.uri, diags);
 }
 
-/* ------------------------------------------------------------- *
- *  Build VS Code completion items for these props
- * ------------------------------------------------------------- */
 export function buildDynamicAttrItems(
   tag: string,
   written: Set<string>,
@@ -795,9 +778,6 @@ export function buildDynamicAttrItems(
         optional,
         allowed,
       }): vscode.CompletionItem => {
-        /* ──────────────────────────────────────────────────────────────
-         * 1. Combine property value with documentation values (IMPROVED)
-         * ─────────────────────────────────────────────────────────── */
         const combinedValues = new Set<string>();
 
         // Add documentation values first

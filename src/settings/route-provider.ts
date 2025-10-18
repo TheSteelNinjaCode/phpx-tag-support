@@ -16,8 +16,12 @@ function srcOrHrefToFilesListPath(val: string): string {
   if (val.startsWith("/")) {
     return "." + (val.startsWith("/public/") ? val : "/public" + val);
   }
-  if (val.startsWith("./public/")) return val;
-  if (val.startsWith("./")) return val.replace("./", "./public/");
+  if (val.startsWith("./public/")) {
+    return val;
+  }
+  if (val.startsWith("./")) {
+    return val.replace("./", "./public/");
+  }
   return "./public/" + val.replace(/^\//, "");
 }
 
@@ -76,7 +80,6 @@ export class RouteProvider {
       normalizedPath.startsWith("./") &&
       !normalizedPath.startsWith("./public/")
     ) {
-      // treat "./css/foo.css" as "./public/css/foo.css"
       normalizedPath = normalizedPath.replace("./", "./public/");
     }
 
@@ -87,9 +90,10 @@ export class RouteProvider {
   }
 
   public getStaticAssets(): string[] {
-    // Non-route files, but only under ./public
     return this.allFiles.filter((file) => {
-      if (file.endsWith("/index.php") && file.includes("/app/")) return false;
+      if (file.endsWith("/index.php") && file.includes("/app/")) {
+        return false;
+      }
       return file.startsWith("./public/");
     });
   }
@@ -555,13 +559,19 @@ export class HrefDiagnosticProvider {
     while ((match = hrefRegex.exec(text)) !== null) {
       const hrefValue = match[1];
 
-      if (this.isExternalOrSpecialUrl(hrefValue)) continue;
-      if (this.containsPhpTags(hrefValue)) continue;
-      // NEW: single-brace mustache skip
-      if (this.containsMustacheExpression(hrefValue)) continue;
+      if (this.isExternalOrSpecialUrl(hrefValue)) {
+        continue;
+      }
+      if (this.containsPhpTags(hrefValue)) {
+        continue;
+      }
+      if (this.containsMustacheExpression(hrefValue)) {
+        continue;
+      }
 
-      // NEW: valid static asset under ./public mapped from leading slash
-      if (this.routeProvider.isValidStaticAsset(hrefValue)) continue;
+      if (this.routeProvider.isValidStaticAsset(hrefValue)) {
+        continue;
+      }
 
       if (!this.routeProvider.isValidRoute(hrefValue)) {
         const start = document.positionAt(
@@ -600,9 +610,6 @@ export class HrefDiagnosticProvider {
     return /\{[^}]*\}/.test(value);
   }
 
-  /**
-   * Check if string contains PHP tags
-   */
   private containsPhpTags(value: string): boolean {
     // Check for various PHP tag patterns
     const phpTagPatterns = [
@@ -1890,10 +1897,16 @@ export class SrcDiagnosticProvider {
     while ((match = srcRegex.exec(text)) !== null) {
       const srcValue = match[1];
 
-      if (this.isExternalOrSpecialUrl(srcValue)) continue;
-      if (this.containsPhpTags(srcValue)) continue;
+      if (this.isExternalOrSpecialUrl(srcValue)) {
+        continue;
+      }
+      if (this.containsPhpTags(srcValue)) {
+        continue;
+      }
       // NEW: single-brace mustache skip
-      if (this.containsMustacheExpression(srcValue)) continue;
+      if (this.containsMustacheExpression(srcValue)) {
+        continue;
+      }
 
       // Only validate against static assets (not routes)
       if (!this.routeProvider.isValidStaticAsset(srcValue)) {
@@ -1969,7 +1982,9 @@ export class SrcDiagnosticProvider {
         .slice(0, 3)
         .forEach((asset) => {
           const assetHref = toHref(asset);
-          if (!suggestions.includes(assetHref)) suggestions.push(assetHref);
+          if (!suggestions.includes(assetHref)) {
+            suggestions.push(assetHref);
+          }
         });
     }
 

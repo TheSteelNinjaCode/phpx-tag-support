@@ -1,5 +1,4 @@
 import * as vscode from "vscode";
-
 import {
   extractMustacheExpressions,
   buildExclusionRanges,
@@ -14,9 +13,6 @@ export interface DecorationRanges {
   numbers: vscode.Range[];
 }
 
-/**
- * Extract decoration ranges from mustache expressions
- */
 export function getMustacheDecorations(
   document: vscode.TextDocument
 ): DecorationRanges {
@@ -34,7 +30,6 @@ export function getMustacheDecorations(
   };
 
   for (const expr of expressions) {
-    // Decorate braces
     result.braces.push(
       new vscode.Range(
         document.positionAt(expr.startOffset),
@@ -46,12 +41,12 @@ export function getMustacheDecorations(
       )
     );
 
-    if (!expr.ast) continue;
+    if (!expr.ast) {
+      continue;
+    }
 
-    // Base offset: after opening brace, minus 1 for wrapping parenthesis
     const baseOffset = expr.startOffset + 1;
 
-    // Manually walk the tree to ensure we visit all nodes
     walkWithParents(expr.ast, (node: any) => {
       if (node.type === "Identifier") {
         handleIdentifier(node, document, baseOffset, result);
@@ -66,16 +61,17 @@ export function getMustacheDecorations(
   return result;
 }
 
-/**
- * Custom tree walker that preserves parent references
- */
 function walkWithParents(node: any, callback: (node: any) => void): void {
-  if (!node || typeof node !== "object") return;
+  if (!node || typeof node !== "object") {
+    return;
+  }
 
   callback(node);
 
   for (const key in node) {
-    if (key === "parent" || key === "loc" || key === "range") continue;
+    if (key === "parent" || key === "loc" || key === "range") {
+      continue;
+    }
 
     const child = node[key];
     if (child && typeof child === "object") {
@@ -92,16 +88,12 @@ function walkWithParents(node: any, callback: (node: any) => void): void {
   }
 }
 
-/**
- * Handle identifier node decoration
- */
 function handleIdentifier(
   node: any,
   document: vscode.TextDocument,
   baseOffset: number,
   result: DecorationRanges
 ): void {
-  // Calculate position (subtract 1 for wrapping parenthesis)
   const start = document.positionAt(baseOffset + node.start - 1);
   const end = document.positionAt(baseOffset + node.end - 1);
   const range = new vscode.Range(start, end);
@@ -113,19 +105,16 @@ function handleIdentifier(
     return;
   }
 
-  // Check if it's a method call: foo() or obj.foo()
   if (parent.type === "CallExpression" && parent.callee === node) {
     result.methods.push(range);
     return;
   }
 
-  // Check if it's a method in a member expression: obj.method()
   if (
     parent.type === "MemberExpression" &&
     parent.property === node &&
     !parent.computed
   ) {
-    // Check if the parent MemberExpression is being called
     const grandparent = parent.parent;
     if (
       grandparent?.type === "CallExpression" &&
@@ -135,24 +124,18 @@ function handleIdentifier(
       return;
     }
 
-    // Otherwise it's a property
     result.properties.push(range);
     return;
   }
 
-  // Check if it's the object in a member expression: obj in obj.prop
   if (parent.type === "MemberExpression" && parent.object === node) {
     result.variables.push(range);
     return;
   }
 
-  // Default: it's a variable
   result.variables.push(range);
 }
 
-/**
- * Handle literal node decoration
- */
 function handleLiteral(
   node: any,
   document: vscode.TextDocument,
@@ -170,16 +153,25 @@ function handleLiteral(
   }
 }
 
-/**
- * Handle template literal node decoration
- */
 function handleTemplateLiteral(
   node: any,
   document: vscode.TextDocument,
   baseOffset: number,
   result: DecorationRanges
 ): void {
-  const start = document.positionAt(baseOffset + node.start - 1);
-  const end = document.positionAt(baseOffset + node.end - 1);
-  result.strings.push(new vscode.Range(start, end));
+  if (node.quasis && Array.isArray(node.quasis)) {
+    node.quasis.forEach((quasi: any) => {
+      const start = document.positionAt(baseOffset + quasi.start - 1);
+      const end = document.positionAt(baseOffset + quasi.end - 1);
+      result.strings.push(new vscode.Range(start, end));
+    });
+  }
+
+  const templateStart = document.positionAt(baseOffset + node.start - 1);
+  const templateStartPlusOne = document.positionAt(baseOffset + node.start);
+  result.strings.push(new vscode.Range(templateStart, templateStartPlusOne));
+
+  const templateEnd = document.positionAt(baseOffset + node.end - 1);
+  const templateEndMinusOne = document.positionAt(baseOffset + node.end - 2);
+  result.strings.push(new vscode.Range(templateEndMinusOne, templateEnd));
 }
