@@ -254,9 +254,32 @@ export function extractMemberChains(expr: MustacheExpression): string[][] {
 export function buildExclusionRanges(text: string): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
 
-  const phpRegex = /<\?(?:php|=)?([\s\S]*?)(?:\?>|$)/g;
-  for (const match of text.matchAll(phpRegex)) {
-    ranges.push([match.index!, match.index! + match[0].length]);
+  const startsWithPhp = /^<\?php\b/.test(text.trim());
+
+  if (startsWithPhp) {
+    const firstClose = text.indexOf("?>");
+    if (firstClose === -1) {
+      return [[0, text.length]];
+    }
+  }
+
+  let pos = 0;
+  while (pos < text.length) {
+    const openMatch = text.slice(pos).match(/<\?(?:php\b|=)?/);
+    if (!openMatch || openMatch.index === undefined) break;
+
+    const openPos = pos + openMatch.index;
+    const openTag = openMatch[0];
+
+    const closePos = text.indexOf("?>", openPos + openTag.length);
+
+    if (closePos === -1) {
+      ranges.push([openPos, text.length]);
+      break;
+    }
+
+    ranges.push([openPos, closePos + 2]);
+    pos = closePos + 2;
   }
 
   const scriptRegex = /<script\b[^>]*>[\s\S]*?<\/script>/gi;
