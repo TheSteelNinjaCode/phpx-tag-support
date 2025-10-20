@@ -5,6 +5,7 @@ export type InferredType = "string" | "number" | "boolean" | "object" | "array";
 export interface TypeInfo {
   type: InferredType | "any";
   properties?: Map<string, TypeInfo>;
+  element?: TypeInfo;
 }
 
 export interface PropNode {
@@ -14,6 +15,26 @@ export interface PropNode {
 
 let typeCache = new Map<string, TypeInfo>();
 
+function typeInfoFromTsTypeNode(node: ts.TypeNode): TypeInfo {
+  if (ts.isTypeLiteralNode(node)) {
+    return typeInfoFromTypeLiteral(node);
+  }
+  if (ts.isArrayTypeNode(node)) {
+    const el = typeInfoFromTsTypeNode(node.elementType);
+    return { type: "array", element: el };
+  }
+  if (
+    ts.isTypeReferenceNode(node) &&
+    node.typeName.getText() === "Array" &&
+    node.typeArguments?.length === 1
+  ) {
+    const el = typeInfoFromTsTypeNode(node.typeArguments[0]);
+    return { type: "array", element: el };
+  }
+  const t = node.getText().trim();
+  return { type: mapTypeStringToInferred(t) };
+}
+
 export function updateTypeCache(map: Map<string, PropNode>): void {
   typeCache.clear();
 
@@ -22,23 +43,16 @@ export function updateTypeCache(map: Map<string, PropNode>): void {
   }
 }
 
-// ✅ NEW: Update type cache from parsed TypeScript types
 export function updateTypeCacheFromTS(
-  globalStubTypes: Record<string, ts.TypeLiteralNode>
-): void {
-  for (const [varName, typeLiteral] of Object.entries(globalStubTypes)) {
+  globalStubTypes: Record<string, ts.TypeLiteralNode | ts.TypeNode>
+) {
+  for (const [varName, typeNode] of Object.entries(globalStubTypes as any)) {
+    const next = typeInfoFromTsTypeNode(typeNode as ts.TypeNode);
     const existing = typeCache.get(varName);
-    if (existing) {
-      // Merge properties from TS into existing
-      mergeTypeInfo(existing, typeLiteral);
-    } else {
-      // Create new entry from TS
-      typeCache.set(varName, typeInfoFromTypeLiteral(typeLiteral));
-    }
+    typeCache.set(varName, existing ? { ...existing, ...next } : next);
   }
 }
 
-// ✅ NEW: Handle simple type declarations (declare var x: string;)
 export function updateTypeCacheFromSimpleTypes(
   declarations: Map<string, string>
 ): void {
@@ -96,32 +110,6 @@ function typeInfoFromTypeLiteral(node: ts.TypeLiteralNode): TypeInfo {
     type: "object",
     properties,
   };
-}
-
-function mergeTypeInfo(target: TypeInfo, source: ts.TypeLiteralNode): void {
-  if (!target.properties) {
-    target.properties = new Map();
-  }
-
-  for (const member of source.members) {
-    if (ts.isPropertySignature(member) && ts.isIdentifier(member.name)) {
-      const propName = member.name.text;
-      const existing = target.properties.get(propName);
-
-      if (member.type && ts.isTypeLiteralNode(member.type)) {
-        if (existing) {
-          mergeTypeInfo(existing, member.type);
-        } else {
-          target.properties.set(propName, typeInfoFromTypeLiteral(member.type));
-        }
-      } else if (member.type && !existing) {
-        const typeStr = member.type.getText();
-        target.properties.set(propName, {
-          type: mapTypeStringToInferred(typeStr),
-        });
-      }
-    }
-  }
 }
 
 function convertNodeToTypeInfo(node: PropNode): TypeInfo {

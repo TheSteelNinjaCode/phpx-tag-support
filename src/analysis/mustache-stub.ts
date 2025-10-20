@@ -107,6 +107,7 @@ const DESTRUCTURED_RE =
 interface PropNode {
   children: Map<string, PropNode>;
   inferredType?: "string" | "number" | "boolean" | "object" | "array";
+  element?: PropNode;
 }
 
 function createPropNode(): PropNode {
@@ -241,22 +242,21 @@ function inferTypeFromExpression(
   expr: ts.Expression,
   sf: ts.SourceFile
 ): string {
-  if (ts.isStringLiteral(expr)) {
-    return "string";
-  }
-  if (ts.isNumericLiteral(expr)) {
-    return "number";
-  }
+  if (ts.isStringLiteral(expr)) return "string";
+  if (ts.isNumericLiteral(expr)) return "number";
   if (
     expr.kind === ts.SyntaxKind.TrueKeyword ||
     expr.kind === ts.SyntaxKind.FalseKeyword
-  ) {
+  )
     return "boolean";
-  }
-  if (ts.isObjectLiteralExpression(expr)) {
-    return buildObjectType(expr, sf);
-  }
+  if (ts.isObjectLiteralExpression(expr)) return buildObjectType(expr, sf);
+
   if (ts.isArrayLiteralExpression(expr)) {
+    const first = expr.elements[0];
+    if (first && ts.isObjectLiteralExpression(first)) {
+      const el = buildObjectType(first, sf);
+      return `${el}[]`;
+    }
     return "any[]";
   }
   return "any";
@@ -291,7 +291,6 @@ function collectMustacheRootsAndProps(
   text: string,
   map: Map<string, PropNode>
 ) {
-  // Extract blocks to exclude
   const scriptBlocks = extractScriptBlocks(text);
   const phpBlocks = extractPhpBlocks(text);
   const excludedBlocks = [...scriptBlocks, ...phpBlocks];
@@ -301,7 +300,6 @@ function collectMustacheRootsAndProps(
   while ((m = MUSTACHE_RE.exec(text))) {
     const matchIndex = m.index;
 
-    // Skip if inside script or PHP blocks
     if (isInExcludedBlock(matchIndex, excludedBlocks)) {
       continue;
     }
@@ -420,6 +418,11 @@ async function collectObjectLiteralProps(
           if (init && ts.isObjectLiteralExpression(init)) {
             processObjectLiteral(init, rootNode);
           }
+
+          if (init && ts.isArrayLiteralExpression(init)) {
+            rootNode.inferredType = "array";
+            processArrayLiteral(init, rootNode);
+          }
         }
       }
     });
@@ -450,6 +453,15 @@ function inferTypeFromInitializer(
   return "any";
 }
 
+function processArrayLiteral(expr: ts.ArrayLiteralExpression, node: PropNode) {
+  node.inferredType = "array";
+  const first = expr.elements[0];
+  if (first && ts.isObjectLiteralExpression(first)) {
+    node.element = createPropNode();
+    processObjectLiteral(first, node.element);
+  }
+}
+
 function processObjectLiteral(
   expr: ts.ObjectLiteralExpression,
   node: PropNode
@@ -475,6 +487,11 @@ function processObjectLiteral(
 
         if (ts.isObjectLiteralExpression(propNode.initializer)) {
           processObjectLiteral(propNode.initializer, childNode);
+        }
+
+        if (ts.isArrayLiteralExpression(propNode.initializer)) {
+          const child = node.children.get(name)!;
+          processArrayLiteral(propNode.initializer, child);
         }
       }
     } else if (
@@ -528,6 +545,33 @@ async function collectDestructuredLiteralProps(
             if (init && ts.isObjectLiteralExpression(init)) {
               processObjectLiteral(init, rootNode);
             }
+
+            if (init && ts.isArrayLiteralExpression(init)) {
+              rootNode.inferredType = "array";
+              processArrayLiteral(init, rootNode);
+            }
+          }
+        }
+      });
+    }
+
+    if (literal.startsWith("[")) {
+      const fake = `const __a = ${literal};`;
+      const sf = ts.createSourceFile(
+        "stub.ts",
+        fake,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.TS
+      );
+      sf.forEachChild((stmt) => {
+        if (ts.isVariableStatement(stmt)) {
+          for (const decl of stmt.declarationList.declarations) {
+            const init = decl.initializer;
+            if (init && ts.isArrayLiteralExpression(init)) {
+              rootNode.inferredType = "array";
+              processArrayLiteral(init, rootNode);
+            }
           }
         }
       });
@@ -535,21 +579,16 @@ async function collectDestructuredLiteralProps(
   }
 }
 
-// ✅ MODIFIED: Use explicit types when available
-// ✅ MODIFIED: Include explicit types even if not in propMap
 function buildStubLines(map: Map<string, PropNode>): string {
   const lines: string[] = [];
   const processedVars = new Set<string>();
 
-  // First, process variables from propMap
   for (const [root, node] of map) {
     processedVars.add(root);
 
-    // ✅ Check if we have an explicit type for this variable
     const explicitType = explicitTypes.get(root);
 
     if (explicitType) {
-      // Use the explicit type directly
       lines.push(`declare var ${root}: ${explicitType};`);
     } else if (node.children.size === 0) {
       lines.push(`declare var ${root}: any;`);
@@ -559,7 +598,6 @@ function buildStubLines(map: Map<string, PropNode>): string {
     }
   }
 
-  // ✅ NEW: Add explicit types that weren't in propMap
   for (const [varName, typeStr] of explicitTypes) {
     if (!processedVars.has(varName)) {
       lines.push(`declare var ${varName}: ${typeStr};`);
@@ -570,25 +608,27 @@ function buildStubLines(map: Map<string, PropNode>): string {
 }
 
 function printNode(node: PropNode, indentLevel: number): string {
-  const indent = "  ".repeat(indentLevel);
-  const parts: string[] = [];
-
-  for (const [propKey, childNode] of node.children) {
-    let typeAnnotation = "any";
-
-    if (childNode.inferredType === "string") {
-      typeAnnotation = "string";
-    } else if (childNode.inferredType === "number") {
-      typeAnnotation = "number";
-    } else if (childNode.inferredType === "boolean") {
-      typeAnnotation = "boolean";
-    } else if (childNode.inferredType === "object") {
-      typeAnnotation = printNode(childNode, indentLevel + 1);
+  if (node.inferredType === "array") {
+    if (node.element) {
+      const el = printNode(node.element, indentLevel);
+      return `${el}[]`;
     }
-
-    parts.push(`${indent}${propKey}: ${typeAnnotation};`);
+    return `any[]`;
   }
 
+  const indent = "  ".repeat(indentLevel);
+  const parts: string[] = [];
+  for (const [propKey, childNode] of node.children) {
+    let typeAnnotation = "any";
+    if (childNode.inferredType === "string") typeAnnotation = "string";
+    else if (childNode.inferredType === "number") typeAnnotation = "number";
+    else if (childNode.inferredType === "boolean") typeAnnotation = "boolean";
+    else if (childNode.inferredType === "array")
+      typeAnnotation = printNode(childNode, indentLevel + 1);
+    else if (childNode.inferredType === "object")
+      typeAnnotation = printNode(childNode, indentLevel + 1);
+    parts.push(`${indent}${propKey}: ${typeAnnotation};`);
+  }
   parts.push(`${indent}[key: string]: any;`);
   const closingIndent = "  ".repeat(indentLevel - 1);
   return `{\n${parts.join("\n")}\n${closingIndent}}`;

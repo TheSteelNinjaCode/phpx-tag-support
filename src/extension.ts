@@ -64,15 +64,12 @@ import {
 import {
   getTypeCache,
   InferredType,
+  TypeInfo,
   updateTypeCacheFromSimpleTypes,
   updateTypeCacheFromTS,
 } from "./analysis/type-chache";
 import { validateMustacheExpressions } from "./analysis/mustache-validation";
 import { getMustacheDecorations } from "./analysis/mustache-decorations";
-
-/* ────────────────────────────────────────────────────────────── *
- *                        INTERFACES & CONSTANTS                  *
- * ────────────────────────────────────────────────────────────── */
 
 interface HeredocBlock {
   content: string;
@@ -101,7 +98,7 @@ let classStubs: Record<
   SearchParamsManager: [],
 };
 let globalStubs: Record<string, string[]> = {};
-let globalStubTypes: Record<string, ts.TypeLiteralNode> = {};
+let globalStubTypes: Record<string, ts.TypeLiteralNode | ts.TypeNode> = {};
 
 const PHP_TAG_REGEX = /<\/?[A-Z][A-Za-z0-9]*/;
 const HEREDOC_PATTERN =
@@ -279,6 +276,7 @@ export function parseGlobalsWithTS(source: string) {
           globalStubTypes[name] = type;
         } else if (type) {
           globalStubs[name] = [];
+          globalStubTypes[name] = type;
           simpleTypes.set(name, type.getText());
         } else {
           globalStubs[name] = [];
@@ -527,6 +525,22 @@ export async function activate(context: vscode.ExtensionContext) {
   );
   const stubWatcher = vscode.workspace.createFileSystemWatcher(stubPattern);
   context.subscriptions.push(stubWatcher);
+
+  const reloadMustacheStubs = (uri?: vscode.Uri) => {
+    try {
+      const fsPath =
+        uri?.fsPath ??
+        path.join(wsFolder.uri.fsPath, ".pp", "phpx-mustache.d.ts");
+      const next = fs.readFileSync(fsPath, "utf8");
+      parseGlobalsWithTS(next);
+      console.log("✅ Reloaded phpx-mustache.d.ts into type cache");
+    } catch (e) {
+      console.error("Failed to reload phpx-mustache.d.ts", e);
+    }
+  };
+
+  stubWatcher.onDidChange(reloadMustacheStubs, null, context.subscriptions);
+  stubWatcher.onDidCreate(reloadMustacheStubs, null, context.subscriptions);
 
   const stubPath = context.asAbsolutePath("resources/types/pphp.d.txt");
   const stubText = fs.readFileSync(stubPath, "utf8");
@@ -908,63 +922,111 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.languages.registerCompletionItemProvider(
       selector,
       {
-        provideCompletionItems(doc, pos): vscode.CompletionItem[] | undefined {
-          const line = doc.lineAt(pos.line).text;
-          const uptoCursor = line.slice(0, pos.character);
+        provideCompletionItems(doc, pos) {
+          if (!insideMustache(doc, pos)) return;
 
-          const lastOpen = uptoCursor.lastIndexOf("{");
-          if (lastOpen === -1 || uptoCursor[lastOpen - 1] === "{") {
-            return;
-          }
+          const line = doc.lineAt(pos.line).text.slice(0, pos.character);
 
-          const exprPrefix = uptoCursor.slice(lastOpen + 1);
-          const m = /([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.\s*(\w*)$/.exec(
-            exprPrefix
-          );
-          if (!m) {
-            return;
-          }
+          const m =
+            /([A-Za-z_$][\w$]*(?:(?:\?\.|\.)[A-Za-z_$][\w$]*|\[[^\]]+\])*)\.\s*(\w*)$/.exec(
+              line
+            );
+
+          if (!m) return;
 
           const [, root, partial] = m;
-          const parts = root.split(".");
+          const parts = tokenizeChain(root);
 
-          const inferredType = getInferredTypeForChain(parts);
+          const typeInfo = getTypeInfoForChainParts(parts);
+
+          const inferredType: InferredType | "any" | undefined = (() => {
+            if (typeInfo?.type) return typeInfo.type;
+            return getInferredTypeForChain(parts);
+          })();
 
           const out: vscode.CompletionItem[] = [];
 
+          if (typeInfo?.properties?.size) {
+            for (const [propName] of typeInfo.properties) {
+              if (!partial || propName.startsWith(partial)) {
+                out.push(
+                  new vscode.CompletionItem(
+                    propName,
+                    vscode.CompletionItemKind.Property
+                  )
+                );
+              }
+            }
+          }
+
+          const isIndexingIntoArray = parts.includes("[index]");
+          if (
+            isIndexingIntoArray &&
+            (!typeInfo?.properties || typeInfo.properties.size === 0)
+          ) {
+            const rootName = parts[0];
+            const mined = minePropsFromStateInitializer(
+              doc.getText(),
+              rootName
+            );
+            for (const propName of mined) {
+              if (!partial || propName.startsWith(partial)) {
+                out.push(
+                  new vscode.CompletionItem(
+                    propName,
+                    vscode.CompletionItemKind.Property
+                  )
+                );
+              }
+            }
+          }
+
           if (inferredType === "string") {
-            const stringMethods = [
+            for (const method of [
               "toUpperCase",
               "toLowerCase",
               "trim",
               "split",
               "slice",
-            ];
-            for (const method of stringMethods.filter((m) =>
-              m.startsWith(partial)
-            )) {
-              const item = new vscode.CompletionItem(
+            ].filter((x) => x.startsWith(partial))) {
+              const it = new vscode.CompletionItem(
                 method,
                 vscode.CompletionItemKind.Method
               );
-              item.insertText = new vscode.SnippetString(`${method}()$0`);
-              item.detail = `(method) string.${method}()`;
-              out.push(item);
+              it.insertText = new vscode.SnippetString(`${method}()$0`);
+              it.detail = `(method) string.${method}()`;
+              out.push(it);
             }
           } else if (inferredType === "number") {
-            const numberMethods = ["toFixed", "toPrecision", "toString"];
-            for (const method of numberMethods.filter((m) =>
-              m.startsWith(partial)
+            for (const method of ["toFixed", "toPrecision", "toString"].filter(
+              (x) => x.startsWith(partial)
             )) {
-              const item = new vscode.CompletionItem(
+              const it = new vscode.CompletionItem(
                 method,
                 vscode.CompletionItemKind.Method
               );
-              item.insertText = new vscode.SnippetString(`${method}()$0`);
-              item.detail = `(method) number.${method}()`;
-              out.push(item);
+              it.insertText = new vscode.SnippetString(`${method}()$0`);
+              it.detail = `(method) number.${method}()`;
+              out.push(it);
             }
-          } else {
+          } else if (inferredType === "array") {
+            for (const method of [
+              "map",
+              "filter",
+              "reduce",
+              "forEach",
+              "join",
+              "slice",
+            ].filter((x) => x.startsWith(partial))) {
+              const it = new vscode.CompletionItem(
+                method,
+                vscode.CompletionItemKind.Method
+              );
+              it.insertText = new vscode.SnippetString(`${method}()$0`);
+              it.detail = `(method) array.${method}()`;
+              out.push(it);
+            }
+          } else if (out.length === 0) {
             for (const k of JS_NATIVE_MEMBERS.filter((k) =>
               k.startsWith(partial)
             )) {
@@ -983,7 +1045,8 @@ export async function activate(context: vscode.ExtensionContext) {
           return out;
         },
       },
-      "."
+      ".",
+      "["
     )
   );
 
@@ -1395,6 +1458,78 @@ export async function activate(context: vscode.ExtensionContext) {
     editor.setDecorations(stringDecorationType, decorations.strings);
     editor.setDecorations(numberDecorationType, decorations.numbers);
   }
+}
+
+function minePropsFromStateInitializer(
+  source: string,
+  varName: string
+): string[] {
+  try {
+    const re = new RegExp(
+      String.raw`const\s*\[\s*${escapeRegExp(
+        varName
+      )}\s*,[\s\S]*?\]\s*=\s*pp\.state\s*\(\s*\[(\s*\{[\s\S]*?\})`,
+      "m"
+    );
+    const m = re.exec(source);
+    if (!m) return [];
+
+    const objText = m[1];
+    const keyRe = /(?:(["'])(.*?)\1|([A-Za-z_$][\w$]*))\s*:/g;
+    const seen = new Set<string>();
+    let km: RegExpExecArray | null;
+    while ((km = keyRe.exec(objText))) {
+      const key = (km[2] ?? km[3])?.trim();
+      if (key) seen.add(key);
+    }
+    return [...seen];
+  } catch {
+    return [];
+  }
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function tokenizeChain(expr: string): string[] {
+  const parts: string[] = [];
+  let i = 0;
+  while (i < expr.length) {
+    if (expr[i] === "[") {
+      const j = expr.indexOf("]", i + 1);
+      parts.push("[index]");
+      i = j === -1 ? expr.length : j + 1;
+    } else {
+      const m = /^[A-Za-z_$][\w$]*/.exec(expr.slice(i));
+      if (m) {
+        parts.push(m[0]);
+        i += m[0].length;
+      } else if (expr.slice(i, i + 2) === "?.") {
+        i += 2;
+      } else if (expr[i] === ".") {
+        i += 1;
+      } else {
+        i += 1;
+      }
+    }
+  }
+  return parts;
+}
+
+function getTypeInfoForChainParts(parts: string[]): TypeInfo | undefined {
+  const typeMap = getTypeCache();
+  let current = typeMap.get(parts[0]);
+  for (let i = 1; i < parts.length; i++) {
+    const seg = parts[i];
+    if (seg === "[index]") {
+      current = current?.element ?? current;
+    } else {
+      current = current?.properties?.get(seg);
+    }
+    if (!current) break;
+  }
+  return current;
 }
 
 function validateMustacheTypeSafety(
