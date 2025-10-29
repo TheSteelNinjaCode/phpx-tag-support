@@ -15,6 +15,16 @@ export const ATTRS: readonly AttrDoc[] = [
     mdExtra: `[Full docs](https://prismaphp.tsnc.tech/docs?doc=fc-loading)`,
   },
   {
+    label: 'key="{someUniqueValue}"',
+    blurb:
+      "A unique key for the element, used for loop rendering and DOM diffing optimizations.",
+    mdExtra: `\`\`\`html
+<template pp-for="item in items">
+  <div key="{item.id}">{item.name}</div>
+</template>
+\`\`\``,
+  },
+  {
     label: "pp-ref",
     blurb:
       "Registers a **ref** so you can grab the element in JS/TS: `const btn = pp.ref('myBtn')`.",

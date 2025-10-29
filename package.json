@@ -2,7 +2,7 @@
   "name": "phpx-tag-support",
   "displayName": "PHPX Tag Support",
   "description": "Provides support for JSX-like tags in PHP, including hover info, Peek Definition for tags, and diagnostics for missing imports.",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "publisher": "JeffersonAbrahamOmier",
   "engines": {
     "vscode": "^1.98.0"
@@ -35,18 +35,6 @@
         "command": "phpx-tag-support.showRoutes",
         "title": "Show All Available Routes",
         "category": "PHPX"
-      },
-      {
-        "command": "phpx-tag-support.refreshPpSync",
-        "title": "PHPX: Refresh PP-Sync Tables"
-      },
-      {
-        "command": "phpx-tag-support.showPpSyncTables",
-        "title": "PHPX: Show PP-Sync Tables"
-      },
-      {
-        "command": "phpx-tag-support.debugPpSync",
-        "title": "PHPX: Debug PP-Sync"
       }
     ]
   },

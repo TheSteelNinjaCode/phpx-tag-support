@@ -16,6 +16,17 @@ export interface DecorationRanges {
 export function getMustacheDecorations(
   document: vscode.TextDocument
 ): DecorationRanges {
+  if (document.languageId !== "php") {
+    return {
+      braces: [],
+      variables: [],
+      properties: [],
+      methods: [],
+      strings: [],
+      numbers: [],
+    };
+  }
+
   const text = document.getText();
   const exclusions = buildExclusionRanges(text);
   const expressions = extractMustacheExpressions(text, exclusions);

@@ -292,11 +292,5 @@ export function buildExclusionRanges(text: string): Array<[number, number]> {
     ranges.push([match.index!, match.index! + match[0].length]);
   }
 
-  const attrRegex = /\bon\w+\s*=\s*["']([^"']*?)["']/gi;
-  for (const match of text.matchAll(attrRegex)) {
-    const valueStart = match.index! + match[0].indexOf(match[1]);
-    ranges.push([valueStart, valueStart + match[1].length]);
-  }
-
   return ranges;
 }

@@ -965,10 +965,7 @@ export async function activate(context: vscode.ExtensionContext) {
             (!typeInfo?.properties || typeInfo.properties.size === 0)
           ) {
             const rootName = parts[0];
-            const mined = minePropsFromStateInitializer(
-              doc.getText(),
-              rootName
-            );
+            const mined = extractPropsFromStateWithTS(doc.getText(), rootName);
             for (const propName of mined) {
               if (!partial || propName.startsWith(partial)) {
                 out.push(
@@ -1122,8 +1119,10 @@ export async function activate(context: vscode.ExtensionContext) {
         validateStateTupleUsage(doc, pphpSigDiags);
         rebuildMustacheStub(doc);
         validateComponentPropValues(doc, propsProvider);
+        validateRoutes(doc);
+        updateMustacheDecorationsAST(doc);
         pendingTimers.delete(key);
-      }, 500)
+      }, 200)
     );
   }
 
@@ -1146,7 +1145,6 @@ export async function activate(context: vscode.ExtensionContext) {
     const mustacheDiags = validateMustacheExpressions(document);
     mustacheTypeDiags.set(document.uri, mustacheDiags);
 
-    updateMustacheDecorationsAST(document);
     validateMissingImports(document, diagnosticCollection);
     const fetchFunctionDiags =
       fetchFunctionDiagnosticProvider.validateDocument(document);
@@ -1169,7 +1167,7 @@ export async function activate(context: vscode.ExtensionContext) {
   vscode.window.onDidChangeActiveTextEditor(
     (editor) => {
       if (editor) {
-        updateAllValidations(editor.document);
+        scheduleValidation(editor.document);
       }
     },
     null,
@@ -1266,16 +1264,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
   vscode.workspace.onDidSaveTextDocument(
     validateRoutes,
-    null,
-    context.subscriptions
-  );
-
-  vscode.window.onDidChangeActiveTextEditor(
-    (editor) => {
-      if (editor) {
-        validateRoutes(editor.document);
-      }
-    },
     null,
     context.subscriptions
   );
@@ -1460,36 +1448,72 @@ export async function activate(context: vscode.ExtensionContext) {
   }
 }
 
-function minePropsFromStateInitializer(
+function extractPropsFromStateWithTS(
   source: string,
   varName: string
 ): string[] {
-  try {
-    const re = new RegExp(
-      String.raw`const\s*\[\s*${escapeRegExp(
-        varName
-      )}\s*,[\s\S]*?\]\s*=\s*pp\.state\s*\(\s*\[(\s*\{[\s\S]*?\})`,
-      "m"
-    );
-    const m = re.exec(source);
-    if (!m) return [];
+  const sanitized = (source as any)
+    .replace(/<\?=\s*[^?]*\?>/g, '"__PHP_VALUE__"')
+    .replace(/<\?php\s+[^?]*\?>/g, '"__PHP_VALUE__"')
+    .replace(/<\?php\s+[^?]*$/g, '"__PHP_VALUE__"')
+    .replace(/<\?[^?]*\?>/g, '"__PHP_VALUE__"');
 
-    const objText = m[1];
-    const keyRe = /(?:(["'])(.*?)\1|([A-Za-z_$][\w$]*))\s*:/g;
-    const seen = new Set<string>();
-    let km: RegExpExecArray | null;
-    while ((km = keyRe.exec(objText))) {
-      const key = (km[2] ?? km[3])?.trim();
-      if (key) seen.add(key);
-    }
-    return [...seen];
+  let sf: ts.SourceFile;
+  try {
+    sf = ts.createSourceFile(
+      "pphp-mixed.ts",
+      sanitized,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS
+    );
   } catch {
     return [];
   }
-}
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const keys = new Set<string>();
+
+  function visit(node: ts.Node) {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isArrayBindingPattern(node.name) &&
+      node.initializer &&
+      ts.isCallExpression(node.initializer) &&
+      ts.isPropertyAccessExpression(node.initializer.expression) &&
+      ts.isIdentifier(node.initializer.expression.expression) &&
+      node.initializer.expression.expression.text === "pp" &&
+      node.initializer.expression.name.text === "state"
+    ) {
+      const elems = node.name.elements;
+      if (
+        elems.length >= 1 &&
+        ts.isBindingElement(elems[0]) &&
+        ts.isIdentifier(elems[0].name) &&
+        elems[0].name.text === varName
+      ) {
+        const firstArg = node.initializer.arguments[0];
+        if (firstArg && ts.isArrayLiteralExpression(firstArg)) {
+          const firstEl = firstArg.elements[0];
+          if (firstEl && ts.isObjectLiteralExpression(firstEl)) {
+            for (const prop of firstEl.properties) {
+              if (
+                ts.isPropertyAssignment(prop) ||
+                ts.isShorthandPropertyAssignment(prop)
+              ) {
+                const name = prop.name;
+                if (ts.isIdentifier(name)) keys.add(name.text);
+                else if (ts.isStringLiteral(name)) keys.add(name.text);
+              }
+            }
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sf);
+  return [...keys];
 }
 
 function tokenizeChain(expr: string): string[] {
