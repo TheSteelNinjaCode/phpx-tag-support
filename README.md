@@ -165,7 +165,7 @@ Request::redirect('mailto:user@example.com');
 ### ⚙️ PPHP Integration
 
 - **Method Support**
-  - Completion for `pphp._`, `store._`, `searchParams._`
+  - Completion for `pp._`, `store._`, `searchParams._`
   - Signature Help and Argument Hints
 
 ---
@@ -200,7 +200,7 @@ class Badge extends PHPX
 
 ### 🎨 Syntax Highlighting
 
-- Mustache Expressions (`{{ }}`)
+- Mustache Expressions (`{}`)
 - Template Literals (`${}`)
 - JS Native Methods
 - String/Number Literals

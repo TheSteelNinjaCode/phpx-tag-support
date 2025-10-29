@@ -1068,7 +1068,12 @@ function handleSpecialCompletions(
 ): vscode.CompletionItem[] | null {
   const { currentRoot, entrySide } = arrayContext;
 
-  // OrderBy value completions
+  // ✅ ADDED: OrderBy completions
+  if (currentRoot === "orderBy") {
+    return createOrderByCompletions(context, arrayContext);
+  }
+
+  // OrderBy value completions (existing)
   if (currentRoot === "orderBy" && entrySide === "value") {
     return createOrderByValueCompletions(context);
   }
@@ -1084,6 +1089,160 @@ function handleSpecialCompletions(
   }
 
   return null;
+}
+
+function createOrderByCompletions(
+  context: CompletionContext,
+  arrayContext: ArrayContext
+): vscode.CompletionItem[] {
+  const { pos, already, doc, fieldMap, modelMap } = context;
+  const { entrySide, hostArray } = arrayContext;
+
+  if (entrySide === "value") {
+    return createOrderByValueCompletions(context);
+  }
+
+  const path = findArrayPath(
+    context.callNode.arguments?.[0] as PhpArray,
+    hostArray
+  );
+
+  // ✅ FIXED: Better detection of nested orderBy context
+  if (path && path.length >= 2) {
+    // Check if we're inside orderBy -> relationField
+    const lastSegment = path[path.length - 1];
+    const secondLastSegment = path[path.length - 2];
+
+    // We're at orderBy -> user -> [cursor]
+    if (secondLastSegment === "orderBy") {
+      const relationFieldName = lastSegment;
+      const relationInfo = fieldMap.get(relationFieldName);
+
+      if (relationInfo && isRelationField(relationInfo, modelMap)) {
+        // ✅ CRITICAL FIX: Check if relation is a list (one-to-many)
+        if (relationInfo.isList) {
+          // ✅ One-to-many relation: ONLY show _count
+          const countItem = new vscode.CompletionItem(
+            "_count",
+            vscode.CompletionItemKind.Keyword
+          );
+          countItem.insertText = new vscode.SnippetString(`_count' => '$0'`);
+          countItem.documentation = new vscode.MarkdownString(
+            `**Order by relation count**\n\n` +
+              `Order ${context.modelName} records by the count of related **${relationInfo.type}** records.\n\n` +
+              `Since \`${relationFieldName}\` is a one-to-many relation (\`${relationInfo.type}[]\`), ` +
+              `you can only order by \`_count\`.`
+          );
+          countItem.range = makeReplaceRange(doc, pos, already.length);
+          countItem.sortText = `0__count`;
+
+          return [countItem];
+        }
+
+        // ✅ One-to-one or many-to-one: Show scalar fields + _count
+        const relatedModelName = relationInfo.type.toLowerCase();
+        const relatedFields = modelMap.get(relatedModelName);
+
+        if (relatedFields) {
+          const scalarFields = Array.from(relatedFields.entries()).filter(
+            ([, info]) => !isRelationField(info, modelMap)
+          );
+
+          const items = scalarFields.map(([fieldName, fieldInfo]) => {
+            const typeStr = `${fieldInfo.type}${fieldInfo.isList ? "[]" : ""}`;
+            const label: vscode.CompletionItemLabel = {
+              label: fieldName,
+              detail: `: ${typeStr}`,
+            };
+
+            const item = new vscode.CompletionItem(
+              label,
+              vscode.CompletionItemKind.Field
+            );
+
+            item.insertText = new vscode.SnippetString(`${fieldName}' => '$0'`);
+            item.documentation = new vscode.MarkdownString(
+              `Order by **${relationFieldName}.${fieldName}**\n\n` +
+                `Type: \`${typeStr}\`\n\n` +
+                `This will order ${context.modelName} records by the ${fieldName} field of their related ${relationInfo.type}.`
+            );
+            item.range = makeReplaceRange(doc, pos, already.length);
+            item.sortText = `1_${fieldName}`;
+
+            return item;
+          });
+
+          // Add _count for singular relations too
+          const countItem = new vscode.CompletionItem(
+            "_count",
+            vscode.CompletionItemKind.Keyword
+          );
+          countItem.insertText = new vscode.SnippetString(`_count' => '$0'`);
+          countItem.documentation = new vscode.MarkdownString(
+            `**Order by relation count**\n\n` +
+              `Order by whether the related ${relationInfo.type} record exists (0 or 1).`
+          );
+          countItem.range = makeReplaceRange(doc, pos, already.length);
+          countItem.sortText = `0__count`;
+
+          items.unshift(countItem);
+          return items;
+        }
+      }
+    }
+  }
+
+  // ✅ Top-level orderBy - show current model's fields
+  const usedKeys = getUsedFieldKeys(context, arrayContext);
+  const availableFields = Array.from(fieldMap.entries()).filter(
+    ([fieldName]) => !usedKeys.has(fieldName)
+  );
+
+  return availableFields.map(([fieldName, fieldInfo]) => {
+    const isRelation = isRelationField(fieldInfo, modelMap);
+    const typeStr = `${fieldInfo.type}${fieldInfo.isList ? "[]" : ""}`;
+
+    const label: vscode.CompletionItemLabel = {
+      label: fieldName,
+      detail: `: ${typeStr}`,
+    };
+
+    const item = new vscode.CompletionItem(
+      label,
+      isRelation
+        ? vscode.CompletionItemKind.Property
+        : vscode.CompletionItemKind.Field
+    );
+
+    if (isRelation) {
+      item.insertText = new vscode.SnippetString(`${fieldName}' => [\n\t$0\n]`);
+
+      // ✅ Better documentation explaining what you can order by
+      const canOrderBy = fieldInfo.isList
+        ? "You can only order by `_count` (number of related records)."
+        : "You can order by related fields or `_count`.";
+
+      item.documentation = new vscode.MarkdownString(
+        `**Order by related ${fieldInfo.type}${
+          fieldInfo.isList ? "[]" : ""
+        } fields**\n\n` +
+          `${canOrderBy}\n\n` +
+          `Example:\n\`\`\`php\n'${fieldName}' => [\n  ${
+            fieldInfo.isList ? "'_count'" : "'fieldName'"
+          } => 'asc'\n]\n\`\`\``
+      );
+      item.sortText = `2_${fieldName}`;
+    } else {
+      item.insertText = new vscode.SnippetString(`${fieldName}' => '$0'`);
+      item.documentation = new vscode.MarkdownString(
+        `Order by **${fieldName}**\n\nType: \`${typeStr}\``
+      );
+      item.sortText = `1_${fieldName}`;
+    }
+
+    item.range = makeReplaceRange(doc, pos, already.length);
+    return item;
+  });
 }
 
 function createOrderByValueCompletions(
@@ -1831,11 +1990,12 @@ export function validateSelectBlock(
   const selRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
   let m: RegExpExecArray | null;
   while ((m = selRe.exec(literal))) {
-    const [key, rawExpr] = m;
+    const [, key, rawExpr] = m; // ✅ FIXED: Skip full match, get capture groups
     const raw = rawExpr.trim();
     const info = fields.get(key);
     const startPos = doc.positionAt(offset + m.index);
-    const range = new vscode.Range(startPos, startPos.translate(0, key.length));
+    const keyEnd = startPos.translate(0, key.length + 2); // +2 for quotes
+    const range = new vscode.Range(startPos, keyEnd);
 
     // unknown column
     if (!info) {
@@ -1854,7 +2014,7 @@ export function validateSelectBlock(
       continue;
     }
 
-    // boolean check as before
+    // boolean check
     if (!/^(true|false)$/i.test(raw)) {
       diags.push(
         new vscode.Diagnostic(
@@ -1905,7 +2065,7 @@ function validateIncludeBlock(
 
     /* ——— 1-B. _count: boolean 𝘰 select-bools ——————————————————————— */
     if (relName === "_count") {
-      // i) valor booleano simple
+      // i) simple boolean value
       if (item.value.kind !== "array") {
         const raw = doc.getText(rangeOf(doc, item.value.loc!)).trim();
         if (!/^(true|false)$/i.test(raw)) {
@@ -1921,16 +2081,17 @@ function validateIncludeBlock(
         continue;
       }
 
-      // ii) array literal → debe contener select => [ cols => bool ]
+      // ii) array literal → must contain select => [ cols => bool ]
       const countArr = item.value as PhpArray;
       const selEntry = (countArr.items as Entry[]).find(
         (e) => e.key?.kind === "string" && (e.key as any).value === "select"
       );
+
       if (!selEntry || !isArray(selEntry.value) || !selEntry.value.loc) {
         diags.push(
           new vscode.Diagnostic(
             keyRange,
-            "`include._count` array must contain a `select` entry with boolean values.",
+            "`include._count` array must contain a `select` entry with boolean values for relation fields.",
             vscode.DiagnosticSeverity.Error
           )
         );
@@ -1938,16 +2099,68 @@ function validateIncludeBlock(
       }
 
       const innerArr = selEntry.value as PhpArray;
-      if (!innerArr.loc) {
-        continue;
-      }
-      const start = innerArr.loc.start.offset;
-      const end = innerArr.loc.end.offset;
-      const literal = doc.getText(
-        new vscode.Range(doc.positionAt(start), doc.positionAt(end))
-      );
 
-      validateSelectBlock(doc, literal, start, fields, modelName, diags);
+      // ✅ FIXED: Validate _count.select against RELATION fields only
+      for (const countEnt of innerArr.items as Entry[]) {
+        if (countEnt.key?.kind === "string") {
+          const relationName = (countEnt.key as any).value as string;
+          const relationInfo = fields.get(relationName);
+
+          if (!relationInfo) {
+            const { start, end } = countEnt.key.loc!;
+            diags.push(
+              new vscode.Diagnostic(
+                new Range(
+                  doc.positionAt(start.offset),
+                  doc.positionAt(end.offset)
+                ),
+                `The relation "${relationName}" does not exist in ${modelName}.`,
+                vscode.DiagnosticSeverity.Error
+              )
+            );
+            continue;
+          }
+
+          // Must be a relation field
+          if (!modelMap.has(relationInfo.type.toLowerCase())) {
+            const { start, end } = countEnt.key.loc!;
+            diags.push(
+              new vscode.Diagnostic(
+                new Range(
+                  doc.positionAt(start.offset),
+                  doc.positionAt(end.offset)
+                ),
+                `"${relationName}" is not a relation field. _count.select only works with relations.`,
+                vscode.DiagnosticSeverity.Error
+              )
+            );
+            continue;
+          }
+
+          // Value must be boolean
+          if (countEnt.value?.loc) {
+            const raw = doc
+              .getText(
+                new Range(
+                  doc.positionAt(countEnt.value.loc.start.offset),
+                  doc.positionAt(countEnt.value.loc.end.offset)
+                )
+              )
+              .trim();
+
+            if (!/^(true|false)$/i.test(raw)) {
+              diags.push(
+                new vscode.Diagnostic(
+                  rangeOf(doc, countEnt.value.loc),
+                  `_count.select for "${relationName}" expects a boolean, but got "${raw}".`,
+                  vscode.DiagnosticSeverity.Error
+                )
+              );
+            }
+          }
+        }
+      }
+
       continue;
     }
 
@@ -2012,17 +2225,22 @@ export function validateSelectIncludeEntries(
   diags: Diagnostic[],
   modelMap: ModelMap
 ) {
-  // look for the top‐level `select => [ … ]`
+  // ────────────────────────────────────────────────────────────────────
+  // 1️⃣ VALIDATE SELECT BLOCK
+  // ────────────────────────────────────────────────────────────────────
   const selectEntry = (arr.items as Entry[]).find(
     (e) => e.key?.kind === "string" && (e.key as any).value === "select"
   );
+
   if (selectEntry && isArray(selectEntry.value) && selectEntry.value.loc) {
     const selectArr = selectEntry.value as PhpArray;
 
-    // ─── NEW: complain about any unknown field _before_ you recurse ───
+    // Check for unknown fields
     for (const ent of selectArr.items as Entry[]) {
       if (ent.key?.kind === "string") {
         const name = (ent.key as any).value as string;
+
+        // Check if field exists
         if (!fields.has(name)) {
           const { start, end } = ent.key.loc!;
           diags.push(
@@ -2035,49 +2253,64 @@ export function validateSelectIncludeEntries(
               vscode.DiagnosticSeverity.Error
             )
           );
+          continue;
+        }
+
+        // ✅ VALIDATE VALUE: should be boolean OR nested object
+        const fieldInfo = fields.get(name)!;
+        const isRelation = modelMap.has(fieldInfo.type.toLowerCase());
+
+        if (ent.value) {
+          if (isArray(ent.value)) {
+            // Nested relation - recurse into it
+            if (isRelation) {
+              const relatedModel = modelMap.get(fieldInfo.type.toLowerCase())!;
+              validateSelectIncludeEntries(
+                doc,
+                ent.value as PhpArray,
+                relatedModel,
+                fieldInfo.type,
+                diags,
+                modelMap
+              );
+            }
+          } else if (ent.value.loc) {
+            // Scalar field - must be boolean
+            const raw = doc
+              .getText(
+                new Range(
+                  doc.positionAt(ent.value.loc.start.offset),
+                  doc.positionAt(ent.value.loc.end.offset)
+                )
+              )
+              .trim();
+
+            if (!/^(true|false|\$\w+)$/i.test(raw)) {
+              const { start, end } = ent.key.loc!;
+              diags.push(
+                new vscode.Diagnostic(
+                  new Range(
+                    doc.positionAt(start.offset),
+                    doc.positionAt(end.offset)
+                  ),
+                  `\`select\` for "${name}" expects a boolean or nested selection, but got "${raw}".`,
+                  vscode.DiagnosticSeverity.Error
+                )
+              );
+            }
+          }
         }
       }
-    }
-
-    // ─── now recurse into any legit relation blocks ───
-    for (const relEntry of selectArr.items as Entry[]) {
-      if (
-        relEntry.key?.kind === "string" &&
-        isArray(relEntry.value) &&
-        relEntry.value.loc
-      ) {
-        const relName = (relEntry.key as any).value as string;
-        const relInfo = fields.get(relName);
-        if (relInfo && modelMap.has(relInfo.type.toLowerCase())) {
-          validateSelectIncludeEntries(
-            doc,
-            relEntry.value as PhpArray,
-            modelMap.get(relInfo.type.toLowerCase())!,
-            relInfo.type,
-            diags,
-            modelMap
-          );
-        }
-      }
-    }
-
-    // ─── finally, only if this block has no nested arrays do we boolean‐check it ───
-    const hasNested = (selectArr.items as Entry[]).some((e) =>
-      isArray(e.value)
-    );
-    if (!hasNested) {
-      const { start, end } = selectEntry.value.loc!;
-      const literal = doc.getText(
-        new Range(doc.positionAt(start.offset), doc.positionAt(end.offset))
-      );
-      validateSelectBlock(doc, literal, start.offset, fields, modelName, diags);
     }
   }
 
-  // …then do exactly what you already had for `include`
+  // ────────────────────────────────────────────────────────────────────
+  // 2️⃣ VALIDATE INCLUDE BLOCK
+  // ────────────────────────────────────────────────────────────────────
   const includeEntry = (arr.items as Entry[]).find(
     (e) => e.key?.kind === "string" && (e.key as any).value === "include"
   );
+
   if (includeEntry) {
     validateIncludeBlock(doc, includeEntry, fields, modelName, diags, modelMap);
   }
@@ -2276,22 +2509,23 @@ function validateOrderByEntries(
   arr: PhpArray,
   fields: Map<string, FieldInfo>,
   modelName: string,
-  diags: vscode.Diagnostic[]
+  diags: vscode.Diagnostic[],
+  modelMap?: ModelMap
 ) {
-  // 1️⃣ only look at actual Entry nodes
+  // 1️⃣ Find the "orderBy" entry
   const entries = (arr.items as Node[]).filter(
     (node): node is Entry => node.kind === "entry"
   ) as Entry[];
 
-  // 2️⃣ find the “orderBy” entry
   const orderByEntry = entries.find(
     (e) => e.key?.kind === "string" && (e.key as any).value === "orderBy"
   );
+
   if (!orderByEntry) {
     return;
   }
 
-  // 3️⃣ guard against missing or non-array values
+  // 2️⃣ Guard against missing or non-array values
   if (!orderByEntry.value || orderByEntry.value.kind !== "array") {
     if (orderByEntry.key?.loc) {
       diags.push(
@@ -2305,12 +2539,12 @@ function validateOrderByEntries(
     return;
   }
 
-  // 4️⃣ now it's safe to treat it as a PhpArray
+  // 3️⃣ Validate each orderBy entry
   const orderArr = orderByEntry.value as PhpArray;
+
   for (const item of (orderArr.items as Node[]).filter(
     (node): node is Entry => node.kind === "entry"
   ) as Entry[]) {
-    // a) skip anything without a string key or without a value loc
     if (item.key?.kind !== "string" || !item.value?.loc) {
       continue;
     }
@@ -2319,8 +2553,9 @@ function validateOrderByEntries(
     const fieldLoc = item.key.loc!;
     const valLoc = item.value.loc!;
 
-    // b) unknown field?
-    if (!fields.has(fieldName)) {
+    // Check if field exists
+    const fieldInfo = fields.get(fieldName);
+    if (!fieldInfo) {
       diags.push(
         new vscode.Diagnostic(
           rangeOf(doc, fieldLoc),
@@ -2331,7 +2566,39 @@ function validateOrderByEntries(
       continue;
     }
 
-    // c) check that the **value** is exactly 'asc' or 'desc'
+    // ✅ FIXED: Handle relation ordering
+    if (modelMap && isRelationField(fieldInfo, modelMap)) {
+      // This is a relation field - value should be a nested object
+      if (!isArray(item.value)) {
+        diags.push(
+          new vscode.Diagnostic(
+            rangeOf(doc, fieldLoc),
+            `Ordering by relation "${fieldName}" requires a nested object like: { ${fieldName}: { fieldName: 'asc' } }`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+        continue;
+      }
+
+      // Validate the nested orderBy
+      const relatedModelName = fieldInfo.type.toLowerCase();
+      const relatedFields = modelMap.get(relatedModelName);
+
+      if (relatedFields) {
+        validateRelationOrderBy(
+          doc,
+          item.value as PhpArray,
+          relatedFields,
+          fieldInfo.type,
+          fieldName,
+          fieldInfo, // ✅ FIXED: Pass fieldInfo so we can check isList
+          diags
+        );
+      }
+      continue;
+    }
+
+    // ✅ Scalar field - check for 'asc' or 'desc'
     const raw = doc
       .getText(
         new vscode.Range(
@@ -2349,6 +2616,99 @@ function validateOrderByEntries(
             doc.positionAt(valLoc.start.offset),
             doc.positionAt(valLoc.end.offset)
           ),
+          `Invalid sort direction "${raw}". Allowed values: "asc", "desc".`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    }
+  }
+}
+
+function validateRelationOrderBy(
+  doc: vscode.TextDocument,
+  arr: PhpArray,
+  relatedFields: Map<string, FieldInfo>,
+  relatedModelName: string,
+  relationName: string,
+  relationInfo: FieldInfo, // ✅ ADDED: Need this to check isList
+  diags: vscode.Diagnostic[]
+) {
+  for (const item of (arr.items as Node[]).filter(
+    (node): node is Entry => node.kind === "entry"
+  ) as Entry[]) {
+    if (item.key?.kind !== "string" || !item.value?.loc) {
+      continue;
+    }
+
+    const fieldName = (item.key as any).value as string;
+    const fieldLoc = item.key.loc!;
+    const valLoc = item.value.loc!;
+
+    // Special case: _count for relation count ordering
+    if (fieldName === "_count") {
+      const raw = doc
+        .getText(
+          new vscode.Range(
+            doc.positionAt(valLoc.start.offset),
+            doc.positionAt(valLoc.end.offset)
+          )
+        )
+        .trim()
+        .replace(/^['"]|['"]$/g, "");
+
+      if (raw !== "asc" && raw !== "desc") {
+        diags.push(
+          new vscode.Diagnostic(
+            rangeOf(doc, valLoc),
+            `Invalid sort direction for _count: "${raw}". Allowed values: "asc", "desc".`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+      }
+      continue;
+    }
+
+    // ✅ CRITICAL FIX: Check if relation is a list
+    if (relationInfo.isList) {
+      // One-to-many relation: ONLY _count is allowed
+      diags.push(
+        new vscode.Diagnostic(
+          rangeOf(doc, fieldLoc),
+          `Cannot order by field "${fieldName}" on one-to-many relation "${relationName}". ` +
+            `For \`${relationName}: ${relatedModelName}[]\`, you can only order by \`_count\`.`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      continue;
+    }
+
+    // Regular field from related model (only for singular relations)
+    if (!relatedFields.has(fieldName)) {
+      diags.push(
+        new vscode.Diagnostic(
+          rangeOf(doc, fieldLoc),
+          `The column "${fieldName}" does not exist on ${relatedModelName}.`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+      continue;
+    }
+
+    // Check sort direction
+    const raw = doc
+      .getText(
+        new vscode.Range(
+          doc.positionAt(valLoc.start.offset),
+          doc.positionAt(valLoc.end.offset)
+        )
+      )
+      .trim()
+      .replace(/^['"]|['"]$/g, "");
+
+    if (raw !== "asc" && raw !== "desc") {
+      diags.push(
+        new vscode.Diagnostic(
+          rangeOf(doc, valLoc),
           `Invalid sort direction "${raw}". Allowed values: "asc", "desc".`,
           vscode.DiagnosticSeverity.Error
         )
@@ -2626,7 +2986,14 @@ export async function validateReadCall(
         modelMap
       );
 
-      validateOrderByEntries(doc, arr as PhpArray, fields, call.model, diags);
+      validateOrderByEntries(
+        doc,
+        arr as PhpArray,
+        fields,
+        call.model,
+        diags,
+        modelMap
+      );
 
       continue;
     }
@@ -3110,6 +3477,7 @@ export async function validateUpdateCall(
       diagnostics,
       modelMap
     );
+    validateOrderByEntries(doc, arg0, fields, modelName, diagnostics, modelMap);
   });
 
   // ensure we always set—clears out old results when you type
@@ -3734,6 +4102,8 @@ export async function validateGroupByCall(
       diagnostics,
       modelMap
     );
+
+    validateOrderByEntries(doc, arg0, fields, modelName, diagnostics, modelMap);
   });
 
   collection.set(doc.uri, diagnostics);
