@@ -84,14 +84,15 @@ export declare class PPHPUtilities extends PPHP {
     private handleLinkClick;
     private handlePopState;
     navigateTo(url: string, pushState?: boolean): Promise<void>;
+    private restoreScrollPositions;
+    private saveScrollPositions;
+    private getElementKey;
     private updatePageContentWithViewTransition;
     private dispatchNavigationEvent;
     private showLoadingTransition;
     private fetchPageContent;
-    private performCleanup;
     private updateBrowserHistory;
     private updatePageContent;
-    private reinitializeApp;
     private handleNavigationCompletion;
     private handleNavigationError;
     private findLoadingElement;
