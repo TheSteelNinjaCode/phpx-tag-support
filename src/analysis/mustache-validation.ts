@@ -13,8 +13,9 @@ export function validateMustacheExpressions(
   }
 
   const text = document.getText();
+  const hasHtmlHeredocs = /<<<(['"]?)HTML\1\s*\r?\n[\s\S]*?<[a-z]/i.test(text);
 
-  if (isPurePhpFile(text)) {
+  if (!hasHtmlHeredocs && isPurePhpFile(text)) {
     return [];
   }
 
@@ -38,7 +39,7 @@ export function validateMustacheExpressions(
         new vscode.Diagnostic(
           range,
           "⚠️ Invalid JavaScript expression in { ... }.",
-          vscode.DiagnosticSeverity.Warning
+          vscode.DiagnosticSeverity.Error
         )
       );
       continue;
@@ -54,7 +55,7 @@ export function validateMustacheExpressions(
         new vscode.Diagnostic(
           range,
           "⚠️ Assignments are not allowed inside { ... }. Use values or pure expressions.",
-          vscode.DiagnosticSeverity.Warning
+          vscode.DiagnosticSeverity.Error
         )
       );
     }

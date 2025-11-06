@@ -251,17 +251,43 @@ export function extractMemberChains(expr: MustacheExpression): string[][] {
   return chains;
 }
 
+function extractHeredocBlocks(
+  text: string
+): Array<{ start: number; end: number; content: string }> {
+  const blocks: Array<{ start: number; end: number; content: string }> = [];
+  const heredocRegex =
+    /<<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;?/gm;
+
+  let match: RegExpExecArray | null;
+  while ((match = heredocRegex.exec(text)) !== null) {
+    const contentStart = match.index + match[0].indexOf(match[3]);
+    blocks.push({
+      start: contentStart,
+      end: contentStart + match[3].length,
+      content: match[3],
+    });
+  }
+
+  return blocks;
+}
+
+function findPhpVariableInterpolations(text: string): Array<[number, number]> {
+  const phpVarRanges: Array<[number, number]> = [];
+  // Pattern matches {$var}, {$this->prop}, {$obj->method()}, etc.
+  const phpVarRegex = /\{\$[^}]+\}/g;
+
+  let match: RegExpExecArray | null;
+  while ((match = phpVarRegex.exec(text)) !== null) {
+    phpVarRanges.push([match.index, match.index + match[0].length]);
+  }
+
+  return phpVarRanges;
+}
+
 export function buildExclusionRanges(text: string): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
 
-  const startsWithPhp = /^<\?php\b/.test(text.trim());
-
-  if (startsWithPhp) {
-    const firstClose = text.indexOf("?>");
-    if (firstClose === -1) {
-      return [[0, text.length]];
-    }
-  }
+  const heredocBlocks = extractHeredocBlocks(text);
 
   let pos = 0;
   while (pos < text.length) {
@@ -270,17 +296,76 @@ export function buildExclusionRanges(text: string): Array<[number, number]> {
 
     const openPos = pos + openMatch.index;
     const openTag = openMatch[0];
+    const afterOpen = openPos + openTag.length;
 
-    const closePos = text.indexOf("?>", openPos + openTag.length);
+    const closePos = text.indexOf("?>", afterOpen);
 
     if (closePos === -1) {
-      ranges.push([openPos, text.length]);
+      // No closing tag - exclude everything except heredocs
+      if (heredocBlocks.length === 0) {
+        // No heredocs, exclude to end
+        ranges.push([openPos, text.length]);
+        break;
+      }
+
+      // Find heredocs after this point
+      const relevantHeredocs = heredocBlocks.filter(
+        (h) => h.start >= afterOpen
+      );
+
+      if (relevantHeredocs.length === 0) {
+        ranges.push([openPos, text.length]);
+        break;
+      }
+
+      // Exclude PHP code between heredocs
+      let currentPos = openPos;
+      for (const heredoc of relevantHeredocs) {
+        if (currentPos < heredoc.start) {
+          ranges.push([currentPos, heredoc.start]);
+        }
+        currentPos = heredoc.end;
+      }
+
+      // Exclude after last heredoc to end
+      if (currentPos < text.length) {
+        ranges.push([currentPos, text.length]);
+      }
+
       break;
     }
 
-    ranges.push([openPos, closePos + 2]);
-    pos = closePos + 2;
+    // Has closing tag
+    const blockStart = openPos;
+    const blockEnd = closePos + 2;
+
+    // Find heredocs in this block
+    const blockHeredocs = heredocBlocks.filter(
+      (h) => h.start >= blockStart && h.end <= blockEnd
+    );
+
+    if (blockHeredocs.length === 0) {
+      // No heredocs in block, exclude entire block
+      ranges.push([blockStart, blockEnd]);
+    } else {
+      // Exclude PHP code but not heredocs
+      let currentPos = blockStart;
+      for (const heredoc of blockHeredocs) {
+        if (currentPos < heredoc.start) {
+          ranges.push([currentPos, heredoc.start]);
+        }
+        currentPos = heredoc.end;
+      }
+      if (currentPos < blockEnd) {
+        ranges.push([currentPos, blockEnd]);
+      }
+    }
+
+    pos = blockEnd;
   }
+
+  const phpVars = findPhpVariableInterpolations(text);
+  ranges.push(...phpVars);
 
   const scriptRegex = /<script\b[^>]*>[\s\S]*?<\/script>/gi;
   for (const match of text.matchAll(scriptRegex)) {
