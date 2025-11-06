@@ -9,39 +9,56 @@ interface AttrDoc {
 
 export const ATTRS: readonly AttrDoc[] = [
   {
-    label: 'pp-loading-content="true"',
+    label: "pp-loading-content",
     blurb:
-      "A loading screen is a user interface displayed while a route is loading. This file, loading.php, defines the content shown during the loading process.",
+      "Specifies the loading screen content shown while a route is loading (file: loading.php).",
     mdExtra: `[Full docs](https://prismaphp.tsnc.tech/docs?doc=fc-loading)`,
+    snippet: 'pp-loading-content="true"',
   },
   {
-    label: 'key="{someUniqueValue}"',
+    label: "key",
     blurb:
-      "A unique key for the element, used for loop rendering and DOM diffing optimizations.",
+      "Unique key for an element, used for list rendering and DOM diffing optimizations.",
     mdExtra: `\`\`\`html
 <template pp-for="item in items">
   <div key="{item.id}">{item.name}</div>
 </template>
 \`\`\``,
+    snippet: 'key="{${1:item}.id}"',
+  },
+  {
+    label: "pp-spa",
+    blurb:
+      "Enables SPA navigation for the element (prevents full page reloads). Placing this on the <body> enables site‑wide SPA behavior; add to individual links to enable per-link navigation.",
+    mdExtra: "",
+    snippet: 'pp-spa="true"',
+  },
+  {
+    label: "pp-ignore",
+    blurb:
+      "Prevents the framework from processing the element's content — useful for <pre>, <code>, or other tags whose content you want to keep intact.",
+    mdExtra: "",
+    snippet: 'pp-ignore="true"',
   },
   {
     label: "pp-ref",
-    blurb:
-      "Registers a **ref** so you can grab the element in JS/TS: `const btn = pp.ref('myBtn')`.",
+    blurb: "Registers a reference that can be retrieved via `pp.ref('name')`.",
     mdExtra: `\`\`\`ts
 const modal = pp.ref('modal');
 modal.open();
 \`\`\``,
+    snippet: 'pp-ref="${1:refName}"',
   },
   {
     label: "pp-spread",
     blurb:
-      "Spreads an **object** of props / attributes onto the element in a single go.",
+      "Spreads an object of props/attributes onto the element in one operation.",
     mdExtra: `\`\`\`html
 <div pp-spread="{extraAttrs}"></div>
-  \`\`\`
-  
-  [Full docs](https://prismaphp.tsnc.tech/docs?doc=pp-spread)`,
+\`\`\`
+
+[Full docs](https://prismaphp.tsnc.tech/docs?doc=pp-spread)`,
+    snippet: 'pp-spread="{${1:object}}"',
   },
   {
     label: "pp-for",
@@ -49,13 +66,14 @@ modal.open();
       "Renders a list by repeating the element for each item in an array or object.",
     mdExtra: `\`\`\`html
 <ul>
-  <template pp-for="(item) in items">
+  <template pp-for="item in items">
     <li>{item.name}</li>
   </template>
 </ul>
 \`\`\`
 
 [Full docs](https://prismaphp.tsnc.tech/docs?doc=pp-for)`,
+    snippet: 'pp-for="item in ${1:items}"',
   },
 ];
 

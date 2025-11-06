@@ -24,6 +24,10 @@ export function validateMustacheExpressions(
   const diagnostics: vscode.Diagnostic[] = [];
 
   for (const expr of expressions) {
+    if (isJavaScriptObjectLiteral(expr.inner)) {
+      continue;
+    }
+
     if (!expr.ast && expr.inner.trim()) {
       const range = new vscode.Range(
         document.positionAt(expr.startOffset + 1),
@@ -57,6 +61,59 @@ export function validateMustacheExpressions(
   }
 
   return diagnostics;
+}
+
+function isJavaScriptObjectLiteral(inner: string): boolean {
+  const content = inner.trim();
+
+  if (!content) return false;
+
+  if (/^[A-Za-z_$][\w$]*(?:(?:\?\.|\.)[\w$]+|\[[^\]]+\])*$/.test(content)) {
+    return false;
+  }
+
+  let depth = 0;
+  let inString: string | null = null;
+  let escaped = false;
+
+  for (let i = 0; i < content.length; i++) {
+    const char = content[i];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\" && inString) {
+      escaped = true;
+      continue;
+    }
+
+    if ((char === '"' || char === "'" || char === "`") && !inString) {
+      inString = char;
+      continue;
+    }
+
+    if (char === inString) {
+      inString = null;
+      continue;
+    }
+
+    if (inString) continue;
+
+    if (char === "(" || char === "[" || char === "{") {
+      depth++;
+    } else if (char === ")" || char === "]" || char === "}") {
+      depth--;
+    } else if (char === ":" && depth === 0) {
+      const beforeColon = content.substring(0, i).trim();
+      if (!beforeColon.endsWith("?")) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 function isPurePhpFile(text: string): boolean {
