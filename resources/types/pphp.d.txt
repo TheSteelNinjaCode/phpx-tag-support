@@ -1,19 +1,48 @@
+export interface Ref<T = any> {
+    current: T | null;
+}
+export interface PortalOptions {
+    key?: string;
+    onMount?: (container: Element) => void;
+    onUnmount?: (container: Element) => void;
+}
+interface EffectOptions {
+    deps?: (string | StateGetter<any>)[];
+    immediate?: boolean;
+    detectDeps?: boolean;
+    beforeHydration?: boolean;
+}
+type LocalStoreState = Record<string, any>;
+type SearchParamsListener = (params: URLSearchParams) => void;
+type StateValue<T> = T extends undefined ? T | undefined : T;
+type StateSetter<T> = (value: T | ((prev: T) => T)) => void;
+type StateGetter<T> = (() => T) & {
+    value: T;
+    __pphp_key?: string;
+    __pphp_fullKey?: string;
+    __pphp_component?: string;
+};
+
 export declare class PPHP {
+    hydrationStarted: boolean;
+    hydrationDone: boolean;
     protected static instance: PPHP | null;
+    protected initialized: boolean;
     private stateManager;
     private expressionEvaluator;
     private componentManager;
     private domBindingManager;
     private hydrationCallbacks;
     private portalManager;
-    private initialized;
-    private hydrationDone;
     private hydrationResolve;
     private hydrationPromise;
     private portalHydrationPromises;
     private portalHydrationResolvers;
     constructor();
-    private initialize;
+    initialize(): Promise<void>;
+    private disconnectObservers;
+    private reconnectObservers;
+    private scheduleCommentCleanup;
     createPortal(content: HTMLElement | DocumentFragment | string, container: Element | string, options?: PortalOptions): string;
     removePortal(portalId: string): boolean;
     private markPortalHydrated;
@@ -22,8 +51,9 @@ export declare class PPHP {
     ref<T = any>(initialValue?: T | null): Ref<T>;
     hydrated(): Promise<void>;
     onHydrated(cb: () => void): void;
-    get isHydrated(): boolean;
     private markHydrationStart;
+    get isHydrated(): boolean;
+    get isHydrating(): boolean;
     private markHydrated;
     state<T>(keyOrInitialValue: string | T, initialValue?: T): [StateGetter<StateValue<T>>, StateSetter<StateValue<T>>];
     private currentLoopContext;
