@@ -819,9 +819,6 @@ export class HrefHoverProvider implements vscode.HoverProvider {
   }
 }
 
-/**
- * Completion provider for href attributes in anchor tags
- */
 export class HrefCompletionProvider implements vscode.CompletionItemProvider {
   constructor(private routeProvider: RouteProvider) {}
 
@@ -832,7 +829,7 @@ export class HrefCompletionProvider implements vscode.CompletionItemProvider {
     const line = document.lineAt(position.line).text;
     const cursorOffset = position.character;
 
-    // Check if we're inside an href attribute
+    // Check if we're inside an href attribute and get context
     const hrefContext = this.getHrefContext(line, cursorOffset);
     if (!hrefContext) {
       return [];
@@ -840,26 +837,101 @@ export class HrefCompletionProvider implements vscode.CompletionItemProvider {
 
     const items: vscode.CompletionItem[] = [];
 
-    // Add route completions
-    items.push(...this.routeProvider.createHrefCompletionItems());
+    items.push(
+      ...this.createRouteCompletionItems(hrefContext, document, position)
+    );
 
-    // NEW: Add static asset completions
-    items.push(...this.createStaticAssetCompletionItems());
+    items.push(
+      ...this.createStaticAssetCompletionItems(hrefContext, document, position)
+    );
 
     return items;
   }
 
-  private createStaticAssetCompletionItems(): vscode.CompletionItem[] {
+  private createRouteCompletionItems(
+    context: { start: number; end: number; currentValue: string },
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): vscode.CompletionItem[] {
+    const items: vscode.CompletionItem[] = [];
+    const routes = this.routeProvider.getRoutes();
+
+    const replaceRange = new vscode.Range(
+      new vscode.Position(position.line, context.start),
+      new vscode.Position(position.line, context.end)
+    );
+
+    routes.forEach((route) => {
+      const item = new vscode.CompletionItem(
+        route.url,
+        route.isDynamic
+          ? vscode.CompletionItemKind.Snippet
+          : vscode.CompletionItemKind.Reference
+      );
+
+      const groupsText =
+        route.routeGroups.length > 0
+          ? ` ${route.routeGroups.map((g) => `(${g})`).join(" ")}`
+          : "";
+
+      if (route.isDynamic) {
+        item.detail = `Dynamic Route: ${route.url}${groupsText}`;
+        item.documentation = new vscode.MarkdownString(
+          `**Dynamic Route:** \`${route.url}\`${
+            groupsText ? ` ${groupsText}` : ""
+          }\n\n` +
+            `**Parameters:** ${route.dynamicSegments
+              .map((s) => `\`${s}\``)
+              .join(", ")}\n\n` +
+            `**File:** \`${route.filePath}\`\n\n` +
+            `**Examples:**\n` +
+            `${this.generateExamples(route)
+              .map((ex) => `- \`${ex}\``)
+              .join("\n")}`
+        );
+        item.insertText = this.createSnippetText(route);
+      } else {
+        item.detail = `Static Route: ${route.url}${groupsText}`;
+        item.documentation = new vscode.MarkdownString(
+          `**Route:** \`${route.url}\`${
+            groupsText ? ` ${groupsText}` : ""
+          }\n\n**File:** \`${route.filePath}\``
+        );
+        item.insertText = route.url;
+      }
+
+      item.range = replaceRange;
+      item.sortText = route.isDynamic
+        ? `2_${route.url}`
+        : route.url === "/"
+        ? "0_/"
+        : `1_${route.url}`;
+
+      items.push(item);
+    });
+
+    return items;
+  }
+
+  private createStaticAssetCompletionItems(
+    context: { start: number; end: number; currentValue: string },
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): vscode.CompletionItem[] {
     const items: vscode.CompletionItem[] = [];
     const staticAssets = this.routeProvider.getStaticAssets();
 
+    const replaceRange = new vscode.Range(
+      new vscode.Position(position.line, context.start),
+      new vscode.Position(position.line, context.end)
+    );
+
     staticAssets.forEach((filePath) => {
-      // filePath like "./public/assets/img/check.svg" -> href "/assets/img/check.svg"
       const hrefPath = filePath.startsWith("./public/")
-        ? filePath.substring("./public".length) // results like "/assets/img/check.svg"
+        ? filePath.substring("./public".length)
         : filePath.startsWith("./")
         ? filePath.substring(1)
-        : "/" + filePath; // fallback
+        : "/" + filePath;
 
       const fileName = filePath.split("/").pop() || filePath;
       const ext = (fileName.split(".").pop() || "").toLowerCase();
@@ -906,6 +978,7 @@ export class HrefCompletionProvider implements vscode.CompletionItemProvider {
         `**Static Asset:** \`${hrefPath}\`\n\n**Type:** ${fileType}\n\n**File:** \`${filePath}\``
       );
       item.insertText = hrefPath;
+      item.range = replaceRange;
       item.sortText = `3_${hrefPath}`;
       items.push(item);
     });
@@ -913,28 +986,101 @@ export class HrefCompletionProvider implements vscode.CompletionItemProvider {
     return items;
   }
 
-  /**
-   * Check if cursor is inside href="..." attribute
-   */
-  private getHrefContext(line: string, cursorOffset: number): boolean {
+  private createSnippetText(route: RouteInfo): vscode.SnippetString {
+    let snippet = route.url;
+    let tabIndex = 1;
+
+    route.dynamicSegments.forEach((param) => {
+      if (route.path.includes(`[...${param}]`)) {
+        snippet = snippet.replace(
+          `{...${param}}`,
+          `\${${tabIndex}:${param}/more}`
+        );
+      } else {
+        snippet = snippet.replace(`{${param}}`, `\${${tabIndex}:${param}}`);
+      }
+      tabIndex++;
+    });
+
+    return new vscode.SnippetString(snippet);
+  }
+
+  private generateExamples(route: RouteInfo): string[] {
+    const examples: string[] = [];
+
+    route.dynamicSegments.forEach((paramName) => {
+      if (route.path.includes(`[...${paramName}]`)) {
+        const basePath = route.url.replace(`{...${paramName}}`, "");
+        examples.push(`${basePath}category`);
+        examples.push(`${basePath}category/subcategory`);
+        examples.push(`${basePath}category/subcategory/item`);
+      } else {
+        const basePath = route.url.replace(`{${paramName}}`, "");
+
+        if (paramName === "id") {
+          examples.push(`${basePath}123`);
+          examples.push(`${basePath}456`);
+          examples.push(`${basePath}abc`);
+        } else if (paramName === "slug") {
+          examples.push(`${basePath}my-post`);
+          examples.push(`${basePath}another-article`);
+          examples.push(`${basePath}sample-page`);
+        } else {
+          examples.push(`${basePath}a`);
+          examples.push(`${basePath}b`);
+          examples.push(`${basePath}c`);
+        }
+      }
+    });
+
+    if (examples.length === 0) {
+      let genericExample = route.url;
+      route.dynamicSegments.forEach((paramName) => {
+        if (route.path.includes(`[...${paramName}]`)) {
+          genericExample = genericExample.replace(
+            `{...${paramName}}`,
+            "example"
+          );
+        } else {
+          genericExample = genericExample.replace(`{${paramName}}`, "example");
+        }
+      });
+      examples.push(genericExample);
+    }
+
+    return examples.slice(0, 3);
+  }
+
+  private getHrefContext(
+    line: string,
+    cursorOffset: number
+  ): { start: number; end: number; currentValue: string } | null {
     const beforeCursor = line.substring(0, cursorOffset);
     const afterCursor = line.substring(cursorOffset);
 
-    // Look for href=" before cursor
     const hrefMatch = /href\s*=\s*"([^"]*)$/.exec(beforeCursor);
     if (!hrefMatch) {
-      return false;
+      return null;
     }
 
-    // Make sure there's a closing quote after cursor
     const nextQuoteIndex = afterCursor.indexOf('"');
-    return nextQuoteIndex !== -1;
+    if (nextQuoteIndex === -1) {
+      return null;
+    }
+
+    const valueStart = beforeCursor.length - hrefMatch[1].length;
+    const valueEnd = cursorOffset + nextQuoteIndex;
+    const currentValue =
+      hrefMatch[1] + afterCursor.substring(0, nextQuoteIndex);
+
+    return {
+      start: valueStart,
+      end: valueEnd,
+      currentValue: currentValue,
+    };
   }
 }
 
-/**
- * Definition provider for href attributes - enables Ctrl+Click navigation
- */
 export class HrefDefinitionProvider implements vscode.DefinitionProvider {
   constructor(
     private routeProvider: RouteProvider,
@@ -948,7 +1094,6 @@ export class HrefDefinitionProvider implements vscode.DefinitionProvider {
     const line = document.lineAt(position.line).text;
     const cursorOffset = position.character;
 
-    // Check if we're clicking on an href value
     const hrefValue = this.getHrefValue(line, cursorOffset);
     if (!hrefValue) {
       return;
@@ -959,30 +1104,23 @@ export class HrefDefinitionProvider implements vscode.DefinitionProvider {
       return;
     }
 
-    // Convert relative file path to absolute path
     const absoluteFilePath = path.resolve(
       this.workspaceFolder.uri.fsPath,
       route.filePath
     );
 
-    // Check if file exists
     if (!fs.existsSync(absoluteFilePath)) {
       console.warn(`Route file not found: ${absoluteFilePath}`);
       return;
     }
 
-    // Create VS Code URI and Location
     const fileUri = vscode.Uri.file(absoluteFilePath);
     const location = new vscode.Location(fileUri, new vscode.Position(0, 0));
 
     return location;
   }
 
-  /**
-   * Extract href value at cursor position
-   */
   private getHrefValue(line: string, cursorOffset: number): string | null {
-    // Find href attributes in the line
     const hrefRegex = /href\s*=\s*"([^"]*)"/g;
     let match;
 
@@ -1016,7 +1154,6 @@ export class PhpRedirectDiagnosticProvider {
         continue;
       }
 
-      // NEW: Skip validation if redirect value contains PHP tags
       if (this.containsPhpTags(redirectValue)) {
         continue;
       }
@@ -1054,9 +1191,6 @@ export class PhpRedirectDiagnosticProvider {
     return diagnostics;
   }
 
-  /**
-   * Check if string contains PHP tags
-   */
   private containsPhpTags(value: string): boolean {
     const phpTagPatterns = [
       /<\?php/i,
@@ -1161,7 +1295,6 @@ export class PhpRedirectHoverProvider implements vscode.HoverProvider {
 
     md.appendCodeblock(`Request::redirect('${redirectValue}')`, "php");
 
-    // Show route groups if they exist
     if (route.routeGroups.length > 0) {
       const routeType = route.isDynamic ? "Dynamic" : "Static";
       const groupsText = route.routeGroups.map((g) => `(${g})`).join(" ");
@@ -1181,7 +1314,6 @@ export class PhpRedirectHoverProvider implements vscode.HoverProvider {
       });
     }
 
-    // Show query parameters if they exist
     if (queryParams.size > 0) {
       md.appendMarkdown(`\n\n**Query Parameters:**`);
       queryParams.forEach((value, key) => {
@@ -1223,38 +1355,72 @@ export class PhpRedirectCompletionProvider
     const line = document.lineAt(position.line).text;
     const cursorOffset = position.character;
 
-    // Check if we're inside a Request::redirect() call
+    // Check if we're inside a Request::redirect() call and get context
     const redirectContext = this.getRedirectContext(line, cursorOffset);
     if (!redirectContext) {
       return [];
     }
 
     // Return route completions with PHP-specific formatting
-    return this.createPhpRedirectCompletionItems();
+    return this.createPhpRedirectCompletionItems(
+      redirectContext,
+      document,
+      position
+    );
   }
 
   /**
-   * Check if cursor is inside Request::redirect('...') call
+   * Check if cursor is inside Request::redirect('...') call and return context
    */
-  private getRedirectContext(line: string, cursorOffset: number): boolean {
+  private getRedirectContext(
+    line: string,
+    cursorOffset: number
+  ): { start: number; end: number; currentValue: string } | null {
     const beforeCursor = line.substring(0, cursorOffset);
     const afterCursor = line.substring(cursorOffset);
 
     // Look for Request::redirect(' or Request::redirect(" before cursor
-    const redirectMatch = /Request::redirect\s*\(\s*['"]([^'"]*)$/.exec(
+    const redirectMatch = /Request::redirect\s*\(\s*(['"])([^'"']*)$/.exec(
       beforeCursor
     );
     if (!redirectMatch) {
-      return false;
+      return null;
     }
 
+    const quote = redirectMatch[1];
+    const currentBeforeValue = redirectMatch[2];
+
     // Make sure there's a closing quote after cursor
-    const nextQuoteIndex = afterCursor.search(/['"]/);
-    return nextQuoteIndex !== -1;
+    const nextQuoteIndex = afterCursor.indexOf(quote);
+    if (nextQuoteIndex === -1) {
+      return null;
+    }
+
+    // Calculate the start and end positions of the value
+    const valueStart = beforeCursor.length - currentBeforeValue.length;
+    const valueEnd = cursorOffset + nextQuoteIndex;
+    const currentValue =
+      currentBeforeValue + afterCursor.substring(0, nextQuoteIndex);
+
+    return {
+      start: valueStart,
+      end: valueEnd,
+      currentValue: currentValue,
+    };
   }
 
-  private createPhpRedirectCompletionItems(): vscode.CompletionItem[] {
+  private createPhpRedirectCompletionItems(
+    context: { start: number; end: number; currentValue: string },
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): vscode.CompletionItem[] {
     const items: vscode.CompletionItem[] = [];
+
+    // Create replacement range from after opening quote to before closing quote
+    const replaceRange = new vscode.Range(
+      new vscode.Position(position.line, context.start),
+      new vscode.Position(position.line, context.end)
+    );
 
     this.routeProvider.getRoutes().forEach((route) => {
       const item = new vscode.CompletionItem(
@@ -1304,6 +1470,7 @@ export class PhpRedirectCompletionProvider
         item.insertText = route.url;
       }
 
+      item.range = replaceRange;
       // Sorting: static routes first, then dynamic
       item.sortText = route.isDynamic
         ? `2_${route.url}`
@@ -1457,8 +1624,7 @@ export class PphpScriptRedirectDiagnosticProvider {
     const diagnostics: vscode.Diagnostic[] = [];
     const text = document.getText();
 
-    // Match pphp.redirect('...') and pphp.redirect("...")
-    const redirectRegex = /pphp\.redirect\s*\(\s*['"]([^'"]*)['"]\s*\)/g;
+    const redirectRegex = /pp\.redirect\s*\(\s*['"]([^'"]*)['"]\s*\)/g;
     let match;
 
     while ((match = redirectRegex.exec(text)) !== null) {
@@ -1593,7 +1759,7 @@ export class PphpScriptRedirectHoverProvider implements vscode.HoverProvider {
     const { route, params, queryParams } = matchResult;
     const md = new vscode.MarkdownString();
 
-    md.appendCodeblock(`pphp.redirect('${redirectValue}')`, "javascript");
+    md.appendCodeblock(`pp.redirect('${redirectValue}')`, "javascript");
 
     // Show route groups if they exist
     if (route.routeGroups.length > 0) {
@@ -1629,7 +1795,7 @@ export class PphpScriptRedirectHoverProvider implements vscode.HoverProvider {
   }
 
   private getRedirectValue(line: string, cursorOffset: number): string | null {
-    const redirectRegex = /pphp\.redirect\s*\(\s*['"]([^'"]*)['"]\s*\)/g;
+    const redirectRegex = /pp\.redirect\s*\(\s*['"]([^'"]*)['"]\s*\)/g;
     let match;
 
     while ((match = redirectRegex.exec(line)) !== null) {
@@ -1657,38 +1823,66 @@ export class PphpScriptRedirectCompletionProvider
     const line = document.lineAt(position.line).text;
     const cursorOffset = position.character;
 
-    // Check if we're inside a pphp.redirect() call
     const redirectContext = this.getRedirectContext(line, cursorOffset);
     if (!redirectContext) {
       return [];
     }
 
-    // Return route completions with JavaScript-specific formatting
-    return this.createPphpScriptRedirectCompletionItems();
+    return this.createPphpScriptRedirectCompletionItems(
+      redirectContext,
+      document,
+      position
+    );
   }
 
-  /**
-   * Check if cursor is inside pphp.redirect('...') call
-   */
-  private getRedirectContext(line: string, cursorOffset: number): boolean {
+  private getRedirectContext(
+    line: string,
+    cursorOffset: number
+  ): { start: number; end: number; currentValue: string } | null {
     const beforeCursor = line.substring(0, cursorOffset);
     const afterCursor = line.substring(cursorOffset);
 
-    // Look for pphp.redirect(' or pphp.redirect(" before cursor
-    const redirectMatch = /pphp\.redirect\s*\(\s*['"]([^'"]*)$/.exec(
+    const redirectMatch = /pp\.redirect\s*\(\s*(['"])([^'"']*)$/.exec(
       beforeCursor
     );
     if (!redirectMatch) {
-      return false;
+      return null;
     }
 
+    const quote = redirectMatch[1];
+    const currentBeforeValue = redirectMatch[2];
+
     // Make sure there's a closing quote after cursor
-    const nextQuoteIndex = afterCursor.search(/['"]/);
-    return nextQuoteIndex !== -1;
+    const nextQuoteIndex = afterCursor.indexOf(quote);
+    if (nextQuoteIndex === -1) {
+      return null;
+    }
+
+    // Calculate the start and end positions of the value
+    const valueStart = beforeCursor.length - currentBeforeValue.length;
+    const valueEnd = cursorOffset + nextQuoteIndex;
+    const currentValue =
+      currentBeforeValue + afterCursor.substring(0, nextQuoteIndex);
+
+    return {
+      start: valueStart,
+      end: valueEnd,
+      currentValue: currentValue,
+    };
   }
 
-  private createPphpScriptRedirectCompletionItems(): vscode.CompletionItem[] {
+  private createPphpScriptRedirectCompletionItems(
+    context: { start: number; end: number; currentValue: string },
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): vscode.CompletionItem[] {
     const items: vscode.CompletionItem[] = [];
+
+    // Create replacement range from after opening quote to before closing quote
+    const replaceRange = new vscode.Range(
+      new vscode.Position(position.line, context.start),
+      new vscode.Position(position.line, context.end)
+    );
 
     this.routeProvider.getRoutes().forEach((route) => {
       const item = new vscode.CompletionItem(
@@ -1716,11 +1910,11 @@ export class PphpScriptRedirectCompletionProvider
             `**File:** \`${route.filePath}\`\n\n` +
             `**JavaScript Usage:**\n` +
             `\`\`\`javascript\n` +
-            `pphp.redirect('${route.url}');\n` +
+            `pp.redirect('${route.url}');\n` +
             `\`\`\`\n\n` +
             `**Examples:**\n` +
             `${this.generateJavaScriptExamples(route)
-              .map((ex) => `- \`pphp.redirect('${ex}');\``)
+              .map((ex) => `- \`pp.redirect('${ex}');\``)
               .join("\n")}`
         );
         item.insertText = this.createSnippetText(route);
@@ -1732,12 +1926,13 @@ export class PphpScriptRedirectCompletionProvider
           }\n\n**File:** \`${route.filePath}\`\n\n` +
             `**JavaScript Usage:**\n` +
             `\`\`\`javascript\n` +
-            `pphp.redirect('${route.url}');\n` +
+            `pp.redirect('${route.url}');\n` +
             `\`\`\``
         );
         item.insertText = route.url;
       }
 
+      item.range = replaceRange;
       // Sorting: static routes first, then dynamic
       item.sortText = route.isDynamic
         ? `2_${route.url}`
@@ -1833,7 +2028,6 @@ export class PphpScriptRedirectDefinitionProvider
     const line = document.lineAt(position.line).text;
     const cursorOffset = position.character;
 
-    // Check if we're clicking on a pphp.redirect value
     const redirectValue = this.getRedirectValue(line, cursorOffset);
     if (!redirectValue) {
       return;
@@ -1844,31 +2038,24 @@ export class PphpScriptRedirectDefinitionProvider
       return;
     }
 
-    // Convert relative file path to absolute path
     const absoluteFilePath = path.resolve(
       this.workspaceFolder.uri.fsPath,
       route.filePath
     );
 
-    // Check if file exists
     if (!fs.existsSync(absoluteFilePath)) {
       console.warn(`Route file not found: ${absoluteFilePath}`);
       return;
     }
 
-    // Create VS Code URI and Location
     const fileUri = vscode.Uri.file(absoluteFilePath);
     const location = new vscode.Location(fileUri, new vscode.Position(0, 0));
 
     return location;
   }
 
-  /**
-   * Extract redirect value at cursor position
-   */
   private getRedirectValue(line: string, cursorOffset: number): string | null {
-    // Find pphp.redirect() calls in the line
-    const redirectRegex = /pphp\.redirect\s*\(\s*['"]([^'"]*)['"]\s*\)/g;
+    const redirectRegex = /pp\.redirect\s*\(\s*['"]([^'"]*)['"]\s*\)/g;
     let match;
 
     while ((match = redirectRegex.exec(line)) !== null) {
@@ -1903,12 +2090,10 @@ export class SrcDiagnosticProvider {
       if (this.containsPhpTags(srcValue)) {
         continue;
       }
-      // NEW: single-brace mustache skip
       if (this.containsMustacheExpression(srcValue)) {
         continue;
       }
 
-      // Only validate against static assets (not routes)
       if (!this.routeProvider.isValidStaticAsset(srcValue)) {
         const start = document.positionAt(
           match.index + match[0].indexOf(srcValue)
@@ -1937,9 +2122,6 @@ export class SrcDiagnosticProvider {
     return diagnostics;
   }
 
-  /**
-   * Check if string contains mustache expressions {{ ... }}
-   */
   private containsMustacheExpression(value: string): boolean {
     return /\{[^}]*\}/.test(value);
   }
@@ -1960,7 +2142,6 @@ export class SrcDiagnosticProvider {
     const staticAssets = this.routeProvider.getStaticAssets();
     const suggestions: string[] = [];
 
-    // Turn "./public/foo/bar.png" into "/foo/bar.png" for comparison
     const toHref = (asset: string) =>
       asset.startsWith("./public/")
         ? asset.substring("./public".length)
@@ -2049,17 +2230,14 @@ export class SrcHoverProvider implements vscode.HoverProvider {
       return;
     }
 
-    // Check if it's a valid static asset
     if (this.routeProvider.isValidStaticAsset(srcValue)) {
       const md = new vscode.MarkdownString();
       md.appendCodeblock(`src="${srcValue}"`, "html");
       md.appendMarkdown(`\n\n**Static Asset:** \`${srcValue}\``);
 
-      // Convert src path to files-list.json format for display
       const normalizedPath = srcOrHrefToFilesListPath(srcValue);
       md.appendMarkdown(`\n\n**File:** \`${normalizedPath}\``);
 
-      // Detect file type and add info
       const fileExtension = srcValue.split(".").pop()?.toLowerCase();
       let fileType = "File";
 
@@ -2092,7 +2270,6 @@ export class SrcHoverProvider implements vscode.HoverProvider {
 
       md.appendMarkdown(`\n\n**Type:** ${fileType}`);
 
-      // Add image dimensions info if available (this would require additional file reading)
       if (
         ["png", "jpg", "jpeg", "gif", "webp", "bmp"].includes(
           fileExtension || ""
@@ -2136,24 +2313,30 @@ export class SrcCompletionProvider implements vscode.CompletionItemProvider {
     const line = document.lineAt(position.line).text;
     const cursorOffset = position.character;
 
-    // Check if we're inside a src attribute
     const srcContext = this.getSrcContext(line, cursorOffset);
     if (!srcContext) {
       return [];
     }
 
-    // Only provide static asset completions for src attributes
-    return this.createSrcCompletionItems();
+    return this.createSrcCompletionItems(srcContext, document, position);
   }
 
-  private createSrcCompletionItems(): vscode.CompletionItem[] {
+  private createSrcCompletionItems(
+    context: { start: number; end: number; currentValue: string },
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): vscode.CompletionItem[] {
     const items: vscode.CompletionItem[] = [];
     const staticAssets = this.routeProvider.getStaticAssets();
 
+    const replaceRange = new vscode.Range(
+      new vscode.Position(position.line, context.start),
+      new vscode.Position(position.line, context.end)
+    );
+
     staticAssets.forEach((filePath) => {
-      // Convert "./src/app/assets/images/check.svg" to "/src/app/assets/images/check.svg"
       const srcPath = filePath.startsWith("./public/")
-        ? filePath.substring("./public".length) // "/images/foo.png"
+        ? filePath.substring("./public".length)
         : filePath.startsWith("./")
         ? filePath.substring(1)
         : "/" + filePath;
@@ -2161,7 +2344,6 @@ export class SrcCompletionProvider implements vscode.CompletionItemProvider {
       const fileName = filePath.split("/").pop() || filePath;
       const fileExtension = fileName.split(".").pop()?.toLowerCase() || "";
 
-      // Filter to only show relevant files for src (primarily images and media)
       const isRelevantForSrc = [
         "svg",
         "png",
@@ -2183,13 +2365,12 @@ export class SrcCompletionProvider implements vscode.CompletionItemProvider {
       ].includes(fileExtension);
 
       if (!isRelevantForSrc) {
-        return; // Skip this file
+        return;
       }
 
       let kind = vscode.CompletionItemKind.File;
       let fileType = "File";
 
-      // Determine completion kind and type based on file extension
       switch (fileExtension) {
         case "svg":
         case "png":
@@ -2238,17 +2419,17 @@ export class SrcCompletionProvider implements vscode.CompletionItemProvider {
           `**File:** \`${filePath}\``
       );
       item.insertText = srcPath;
+      item.range = replaceRange;
 
-      // Sort images first, then other media, then other files
-      let sortPrefix = "3_"; // default
+      let sortPrefix = "3_";
       if (
         ["svg", "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp"].includes(
           fileExtension
         )
       ) {
-        sortPrefix = "1_"; // images first
+        sortPrefix = "1_";
       } else if (["mp4", "webm", "ogg", "mp3", "wav"].includes(fileExtension)) {
-        sortPrefix = "2_"; // media second
+        sortPrefix = "2_";
       }
 
       item.sortText = `${sortPrefix}${srcPath}`;
@@ -2259,19 +2440,32 @@ export class SrcCompletionProvider implements vscode.CompletionItemProvider {
     return items;
   }
 
-  private getSrcContext(line: string, cursorOffset: number): boolean {
+  private getSrcContext(
+    line: string,
+    cursorOffset: number
+  ): { start: number; end: number; currentValue: string } | null {
     const beforeCursor = line.substring(0, cursorOffset);
     const afterCursor = line.substring(cursorOffset);
 
-    // Look for src=" before cursor
     const srcMatch = /src\s*=\s*"([^"]*)$/.exec(beforeCursor);
     if (!srcMatch) {
-      return false;
+      return null;
     }
 
-    // Make sure there's a closing quote after cursor
     const nextQuoteIndex = afterCursor.indexOf('"');
-    return nextQuoteIndex !== -1;
+    if (nextQuoteIndex === -1) {
+      return null;
+    }
+
+    const valueStart = beforeCursor.length - srcMatch[1].length;
+    const valueEnd = cursorOffset + nextQuoteIndex;
+    const currentValue = srcMatch[1] + afterCursor.substring(0, nextQuoteIndex);
+
+    return {
+      start: valueStart,
+      end: valueEnd,
+      currentValue: currentValue,
+    };
   }
 }
 

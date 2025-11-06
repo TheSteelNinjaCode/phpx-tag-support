@@ -1303,7 +1303,8 @@ export async function activate(context: vscode.ExtensionContext) {
       '"',
       "'",
       "=",
-      " "
+      " ",
+      "/"
     ),
     vscode.languages.registerDefinitionProvider(["php"], srcDefinitionProvider),
 
@@ -1313,7 +1314,8 @@ export async function activate(context: vscode.ExtensionContext) {
       '"',
       "'",
       "=",
-      " "
+      " ",
+      "/"
     ),
 
     vscode.languages.registerDefinitionProvider(
@@ -1332,7 +1334,8 @@ export async function activate(context: vscode.ExtensionContext) {
       '"',
       "'",
       "(",
-      " "
+      " ",
+      "/"
     ),
 
     vscode.languages.registerDefinitionProvider(
@@ -1350,7 +1353,8 @@ export async function activate(context: vscode.ExtensionContext) {
       '"',
       "'",
       "(",
-      " "
+      " ",
+      "/"
     ),
     vscode.languages.registerDefinitionProvider(
       phpSelector,
