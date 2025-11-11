@@ -802,16 +802,51 @@ function generateCompletions(
       const lastSegment = path[path.length - 1];
       const secondLastSegment = path.length >= 2 ? path[path.length - 2] : null;
 
-      // **FIXED: Check if we're directly inside a relation that needs operations**
+      // **CRITICAL FIX: Walk through relations to find correct model context**
+      let currentFields = context.fieldMap;
+
+      // Traverse the path to find which model we're currently in
+      for (let i = 0; i < path.length - 1; i++) {
+        const segment = path[i];
+
+        // Skip operation keywords
+        if (
+          [
+            "include",
+            "select",
+            "where",
+            "omit",
+            "orderBy",
+            "data",
+            "update",
+            "create",
+          ].includes(segment)
+        ) {
+          continue;
+        }
+
+        // Get field info from current model
+        const fieldInfo = currentFields.get(segment);
+        if (fieldInfo && isRelationField(fieldInfo, context.modelMap)) {
+          // Move to the related model's fields
+          const relatedModelName = fieldInfo.type.toLowerCase();
+          const relatedFields = context.modelMap.get(relatedModelName);
+          if (relatedFields) {
+            currentFields = relatedFields;
+          }
+        }
+      }
+
+      // **NOW check if last segment is a relation in the CURRENT model context**
       if (
         secondLastSegment &&
         ["include", "select"].includes(secondLastSegment)
       ) {
         const relationField = lastSegment;
-        const relationInfo = context.fieldMap.get(relationField);
+        const relationInfo = currentFields.get(relationField); // ← Use traversed fields!
 
         if (relationInfo && isRelationField(relationInfo, context.modelMap)) {
-          // We're at 'include' => ['user' => [cursor]] - show OPERATIONS
+          // We're at 'include' => ['relation' => [cursor]] - show OPERATIONS
           return createRelationOperationCompletions(
             context,
             relationField,
@@ -823,18 +858,56 @@ function generateCompletions(
       // **Check if we're inside a relation's operation that needs fields**
       if (path.length >= 3) {
         const operation = path[path.length - 1]; // e.g., 'select'
-        const relationField = path[path.length - 2]; // e.g., 'user'
+        const relationField = path[path.length - 2]; // e.g., 'termTaxonomy'
         const parentOperation = path[path.length - 3]; // e.g., 'include'
 
         if (
           ["select", "include", "where", "omit"].includes(operation) &&
           ["include", "select"].includes(parentOperation)
         ) {
-          const relationInfo = context.fieldMap.get(relationField);
+          // Walk again to find the relation's model
+          let fieldsForRelation = context.fieldMap;
+
+          for (let i = 0; i < path.length - 2; i++) {
+            const segment = path[i];
+            if (
+              [
+                "include",
+                "select",
+                "where",
+                "omit",
+                "orderBy",
+                "data",
+              ].includes(segment)
+            ) {
+              continue;
+            }
+            const fieldInfo = fieldsForRelation.get(segment);
+            if (fieldInfo && isRelationField(fieldInfo, context.modelMap)) {
+              const relatedModelName = fieldInfo.type.toLowerCase();
+              const relatedFields = context.modelMap.get(relatedModelName);
+              if (relatedFields) {
+                fieldsForRelation = relatedFields;
+              }
+            }
+          }
+
+          const relationInfo = fieldsForRelation.get(relationField);
 
           if (relationInfo && isRelationField(relationInfo, context.modelMap)) {
-            // We're at 'include' => ['user' => ['select' => [cursor]]] - show FIELDS
-            return createFieldCompletions(context, arrayContext);
+            // We're at 'include' => ['relation' => ['select' => [cursor]]] - show FIELDS
+            // But use the RELATED model's fields
+            const relatedModelName = relationInfo.type.toLowerCase();
+            const relatedFields = context.modelMap.get(relatedModelName);
+
+            if (relatedFields) {
+              // Create a modified context with the correct field map
+              const modifiedContext = {
+                ...context,
+                fieldMap: relatedFields,
+              };
+              return createFieldCompletions(modifiedContext, arrayContext);
+            }
           }
         }
       }
