@@ -82,6 +82,10 @@ const FILTER_OPERATORS = [
   "gte",
   "equals",
   "not",
+  "increment",
+  "decrement",
+  "multiply",
+  "divide",
 ] as const;
 const RELATION_OPERATORS = ["every", "none", "some"] as const;
 
