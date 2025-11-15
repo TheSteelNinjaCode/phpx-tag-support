@@ -451,6 +451,134 @@ function validatePphpCalls(
   diagCollection.set(document.uri, diags);
 }
 
+interface FileAnalysisCache {
+  version: number;
+  hasMixedContent: boolean;
+  hasHeredocs: boolean;
+  heredocRanges: Array<{ start: number; end: number }>;
+}
+
+const fileAnalysisCache = new Map<string, FileAnalysisCache>();
+
+export function shouldAnalyzeFile(document: vscode.TextDocument): {
+  shouldAnalyze: boolean;
+  cache: FileAnalysisCache;
+} {
+  const cached = fileAnalysisCache.get(document.uri.toString());
+
+  if (cached && cached.version === document.version) {
+    return {
+      shouldAnalyze: cached.hasMixedContent || cached.hasHeredocs,
+      cache: cached,
+    };
+  }
+
+  const text = document.getText();
+
+  const lineCount = document.lineCount;
+  if (lineCount > 5000) {
+    console.log(
+      `[PHPX] Skipping large file (${lineCount} lines): ${document.fileName}`
+    );
+    const cache: FileAnalysisCache = {
+      version: document.version,
+      hasMixedContent: false,
+      hasHeredocs: false,
+      heredocRanges: [],
+    };
+    fileAnalysisCache.set(document.uri.toString(), cache);
+    return { shouldAnalyze: false, cache };
+  }
+
+  const hasMixedContent = detectMixedContent(text);
+  const heredocInfo = detectHtmlHeredocs(text);
+
+  const cache: FileAnalysisCache = {
+    version: document.version,
+    hasMixedContent,
+    hasHeredocs: heredocInfo.length > 0,
+    heredocRanges: heredocInfo,
+  };
+
+  fileAnalysisCache.set(document.uri.toString(), cache);
+
+  return {
+    shouldAnalyze: hasMixedContent || heredocInfo.length > 0,
+    cache,
+  };
+}
+
+function detectMixedContent(text: string): boolean {
+  const htmlTagPattern =
+    /<(?:html|head|body|div|span|p|h[1-6]|a|img|ul|li|table|form|input|button|nav|header|footer|section|article|template|Fragment|[A-Z][A-Za-z0-9_]*)\b/i;
+
+  if (!htmlTagPattern.test(text)) {
+    return false;
+  }
+
+  const phpBlocks = extractPhpBlockRanges(text);
+
+  let match: RegExpExecArray | null;
+  const htmlRegex =
+    /<(?:html|head|body|div|span|p|h[1-6]|a|img|ul|li|table|form|input|button|nav|header|footer|section|article|template|Fragment|[A-Z][A-Za-z0-9_]*)\b/gi;
+
+  while ((match = htmlRegex.exec(text)) !== null) {
+    const matchIndex = match.index;
+
+    const isOutsidePhp = !phpBlocks.some(
+      (block) => matchIndex >= block.start && matchIndex < block.end
+    );
+
+    if (isOutsidePhp) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function detectHtmlHeredocs(
+  text: string
+): Array<{ start: number; end: number }> {
+  const heredocs: Array<{ start: number; end: number }> = [];
+
+  const heredocRegex =
+    /<<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
+
+  let match: RegExpExecArray | null;
+  while ((match = heredocRegex.exec(text)) !== null) {
+    const content = match[3];
+
+    if (/<[a-z]/i.test(content)) {
+      const contentStart = match.index + match[0].indexOf(content);
+      heredocs.push({
+        start: contentStart,
+        end: contentStart + content.length,
+      });
+    }
+  }
+
+  return heredocs;
+}
+
+function extractPhpBlockRanges(
+  text: string
+): Array<{ start: number; end: number }> {
+  const blocks: Array<{ start: number; end: number }> = [];
+
+  const phpRegex = /<\?(?:php|=)?([\s\S]*?)(?:\?>|$)/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = phpRegex.exec(text)) !== null) {
+    blocks.push({
+      start: match.index,
+      end: match.index + match[0].length,
+    });
+  }
+
+  return blocks;
+}
+
 export async function activate(context: vscode.ExtensionContext) {
   const folders = vscode.workspace.workspaceFolders;
   if (!folders || folders.length === 0) {
@@ -567,6 +695,12 @@ export async function activate(context: vscode.ExtensionContext) {
   const braceDecorationType = vscode.window.createTextEditorDecorationType({
     color: "#569CD6",
   });
+
+  context.subscriptions.push(
+    vscode.workspace.onDidCloseTextDocument((document) => {
+      fileAnalysisCache.delete(document.uri.toString());
+    })
+  );
 
   context.subscriptions.push(
     vscode.languages.registerDefinitionProvider(
@@ -1109,12 +1243,27 @@ export async function activate(context: vscode.ExtensionContext) {
       return;
     }
 
+    const { shouldAnalyze } = shouldAnalyzeFile(doc);
+
+    if (!shouldAnalyze) {
+      pphpSigDiags.clear();
+      diagnosticCollection.clear();
+      mustacheTypeDiags.clear();
+      return;
+    }
+
     const key = doc.uri.toString();
     clearTimeout(pendingTimers.get(key));
 
     pendingTimers.set(
       key,
       setTimeout(() => {
+        const currentAnalysis = shouldAnalyzeFile(doc);
+        if (!currentAnalysis.shouldAnalyze) {
+          pendingTimers.delete(key);
+          return;
+        }
+
         validatePphpCalls(doc, pphpSigDiags);
         validateStateTupleUsage(doc, pphpSigDiags);
         rebuildMustacheStub(doc);
@@ -1126,11 +1275,58 @@ export async function activate(context: vscode.ExtensionContext) {
     );
   }
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand("phpx-tag-support.refreshRoutes", () => {
+      try {
+        const filesListPath = path.join(
+          wsFolder.uri.fsPath,
+          "settings",
+          "files-list.json"
+        );
+        delete require.cache[filesListPath];
+
+        routeProvider.refresh();
+
+        vscode.workspace.textDocuments.forEach((doc) => {
+          if (doc.languageId === "php") {
+            validateRoutes(doc);
+            updateDiagnostics(doc);
+          }
+        });
+
+        vscode.window.showInformationMessage(
+          `✅ Manually refreshed: ${
+            routeProvider.getRoutes().length
+          } routes, ` +
+            `${routeProvider.getStaticAssets().length} static assets`
+        );
+      } catch (error) {
+        vscode.window.showErrorMessage("Failed to refresh routes: " + error);
+      }
+    })
+  );
+
   const mustacheTypeDiags =
     vscode.languages.createDiagnosticCollection("mustache-types");
   context.subscriptions.push(mustacheTypeDiags);
 
   const updateAllValidations = async (document: vscode.TextDocument) => {
+    const { shouldAnalyze } = shouldAnalyzeFile(document);
+
+    if (!shouldAnalyze) {
+      createDiags.clear();
+      readDiags.clear();
+      updateDiags.clear();
+      deleteDiags.clear();
+      upsertDiags.clear();
+      groupByDiags.clear();
+      aggregateDiags.clear();
+      mustacheTypeDiags.clear();
+      diagnosticCollection.clear();
+      fetchFunctionDiagnostics.clear();
+      return;
+    }
+
     scheduleValidation(document);
 
     await validateCreateCall(document, createDiags);
@@ -1799,9 +1995,6 @@ function getAttributeValueContext(
   return { tagName, attributeName, currentValue };
 }
 
-/* ────────────────────────────────────────────────────────────── *
- *                 Native-JS hover & signature-help               *
- * ────────────────────────────────────────────────────────────── */
 type NativeInfo = { sig: string; jsDoc?: string };
 
 const NATIVE_CACHE = new Map<string, NativeInfo>();
@@ -1931,10 +2124,6 @@ export function activateNativeJsHelp(ctx: vscode.ExtensionContext) {
   );
 }
 
-/* ────────────────────────────────────────────────────────────── *
- *                        LANGUAGE PROVIDERS                      *
- * ────────────────────────────────────────────────────────────── */
-
 const updateEditorConfiguration = (): void => {
   const editorConfig = vscode.workspace.getConfiguration("editor");
   editorConfig.update(
@@ -2045,7 +2234,6 @@ const CLS_MAP: Record<VarName, keyof typeof classStubs> = {
   searchParams: "SearchParamsManager",
 };
 
-/* inside <script>? ------------------------------------------------------- */
 const insideScript = (doc: vscode.TextDocument, pos: vscode.Position) => {
   const txt = doc.getText();
   const offset = doc.offsetAt(pos);
@@ -2056,13 +2244,11 @@ const insideScript = (doc: vscode.TextDocument, pos: vscode.Position) => {
   );
 };
 
-/* top-level var completions --------------------------------------------- */
 const variableItems = (prefix: string) =>
   VAR_NAMES.filter((v) => v.startsWith(prefix)).map(
     (v) => new vscode.CompletionItem(v, vscode.CompletionItemKind.Variable)
   );
 
-/* member completions  pp.|store.|… -------------------------------------- */
 const memberItems = (line: string) => {
   const m = /(pp|store|searchParams)\.\w*$/.exec(line);
   if (!m) {
@@ -2079,10 +2265,6 @@ const memberItems = (line: string) => {
   });
 };
 
-/* ────────────────────────────────────────────────────────────── *
- *  1️⃣  completions INSIDE <script> … </script>                  *
- * ────────────────────────────────────────────────────────────── */
-
 const registerPhpScriptCompletionProvider = () =>
   vscode.languages.registerCompletionItemProvider(
     PHP_SELECTOR,
@@ -2094,14 +2276,11 @@ const registerPhpScriptCompletionProvider = () =>
 
         const line = doc.lineAt(pos.line).text;
         const uptoCursor = line.slice(0, pos.character);
-
-        /* a) member list after the dot */
         const mem = memberItems(uptoCursor);
         if (mem?.length) {
           return mem;
         }
 
-        /* b) variable list while typing “pp…” etc. */
         const prefix = uptoCursor.match(/([A-Za-z_]*)$/)?.[1] ?? "";
         if (prefix.length) {
           return variableItems(prefix);
@@ -2113,10 +2292,6 @@ const registerPhpScriptCompletionProvider = () =>
     ".",
     ..."abcdefghijklmnopqrstuvwxyz".split("")
   );
-
-/* ────────────────────────────────────────────────────────────── *
- *  2️⃣  completions OUTSIDE <script>                             *
- * ────────────────────────────────────────────────────────────── */
 
 const registerPhpMarkupCompletionProvider = () =>
   vscode.languages.registerCompletionItemProvider(
@@ -2772,15 +2947,17 @@ export function* findPlaceholders(src: string) {
   }
 }
 
-/* ────────────────────────────────────────────────────────────── *
- *                      PHP DIAGNOSTIC FUNCTIONS                  *
- * ────────────────────────────────────────────────────────────── */
-
 const validateMissingImports = (
   document: vscode.TextDocument,
   diagnosticCollection: vscode.DiagnosticCollection
 ): void => {
   if (document.languageId !== PHP_LANGUAGE) {
+    return;
+  }
+
+  const { shouldAnalyze } = shouldAnalyzeFile(document);
+  if (!shouldAnalyze) {
+    diagnosticCollection.set(document.uri, []);
     return;
   }
 

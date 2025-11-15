@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as vscode from "vscode";
-import { getComponentsFromClassLog } from "../extension";
+import { getComponentsFromClassLog, shouldAnalyzeFile } from "../extension";
 import { phpEngine } from "../util/php-engine";
 
 const FLAG_PUBLIC = 4;
@@ -526,6 +526,12 @@ export function validateComponentPropValues(
   propsProvider: ComponentPropsProvider
 ) {
   if (doc.languageId !== "php") {
+    return;
+  }
+
+  const { shouldAnalyze } = shouldAnalyzeFile(doc);
+  if (!shouldAnalyze) {
+    ATTR_VALUE_DIAG.set(doc.uri, []);
     return;
   }
 

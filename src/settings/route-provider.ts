@@ -46,16 +46,19 @@ export class RouteProvider {
         return;
       }
 
+      delete require.cache[this.filesListPath];
+
       const fileContent = fs.readFileSync(this.filesListPath, "utf8");
       const files: string[] = JSON.parse(fileContent);
 
-      // NEW: Store all files for static asset validation
       this.allFiles = files;
 
       this.routes = this.extractRoutesFromFiles(files);
-      console.log(`Loaded ${this.routes.length} routes:`, this.routes);
+      console.log(
+        `✅ Loaded ${this.routes.length} routes and ${this.allFiles.length} files`
+      );
     } catch (error) {
-      console.error("Error loading routes from files-list.json:", error);
+      console.error("❌ Error loading routes from files-list.json:", error);
     }
   }
 

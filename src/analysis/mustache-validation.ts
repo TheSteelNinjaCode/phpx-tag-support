@@ -4,11 +4,17 @@ import {
   containsAssignment,
   buildExclusionRanges,
 } from "./mustache-ast";
+import { shouldAnalyzeFile } from "../extension";
 
 export function validateMustacheExpressions(
   document: vscode.TextDocument
 ): vscode.Diagnostic[] {
   if (document.languageId !== "php") {
+    return [];
+  }
+
+  const { shouldAnalyze } = shouldAnalyzeFile(document);
+  if (!shouldAnalyze) {
     return [];
   }
 
