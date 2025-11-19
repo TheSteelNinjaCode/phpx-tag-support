@@ -82,12 +82,14 @@ const FILTER_OPERATORS = [
   "gte",
   "equals",
   "not",
+] as const;
+const RELATION_OPERATORS = ["every", "none", "some"] as const;
+const ATOMIC_NUMBER_OPERATORS = [
   "increment",
   "decrement",
   "multiply",
   "divide",
 ] as const;
-const RELATION_OPERATORS = ["every", "none", "some"] as const;
 
 type PrismaOp = keyof typeof ROOT_KEYS_MAP;
 type RootKey = (typeof ROOT_KEYS_MAP)[PrismaOp][number];
@@ -794,6 +796,26 @@ function generateCompletions(
   // Root key completions (top-level array)
   if (shouldProvideRootKeys(context, arrayContext)) {
     return createRootKeyCompletions(context);
+  }
+
+  // Inside generateCompletions function, add this case
+  if (currentRoot === "data" && entrySide === "key") {
+    const path = findArrayPath(
+      context.callNode.arguments?.[0] as PhpArray,
+      arrayContext.hostArray
+    );
+
+    if (path && path.length >= 2) {
+      const fieldName = path[path.length - 1];
+      const fieldInfo = context.fieldMap.get(fieldName);
+
+      if (fieldInfo) {
+        const atomicOps = createAtomicOperatorCompletions(context, fieldInfo);
+        if (atomicOps.length > 0) {
+          return atomicOps;
+        }
+      }
+    }
   }
 
   if (entrySide === "key") {
@@ -3484,6 +3506,7 @@ export async function validateUpdateCall(
       }
 
       // ② then exactly the same per‑column checks you had before
+      // ② then exactly the same per‑column checks you had before
       for (const item of entries) {
         if (!item.key || item.key.kind !== "string") {
           continue;
@@ -3496,22 +3519,10 @@ export async function validateUpdateCall(
           continue;
         }
 
-        // nested object updates (e.g. push/set on list fields)
-        if (isArray(value)) {
-          validateFieldAssignments(
-            doc,
-            printArrayLiteral(value),
-            value.loc!.start.offset,
-            fields,
-            modelName,
-            diagnostics
-          );
-          continue;
-        }
-
-        // scalar column
+        // ✅ FIX: Get field info FIRST, before any usage
         const info = fields.get(key);
         const keyRange = rangeOf(doc, item.key.loc!);
+
         if (!info) {
           diagnostics.push(
             new vscode.Diagnostic(
@@ -3523,6 +3534,46 @@ export async function validateUpdateCall(
           continue;
         }
 
+        // nested object updates (e.g. push/set on list fields OR atomic operations)
+        if (isArray(value)) {
+          const arrayEntries = (value as PhpArray).items as Entry[];
+
+          // Check if this is an atomic operation
+          const hasAtomicOp = arrayEntries.some(
+            (op) =>
+              op.key?.kind === "string" &&
+              ATOMIC_NUMBER_OPERATORS.includes((op.key as any).value as any)
+          );
+
+          if (hasAtomicOp) {
+            // Validate atomic operations (info is now safely declared above)
+            for (const atomicEntry of arrayEntries) {
+              if (atomicEntry.key?.kind === "string") {
+                validateAtomicOperation(
+                  doc,
+                  atomicEntry,
+                  info, // ✅ Now info is defined and not undefined
+                  key,
+                  modelName,
+                  diagnostics
+                );
+              }
+            }
+          } else {
+            // Original behavior for list operations
+            validateFieldAssignments(
+              doc,
+              printArrayLiteral(value),
+              value.loc!.start.offset,
+              fields,
+              modelName,
+              diagnostics
+            );
+          }
+          continue;
+        }
+
+        // scalar column type check
         const raw = doc.getText(rangeOf(doc, value.loc!)).trim();
         if (!isValidPhpType(raw, info)) {
           const expected = info.isList ? `${info.type}[]` : info.type;
@@ -4299,4 +4350,116 @@ export async function validateAggregateCall(
   });
 
   collection.set(doc.uri, diagnostics);
+}
+
+function validateAtomicOperation(
+  doc: vscode.TextDocument,
+  operatorEntry: Entry,
+  fieldInfo: FieldInfo,
+  fieldName: string,
+  modelName: string,
+  diags: vscode.Diagnostic[]
+) {
+  if (!operatorEntry.key || operatorEntry.key.kind !== "string") {
+    return;
+  }
+
+  const operator = (operatorEntry.key as any).value as string;
+  const keyRange = rangeOf(doc, operatorEntry.key.loc!);
+
+  // Check if it's a valid atomic operator
+  if (!ATOMIC_NUMBER_OPERATORS.includes(operator as any)) {
+    diags.push(
+      new vscode.Diagnostic(
+        keyRange,
+        `Invalid atomic operator "${operator}". Valid operators: increment, decrement, multiply, divide.`,
+        vscode.DiagnosticSeverity.Error
+      )
+    );
+    return;
+  }
+
+  // Check if field is numeric (only numeric fields support atomic operations)
+  const numericTypes = ["Int", "Float", "BigInt", "Decimal"];
+  if (!numericTypes.includes(fieldInfo.type)) {
+    diags.push(
+      new vscode.Diagnostic(
+        keyRange,
+        `Cannot use "${operator}" on non-numeric field "${fieldName}" (type: ${fieldInfo.type}). Atomic operations only work on Int, Float, BigInt, and Decimal fields.`,
+        vscode.DiagnosticSeverity.Error
+      )
+    );
+    return;
+  }
+
+  // Validate the value
+  if (!operatorEntry.value?.loc) {
+    return;
+  }
+
+  const valueRange = rangeOf(doc, operatorEntry.value.loc);
+  const raw = doc.getText(valueRange).trim();
+
+  // Check if value is numeric
+  if (
+    !isValidPhpType(raw, {
+      type: fieldInfo.type,
+      required: false,
+      isList: false,
+      nullable: false,
+    })
+  ) {
+    diags.push(
+      new vscode.Diagnostic(
+        valueRange,
+        `"${operator}" expects a numeric value compatible with ${fieldInfo.type}, but got "${raw}".`,
+        vscode.DiagnosticSeverity.Error
+      )
+    );
+  }
+
+  // Additional validation: divide by zero check
+  if (operator === "divide") {
+    const numValue = parseFloat(raw);
+    if (numValue === 0) {
+      diags.push(
+        new vscode.Diagnostic(
+          valueRange,
+          `Cannot divide by zero.`,
+          vscode.DiagnosticSeverity.Error
+        )
+      );
+    }
+  }
+}
+
+function createAtomicOperatorCompletions(
+  context: CompletionContext,
+  fieldInfo: FieldInfo
+): vscode.CompletionItem[] {
+  const { pos, already, doc } = context;
+
+  // Only show atomic operators for numeric fields
+  const numericTypes = ["Int", "Float", "BigInt", "Decimal"];
+  if (!numericTypes.includes(fieldInfo.type)) {
+    return [];
+  }
+
+  return ATOMIC_NUMBER_OPERATORS.map((operator) => {
+    const item = new vscode.CompletionItem(
+      operator,
+      vscode.CompletionItemKind.Method
+    );
+
+    item.insertText = new vscode.SnippetString(`${operator}' => $0`);
+    item.documentation = new vscode.MarkdownString(
+      `**${operator}** - Atomic number operation\n\n` +
+        `Atomically ${operator} the field value.\n\n` +
+        `Example: \`'${operator}' => ${operator === "divide" ? "2" : "1"}\``
+    );
+    item.range = makeReplaceRange(doc, pos, already.length);
+    item.sortText = `0_${operator}`;
+
+    return item;
+  });
 }
