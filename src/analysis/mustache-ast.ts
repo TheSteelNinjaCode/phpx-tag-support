@@ -287,9 +287,95 @@ function findPhpVariableInterpolations(text: string): Array<[number, number]> {
 export function buildExclusionRanges(text: string): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
 
-  const heredocBlocks = extractHeredocBlocks(text);
+  const scriptPatterns = [
+    /<script\b[^>]*>([\s\S]*?)<\/script>/gi,
+    /&lt;script\b[^&>]*&gt;([\s\S]*?)&lt;\/script&gt;/gi,
+  ];
+
+  for (const pattern of scriptPatterns) {
+    for (const match of text.matchAll(pattern)) {
+      ranges.push([match.index!, match.index! + match[0].length]);
+    }
+  }
+
+  const stylePatterns = [
+    /<style\b[^>]*>([\s\S]*?)<\/style>/gi,
+    /&lt;style\b[^&>]*&gt;([\s\S]*?)&lt;\/style&gt;/gi,
+  ];
+
+  for (const pattern of stylePatterns) {
+    for (const match of text.matchAll(pattern)) {
+      ranges.push([match.index!, match.index! + match[0].length]);
+    }
+  }
 
   let pos = 0;
+  while (pos < text.length) {
+    const scriptMatch = text.slice(pos).match(/<script\b[^>]*>/i);
+    if (!scriptMatch || scriptMatch.index === undefined) break;
+
+    const scriptStart = pos + scriptMatch.index;
+    const scriptEnd = text.indexOf("</script>", scriptStart);
+
+    if (scriptEnd === -1) {
+      ranges.push([scriptStart, text.length]);
+      break;
+    }
+
+    pos = scriptStart + scriptMatch[0].length;
+  }
+
+  pos = 0;
+  while (pos < text.length) {
+    const scriptMatch = text.slice(pos).match(/&lt;script\b[^&>]*&gt;/i);
+    if (!scriptMatch || scriptMatch.index === undefined) break;
+
+    const scriptStart = pos + scriptMatch.index;
+    const scriptEnd = text.indexOf("&lt;/script&gt;", scriptStart);
+
+    if (scriptEnd === -1) {
+      ranges.push([scriptStart, text.length]);
+      break;
+    }
+
+    pos = scriptStart + scriptMatch[0].length;
+  }
+
+  pos = 0;
+  while (pos < text.length) {
+    const styleMatch = text.slice(pos).match(/<style\b[^>]*>/i);
+    if (!styleMatch || styleMatch.index === undefined) break;
+
+    const styleStart = pos + styleMatch.index;
+    const styleEnd = text.indexOf("</style>", styleStart);
+
+    if (styleEnd === -1) {
+      ranges.push([styleStart, text.length]);
+      break;
+    }
+
+    pos = styleStart + styleMatch[0].length;
+  }
+
+  pos = 0;
+  while (pos < text.length) {
+    const styleMatch = text.slice(pos).match(/&lt;style\b[^&>]*&gt;/i);
+    if (!styleMatch || styleMatch.index === undefined) break;
+
+    const styleStart = pos + styleMatch.index;
+    const styleEnd = text.indexOf("&lt;/style&gt;", styleStart);
+
+    if (styleEnd === -1) {
+      ranges.push([styleStart, text.length]);
+      break;
+    }
+
+    pos = styleStart + styleMatch[0].length;
+  }
+
+  const heredocBlocks = extractHeredocBlocks(text);
+
+  pos = 0;
   while (pos < text.length) {
     const openMatch = text.slice(pos).match(/<\?(?:php\b|=)?/);
     if (!openMatch || openMatch.index === undefined) break;
@@ -301,14 +387,11 @@ export function buildExclusionRanges(text: string): Array<[number, number]> {
     const closePos = text.indexOf("?>", afterOpen);
 
     if (closePos === -1) {
-      // No closing tag - exclude everything except heredocs
       if (heredocBlocks.length === 0) {
-        // No heredocs, exclude to end
         ranges.push([openPos, text.length]);
         break;
       }
 
-      // Find heredocs after this point
       const relevantHeredocs = heredocBlocks.filter(
         (h) => h.start >= afterOpen
       );
@@ -318,7 +401,6 @@ export function buildExclusionRanges(text: string): Array<[number, number]> {
         break;
       }
 
-      // Exclude PHP code between heredocs
       let currentPos = openPos;
       for (const heredoc of relevantHeredocs) {
         if (currentPos < heredoc.start) {
@@ -327,7 +409,6 @@ export function buildExclusionRanges(text: string): Array<[number, number]> {
         currentPos = heredoc.end;
       }
 
-      // Exclude after last heredoc to end
       if (currentPos < text.length) {
         ranges.push([currentPos, text.length]);
       }
@@ -335,20 +416,16 @@ export function buildExclusionRanges(text: string): Array<[number, number]> {
       break;
     }
 
-    // Has closing tag
     const blockStart = openPos;
     const blockEnd = closePos + 2;
 
-    // Find heredocs in this block
     const blockHeredocs = heredocBlocks.filter(
       (h) => h.start >= blockStart && h.end <= blockEnd
     );
 
     if (blockHeredocs.length === 0) {
-      // No heredocs in block, exclude entire block
       ranges.push([blockStart, blockEnd]);
     } else {
-      // Exclude PHP code but not heredocs
       let currentPos = blockStart;
       for (const heredoc of blockHeredocs) {
         if (currentPos < heredoc.start) {
@@ -367,15 +444,25 @@ export function buildExclusionRanges(text: string): Array<[number, number]> {
   const phpVars = findPhpVariableInterpolations(text);
   ranges.push(...phpVars);
 
-  const scriptRegex = /<script\b[^>]*>[\s\S]*?<\/script>/gi;
-  for (const match of text.matchAll(scriptRegex)) {
-    ranges.push([match.index!, match.index! + match[0].length]);
+  return mergeRanges(ranges);
+}
+
+function mergeRanges(ranges: Array<[number, number]>): Array<[number, number]> {
+  if (ranges.length === 0) return [];
+
+  const sorted = ranges.slice().sort((a, b) => a[0] - b[0]);
+  const merged: Array<[number, number]> = [sorted[0]];
+
+  for (let i = 1; i < sorted.length; i++) {
+    const current = sorted[i];
+    const last = merged[merged.length - 1];
+
+    if (current[0] <= last[1]) {
+      last[1] = Math.max(last[1], current[1]);
+    } else {
+      merged.push(current);
+    }
   }
 
-  const styleRegex = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
-  for (const match of text.matchAll(styleRegex)) {
-    ranges.push([match.index!, match.index! + match[0].length]);
-  }
-
-  return ranges;
+  return merged;
 }
