@@ -273,7 +273,6 @@ function extractHeredocBlocks(
 
 function findPhpVariableInterpolations(text: string): Array<[number, number]> {
   const phpVarRanges: Array<[number, number]> = [];
-  // Pattern matches {$var}, {$this->prop}, {$obj->method()}, etc.
   const phpVarRegex = /\{\$[^}]+\}/g;
 
   let match: RegExpExecArray | null;
@@ -289,7 +288,7 @@ export function buildExclusionRanges(text: string): Array<[number, number]> {
 
   const scriptPatterns = [
     /<script\b[^>]*>([\s\S]*?)<\/script>/gi,
-    /&lt;script\b[^&>]*&gt;([\s\S]*?)&lt;\/script&gt;/gi,
+    /&lt;script\b.*?&gt;([\s\S]*?)&lt;\/script&gt;/gi,
   ];
 
   for (const pattern of scriptPatterns) {
@@ -300,7 +299,7 @@ export function buildExclusionRanges(text: string): Array<[number, number]> {
 
   const stylePatterns = [
     /<style\b[^>]*>([\s\S]*?)<\/style>/gi,
-    /&lt;style\b[^&>]*&gt;([\s\S]*?)&lt;\/style&gt;/gi,
+    /&lt;style\b.*?&gt;([\s\S]*?)&lt;\/style&gt;/gi,
   ];
 
   for (const pattern of stylePatterns) {
@@ -327,7 +326,7 @@ export function buildExclusionRanges(text: string): Array<[number, number]> {
 
   pos = 0;
   while (pos < text.length) {
-    const scriptMatch = text.slice(pos).match(/&lt;script\b[^&>]*&gt;/i);
+    const scriptMatch = text.slice(pos).match(/&lt;script\b.*?&gt;/i);
     if (!scriptMatch || scriptMatch.index === undefined) break;
 
     const scriptStart = pos + scriptMatch.index;
@@ -359,7 +358,7 @@ export function buildExclusionRanges(text: string): Array<[number, number]> {
 
   pos = 0;
   while (pos < text.length) {
-    const styleMatch = text.slice(pos).match(/&lt;style\b[^&>]*&gt;/i);
+    const styleMatch = text.slice(pos).match(/&lt;style\b.*?&gt;/i);
     if (!styleMatch || styleMatch.index === undefined) break;
 
     const styleStart = pos + styleMatch.index;

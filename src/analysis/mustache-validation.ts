@@ -31,6 +31,10 @@ export function validateMustacheExpressions(
   const diagnostics: vscode.Diagnostic[] = [];
 
   for (const expr of expressions) {
+    if (isInsidePpIgnoreElement(text, expr.startOffset)) {
+      continue;
+    }
+
     if (isJavaScriptObjectLiteral(expr.inner)) {
       continue;
     }
@@ -68,6 +72,53 @@ export function validateMustacheExpressions(
   }
 
   return diagnostics;
+}
+
+function isInsidePpIgnoreElement(text: string, offset: number): boolean {
+  const beforeOffset = text.substring(0, offset);
+
+  const tagPattern = /<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>/g;
+  const closingPattern = /<\/([a-zA-Z][a-zA-Z0-9]*)>/g;
+
+  const openTags: Array<{ tag: string; hasIgnore: boolean; start: number }> =
+    [];
+
+  let match: RegExpExecArray | null;
+
+  while ((match = tagPattern.exec(beforeOffset)) !== null) {
+    const tagName = match[1];
+    const attributes = match[2];
+    const hasIgnore = /pp-ignore\s*=\s*["']true["']/.test(attributes);
+
+    openTags.push({
+      tag: tagName,
+      hasIgnore,
+      start: match.index,
+    });
+  }
+
+  const closingMatches: Array<{ tag: string; index: number }> = [];
+  while ((match = closingPattern.exec(beforeOffset)) !== null) {
+    closingMatches.push({
+      tag: match[1],
+      index: match.index,
+    });
+  }
+
+  for (let i = closingMatches.length - 1; i >= 0; i--) {
+    const closing = closingMatches[i];
+    for (let j = openTags.length - 1; j >= 0; j--) {
+      if (
+        openTags[j].tag === closing.tag &&
+        openTags[j].start < closing.index
+      ) {
+        openTags.splice(j, 1);
+        break;
+      }
+    }
+  }
+
+  return openTags.some((tag) => tag.hasIgnore);
 }
 
 function isJavaScriptObjectLiteral(inner: string): boolean {
