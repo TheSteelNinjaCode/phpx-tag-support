@@ -16,6 +16,13 @@ export const ATTRS: readonly AttrDoc[] = [
     snippet: 'pp-loading-content="true"',
   },
   {
+    label: "pp-reset-scroll",
+    blurb:
+      "Resets the scroll position to the top of the page when navigating to a new route.",
+    mdExtra: `[Full docs](https://prismaphp.tsnc.tech/docs?doc=fc-reset-scroll)`,
+    snippet: 'pp-reset-scroll="true"',
+  },
+  {
     label: "key",
     blurb:
       "Unique key for an element, used for list rendering and DOM diffing optimizations.",
