@@ -804,6 +804,41 @@ export async function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
       vscode.languages.registerCompletionItemProvider(
+        { language: "php", scheme: "file" },
+        {
+          provideCompletionItems(document, position) {
+            const line = document.lineAt(position.line).text;
+            const beforeCursor = line.slice(0, position.character);
+
+            if (beforeCursor.endsWith("<!")) {
+              const item = new vscode.CompletionItem(
+                "![CDATA[",
+                vscode.CompletionItemKind.Snippet
+              );
+
+              const replaceStart = position.translate(0, -1);
+              const replaceRange = new vscode.Range(replaceStart, position);
+
+              item.insertText = new vscode.SnippetString("![CDATA[$0]]>");
+              item.range = replaceRange;
+              item.detail = "XML CDATA Section";
+              item.documentation = new vscode.MarkdownString(
+                "Insert a CDATA section to escape special characters in XML/HTML content"
+              );
+              item.sortText = "0";
+
+              return [item];
+            }
+
+            return undefined;
+          },
+        },
+        "!"
+      )
+    );
+
+    context.subscriptions.push(
+      vscode.languages.registerCompletionItemProvider(
         { language: "php" },
         {
           provideCompletionItems(doc, pos) {
@@ -1254,6 +1289,35 @@ export async function activate(context: vscode.ExtensionContext) {
       registerAttributeValueCompletionProvider(propsProvider)
     );
 
+    const fetchFunctionCompletionProvider =
+      new FetchFunctionCompletionProvider();
+    const fetchFunctionDefinitionProvider =
+      new FetchFunctionDefinitionProvider();
+    const fetchFunctionHoverProvider = new FetchFunctionHoverProvider();
+    const fetchFunctionDiagnosticProvider =
+      new FetchFunctionDiagnosticProvider();
+
+    context.subscriptions.push(
+      vscode.languages.registerCompletionItemProvider(
+        { language: "php", scheme: "file" },
+        fetchFunctionCompletionProvider,
+        "'",
+        '"'
+      ),
+      vscode.languages.registerDefinitionProvider(
+        { language: "php", scheme: "file" },
+        fetchFunctionDefinitionProvider
+      ),
+      vscode.languages.registerHoverProvider(
+        { language: "php", scheme: "file" },
+        fetchFunctionHoverProvider
+      )
+    );
+
+    const fetchFunctionDiagnostics =
+      vscode.languages.createDiagnosticCollection("fetch-function");
+    context.subscriptions.push(fetchFunctionDiagnostics);
+
     const createDiags =
       vscode.languages.createDiagnosticCollection("prisma-create");
     const readDiags =
@@ -1612,13 +1676,6 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.workspace.textDocuments.forEach(updateDiagnostics);
 
     context.subscriptions.push(
-      vscode.commands.registerCommand("phpx-tag-support.refreshRoutes", () => {
-        refreshRoutes();
-        vscode.window.showInformationMessage("Routes refreshed!");
-      })
-    );
-
-    context.subscriptions.push(
       vscode.commands.registerCommand("phpx-tag-support.showRoutes", () => {
         const routes = routeProvider.getRoutes();
         const routeList = routes
@@ -1631,35 +1688,6 @@ export async function activate(context: vscode.ExtensionContext) {
         );
       })
     );
-
-    const fetchFunctionCompletionProvider =
-      new FetchFunctionCompletionProvider();
-    const fetchFunctionDefinitionProvider =
-      new FetchFunctionDefinitionProvider();
-    const fetchFunctionHoverProvider = new FetchFunctionHoverProvider();
-    const fetchFunctionDiagnosticProvider =
-      new FetchFunctionDiagnosticProvider();
-
-    context.subscriptions.push(
-      vscode.languages.registerCompletionItemProvider(
-        { language: "php", scheme: "file" },
-        fetchFunctionCompletionProvider,
-        "'",
-        '"'
-      ),
-      vscode.languages.registerDefinitionProvider(
-        { language: "php", scheme: "file" },
-        fetchFunctionDefinitionProvider
-      ),
-      vscode.languages.registerHoverProvider(
-        { language: "php", scheme: "file" },
-        fetchFunctionHoverProvider
-      )
-    );
-
-    const fetchFunctionDiagnostics =
-      vscode.languages.createDiagnosticCollection("fetch-function");
-    context.subscriptions.push(fetchFunctionDiagnostics);
 
     context.subscriptions.push(
       braceDecorationType,
