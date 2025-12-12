@@ -98,7 +98,21 @@ let classStubs: Record<
   SearchParamsManager: [],
 };
 let globalStubs: Record<string, string[]> = {};
-let globalStubTypes: Record<string, ts.TypeLiteralNode | ts.TypeNode> = {};
+let mustacheStubs: Record<string, string[]> = {};
+let mustacheStubTypes: Record<string, ts.TypeLiteralNode | ts.TypeNode> = {};
+let globalFunctionStubs: Record<string, string[]> = {};
+let globalFunctionTypes: Record<string, ts.TypeNode | ts.TypeLiteralNode> = {};
+
+function getGlobalStubs(): Record<string, string[]> {
+  return { ...mustacheStubs, ...globalFunctionStubs };
+}
+
+function getGlobalStubTypes(): Record<
+  string,
+  ts.TypeNode | ts.TypeLiteralNode
+> {
+  return { ...mustacheStubTypes, ...globalFunctionTypes };
+}
 
 const PHP_TAG_REGEX = /<\/?[A-Z][A-Za-z0-9]*/;
 const HEREDOC_PATTERN =
@@ -252,8 +266,8 @@ export function parseGlobalsWithTS(source: string) {
     true
   );
 
-  globalStubs = {};
-  globalStubTypes = {};
+  mustacheStubs = {};
+  mustacheStubTypes = {};
 
   const simpleTypes = new Map<string, string>();
 
@@ -270,22 +284,65 @@ export function parseGlobalsWithTS(source: string) {
         const type = decl.type;
 
         if (type && ts.isTypeLiteralNode(type)) {
-          globalStubs[name] = type.members
+          mustacheStubs[name] = type.members
             .filter(ts.isPropertySignature)
             .map((ps) => (ps.name as ts.Identifier).text);
-          globalStubTypes[name] = type;
+          mustacheStubTypes[name] = type;
         } else if (type) {
-          globalStubs[name] = [];
-          globalStubTypes[name] = type;
+          mustacheStubs[name] = [];
+          mustacheStubTypes[name] = type;
           simpleTypes.set(name, type.getText());
         } else {
-          globalStubs[name] = [];
+          mustacheStubs[name] = [];
         }
       }
     }
   });
 
-  updateTypeCacheFromTS(globalStubTypes);
+  updateTypeCacheFromTS(getGlobalStubTypes());
+  updateTypeCacheFromSimpleTypes(simpleTypes);
+}
+
+export function parseGlobalFunctionsWithTS(source: string) {
+  const sf = ts.createSourceFile(
+    "global-functions.d.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true
+  );
+
+  globalFunctionStubs = {};
+  globalFunctionTypes = {};
+  const simpleTypes = new Map<string, string>();
+
+  sf.forEachChild((node) => {
+    if (
+      ts.isModuleDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === "global" &&
+      node.body &&
+      ts.isModuleBlock(node.body)
+    ) {
+      node.body.statements.forEach((stmt) => {
+        if (ts.isVariableStatement(stmt)) {
+          for (const decl of stmt.declarationList.declarations) {
+            if (ts.isIdentifier(decl.name)) {
+              const name = decl.name.text;
+              const type = decl.type;
+
+              if (type) {
+                globalFunctionTypes[name] = type;
+                globalFunctionStubs[name] = [];
+                simpleTypes.set(name, type.getText());
+              }
+            }
+          }
+        }
+      });
+    }
+  });
+
+  updateTypeCacheFromTS(getGlobalStubTypes());
   updateTypeCacheFromSimpleTypes(simpleTypes);
 }
 
@@ -582,6 +639,8 @@ function extractPhpBlockRanges(
 export async function activate(context: vscode.ExtensionContext) {
   try {
     const folders = vscode.workspace.workspaceFolders;
+    const selector: vscode.DocumentSelector = [{ language: "php" }];
+
     if (!folders || folders.length === 0) {
       return;
     }
@@ -683,6 +742,196 @@ export async function activate(context: vscode.ExtensionContext) {
 
     stubWatcher.onDidChange(reloadMustacheStubs, null, context.subscriptions);
     stubWatcher.onDidCreate(reloadMustacheStubs, null, context.subscriptions);
+
+    const globalFunctionsPath = path.join(
+      wsFolder.uri.fsPath,
+      ".pp",
+      "global-functions.d.ts"
+    );
+
+    try {
+      if (!fs.existsSync(globalFunctionsPath)) {
+        const defaultContent = "// Auto-generated global functions\n";
+        fs.writeFileSync(globalFunctionsPath, defaultContent, "utf8");
+      }
+
+      const globalFunctionsText = fs.readFileSync(globalFunctionsPath, "utf8");
+      parseGlobalFunctionsWithTS(globalFunctionsText);
+    } catch (err) {
+      console.warn(
+        `Failed to initialize global functions: ${err}. Continuing with empty stubs.`
+      );
+      parseGlobalFunctionsWithTS("");
+    }
+
+    const globalFunctionsPattern = new vscode.RelativePattern(
+      wsFolder,
+      ".pp/global-functions.d.ts"
+    );
+    const globalFunctionsWatcher = vscode.workspace.createFileSystemWatcher(
+      globalFunctionsPattern
+    );
+    context.subscriptions.push(globalFunctionsWatcher);
+
+    const reloadGlobalFunctions = (uri?: vscode.Uri) => {
+      try {
+        const fsPath = uri?.fsPath ?? globalFunctionsPath;
+        const next = fs.readFileSync(fsPath, "utf8");
+        parseGlobalFunctionsWithTS(next);
+      } catch (e) {
+        console.error("Failed to reload global-functions.d.ts", e);
+      }
+    };
+
+    globalFunctionsWatcher.onDidChange(
+      reloadGlobalFunctions,
+      null,
+      context.subscriptions
+    );
+    globalFunctionsWatcher.onDidCreate(
+      reloadGlobalFunctions,
+      null,
+      context.subscriptions
+    );
+
+    context.subscriptions.push(
+      vscode.languages.registerCompletionItemProvider(
+        selector,
+        {
+          provideCompletionItems(document, position) {
+            if (!insideMustache(document, position)) {
+              return undefined;
+            }
+
+            const line = document
+              .lineAt(position.line)
+              .text.slice(0, position.character);
+
+            const propMatch = /([A-Za-z_$]\w*)\.(\w*)$/.exec(line);
+            if (propMatch) {
+              const [, root, partial] = propMatch;
+              const props = globalStubs[root] || [];
+              return props
+                .filter((p) => p.startsWith(partial))
+                .map(
+                  (p) =>
+                    new vscode.CompletionItem(
+                      p,
+                      vscode.CompletionItemKind.Property
+                    )
+                );
+            }
+
+            const rootMatch = /([A-Za-z_$]\w*)$/.exec(line);
+            if (rootMatch) {
+              const prefix = rootMatch[1];
+              const items: vscode.CompletionItem[] = [];
+
+              const allStubs = getGlobalStubs();
+
+              Object.keys(allStubs)
+                .filter((v) => v.startsWith(prefix))
+                .forEach((v) => {
+                  const typeNode = globalFunctionTypes[v];
+                  const kind = vscode.CompletionItemKind.Function;
+
+                  const item = new vscode.CompletionItem(v, kind);
+
+                  if (typeNode) {
+                    item.detail = typeNode.getText();
+                  }
+
+                  item.insertText = new vscode.SnippetString(`${v}($0)`);
+                  items.push(item);
+                });
+
+              return items;
+            }
+
+            console.log("⚠️ No match found");
+            return undefined;
+          },
+        },
+        "{",
+        ..."abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$".split("")
+      )
+    );
+
+    context.subscriptions.push(
+      vscode.languages.registerHoverProvider(selector, {
+        provideHover(doc, pos) {
+          const inMustache = insideMustache(doc, pos);
+          const inScript = insideScript(doc, pos);
+
+          if (!inMustache && !inScript) {
+            return;
+          }
+
+          const wr = doc.getWordRangeAtPosition(pos, /[A-Za-z_$][\w$]*/);
+          if (!wr) {
+            return;
+          }
+
+          const word = doc.getText(wr);
+          const typeNode = globalFunctionTypes[word];
+
+          if (!typeNode) {
+            return;
+          }
+
+          const md = new vscode.MarkdownString();
+          md.appendCodeblock(
+            `const ${word}: ${typeNode.getText()}`,
+            "typescript"
+          );
+          md.appendMarkdown("\n\n*Global function/variable*");
+
+          return new vscode.Hover(md, wr);
+        },
+      })
+    );
+
+    context.subscriptions.push(
+      vscode.languages.registerSignatureHelpProvider(
+        selector,
+        {
+          provideSignatureHelp(doc, pos) {
+            const inMustache = insideMustache(doc, pos);
+            const inScript = insideScript(doc, pos);
+
+            if (!inMustache && !inScript) {
+              return null;
+            }
+
+            const line = doc.lineAt(pos.line).text.slice(0, pos.character);
+            const m = /([A-Za-z_$][\w$]*)\($/.exec(line);
+
+            if (!m) {
+              return null;
+            }
+
+            const funcName = m[1];
+            const typeNode = globalFunctionTypes[funcName];
+
+            if (!typeNode) {
+              return null;
+            }
+
+            const typeText = typeNode.getText();
+            const sig = new SignatureInformation(`${funcName}: ${typeText}`);
+
+            const help = new SignatureHelp();
+            help.signatures = [sig];
+            help.activeSignature = 0;
+            help.activeParameter = 0;
+
+            return help;
+          },
+        },
+        "(",
+        ","
+      )
+    );
 
     const stubPath = context.asAbsolutePath("resources/types/pphp.d.txt");
     const stubText = fs.readFileSync(stubPath, "utf8");
@@ -1104,8 +1353,6 @@ export async function activate(context: vscode.ExtensionContext) {
     const pphpSigDiags =
       vscode.languages.createDiagnosticCollection("pphp-signatures");
     context.subscriptions.push(pphpSigDiags);
-
-    const selector: vscode.DocumentSelector = [{ language: "php" }];
 
     context.subscriptions.push(
       vscode.languages.registerCompletionItemProvider(
@@ -2356,7 +2603,29 @@ const registerPhpScriptCompletionProvider = () =>
 
         const prefix = uptoCursor.match(/([A-Za-z_]*)$/)?.[1] ?? "";
         if (prefix.length) {
-          return variableItems(prefix);
+          const items: vscode.CompletionItem[] = [];
+
+          items.push(...variableItems(prefix));
+
+          const allStubs = getGlobalStubs();
+          Object.keys(allStubs)
+            .filter((v) => v.startsWith(prefix))
+            .forEach((v) => {
+              const typeNode = globalFunctionTypes[v];
+              const item = new vscode.CompletionItem(
+                v,
+                vscode.CompletionItemKind.Function
+              );
+
+              if (typeNode) {
+                item.detail = typeNode.getText();
+              }
+
+              item.insertText = new vscode.SnippetString(`${v}($0)`);
+              items.push(item);
+            });
+
+          return items;
         }
 
         return;
