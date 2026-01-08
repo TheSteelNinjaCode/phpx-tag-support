@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "scopeName": "text.caspian.mustache.injection",
+  "injectionSelector": "L:text.html -comment, L:source.php -comment",
+  "patterns": [
+    {
+      "name": "meta.embedded.expression.caspian",
+      "begin": "(?<!\\$)\\{(?!\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.template-expression.begin.js" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.template-expression.end.js" }
+      },
+      "contentName": "source.js",
+      "patterns": [{ "include": "source.js" }]
+    }
+  ]
+}

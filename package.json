@@ -11,30 +11,30 @@
     "Other"
   ],
   "activationEvents": [
-    "onLanguage:php",
     "workspaceContains:prisma-php.json"
   ],
   "icon": "icon.png",
   "main": "./out/extension.js",
   "contributes": {
+    "grammars": [
+      {
+        "scopeName": "text.caspian.mustache.injection",
+        "path": "./syntaxes/prisma-php.tmLanguage.json",
+        "injectTo": [
+          "text.html.basic",
+          "text.html.derivative",
+          "text.html.php",
+          "source.php"
+        ],
+        "embeddedLanguages": {
+          "source.js": "javascript"
+        }
+      }
+    ],
     "commands": [
       {
-        "command": "phpx-tag-support.hoverProvider",
-        "title": "PHPX: Show Tag Info"
-      },
-      {
-        "command": "phpx-tag-support.peekTagDefinition",
-        "title": "PHPX: Peek Tag Definition"
-      },
-      {
-        "command": "phpx-tag-support.refreshRoutes",
-        "title": "Refresh Routes",
-        "category": "PHPX"
-      },
-      {
-        "command": "phpx-tag-support.showRoutes",
-        "title": "Show All Available Routes",
-        "category": "PHPX"
+        "command": "pphp.init",
+        "title": "Initialize Prisma PHP"
       }
     ]
   },
@@ -46,17 +46,6 @@
     "lint": "eslint src",
     "test": "vscode-test"
   },
-  "devDependencies": {
-    "@types/acorn": "^4.0.6",
-    "@types/mocha": "^10.0.10",
-    "@types/node": "20.x",
-    "@types/vscode": "^1.98.0",
-    "@typescript-eslint/eslint-plugin": "^8.28.0",
-    "@typescript-eslint/parser": "^8.28.0",
-    "@vscode/test-cli": "^0.0.10",
-    "@vscode/test-electron": "^2.4.1",
-    "eslint": "^9.23.0"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/TheSteelNinjaCode/phpx-tag-support.git"
@@ -66,11 +55,21 @@
   },
   "homepage": "https://prismaphp.tsnc.tech/",
   "license": "MIT",
+  "devDependencies": {
+    "@types/babel__parser": "^7.0.0",
+    "@types/babel__traverse": "^7.28.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@types/vscode": "^1.107.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
+    "eslint": "^9.39.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.1"
+  },
   "dependencies": {
-    "acorn": "^8.15.0",
-    "acorn-walk": "^8.3.4",
-    "fast-xml-parser": "^5.2.1",
-    "php-parser": "^3.2.3",
-    "typescript": "^5.8.3"
+    "@babel/parser": "^7.28.5",
+    "@babel/traverse": "^7.28.5",
+    "node-html-parser": "^7.0.2"
   }
 }

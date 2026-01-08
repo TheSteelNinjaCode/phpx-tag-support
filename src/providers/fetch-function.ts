@@ -260,6 +260,46 @@ export class FetchFunctionHoverProvider implements vscode.HoverProvider {
 export class FetchFunctionDiagnosticProvider {
   validateDocument(document: vscode.TextDocument): vscode.Diagnostic[] {
     const diagnostics: vscode.Diagnostic[] = [];
+    const text = document.getText();
+
+    // 1. Get all available PHP functions in the document
+    const functions = extractPhpFunctions(document);
+    const validFunctionNames = new Set(functions.map((f) => f.name));
+
+    // 2. Regex to find all pp.fetchFunction calls
+    // Matches: pp.fetchFunction('name' or pp.fetchFunction("name"
+    const callRegex = /pp\.fetchFunction\s*\(\s*(['"])([^'"]+)\1/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = callRegex.exec(text)) !== null) {
+      const functionName = match[2];
+
+      // If the function doesn't exist in our PHP definitions
+      if (!validFunctionNames.has(functionName)) {
+        // Calculate the range of just the function name inside the quotes
+        // match[0] is the whole string: pp.fetchFunction('foo'
+        // We need to find where 'foo' starts inside that match
+        const fullMatchStr = match[0];
+        const nameStartIndexInMatch = fullMatchStr.lastIndexOf(functionName);
+
+        const startOffset = match.index + nameStartIndexInMatch;
+        const endOffset = startOffset + functionName.length;
+
+        const range = new vscode.Range(
+          document.positionAt(startOffset),
+          document.positionAt(endOffset)
+        );
+
+        const diagnostic = new vscode.Diagnostic(
+          range,
+          `PHP Function '${functionName}' not found or is private (starts with _).`,
+          vscode.DiagnosticSeverity.Error
+        );
+
+        diagnostic.source = "PulsePoint";
+        diagnostics.push(diagnostic);
+      }
+    }
 
     return diagnostics;
   }
