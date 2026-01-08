@@ -33,14 +33,53 @@ import {
 import { MustacheCompletionProvider } from "./providers/mustache-completion";
 import { PulseDefinitionProvider } from "./providers/go-to-definition";
 import { MustacheHoverProvider } from "./providers/mustache-hover";
-// Import the new snippet provider
 import { PhpxClassSnippetProvider } from "./providers/phpx-class-snippet";
+
+// --- Prisma ORM Imports ---
+import {
+  registerPrismaFieldProvider,
+  validateReadCall,
+  validateCreateCall,
+  validateUpdateCall,
+  validateDeleteCall,
+  validateUpsertCall,
+  validateGroupByCall,
+  validateAggregateCall,
+  clearPrismaSchemaCache,
+} from "./providers/prisma-orm";
+
+// --- Component Props Imports ---
+import {
+  ComponentPropsProvider,
+  validateComponentPropValues,
+  buildDynamicAttrItems,
+} from "./providers/component-props";
+
+// --- Component Import Imports ---
+import {
+  ComponentImportCodeActionProvider,
+  importComponentCommand,
+  validateMissingImports,
+  COMMAND_ADD_IMPORT,
+} from "./providers/component-import";
 
 // Modified: Only targeting PHP language ID
 const SELECTORS = {
   PHP: { language: "php" } as vscode.DocumentSelector,
   PLAINTEXT: { language: "plaintext" } as vscode.DocumentSelector,
 };
+
+// --- Globals for Component Props ---
+let componentsCache = new Map<string, string>(); // Tag -> FQCN
+let allProjectFiles: string[] = []; // List of all files from files-list.json
+const fileAnalysisCache = new Map<string, FileAnalysisCache>();
+
+interface FileAnalysisCache {
+  version: number;
+  hasMixedContent: boolean;
+  hasHeredocs: boolean;
+  heredocRanges: Array<{ start: number; end: number }>;
+}
 
 export function activate(context: vscode.ExtensionContext) {
   const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -59,21 +98,56 @@ export function activate(context: vscode.ExtensionContext) {
     console.log('Prisma PHP: Found "prisma-php.json". Extension active.');
   }
 
-  // Initialize Route Provider
+  // --- Initialize Route Provider ---
   const routeProvider = new RouteProvider(workspaceFolders[0]);
+
+  // --- Global File List Management (Shared by Routes & Component Props) ---
+  const filesListUri = vscode.Uri.joinPath(
+    workspaceFolders[0].uri,
+    "settings",
+    "files-list.json"
+  );
+
+  const updateFilesList = async () => {
+    try {
+      if (fs.existsSync(filesListUri.fsPath)) {
+        const content = await vscode.workspace.fs.readFile(filesListUri);
+        allProjectFiles = JSON.parse(Buffer.from(content).toString("utf8"));
+        routeProvider.refresh(); // Also refresh route provider
+      }
+    } catch (e) {
+      console.error("Error reading files-list.json:", e);
+    }
+  };
+
+  // Initial load
+  updateFilesList();
 
   // Watch for changes in files-list.json
   const fileListWatcher = vscode.workspace.createFileSystemWatcher(
     new vscode.RelativePattern(workspaceFolders[0], "settings/files-list.json")
   );
-  fileListWatcher.onDidChange(() => routeProvider.refresh());
-  fileListWatcher.onDidCreate(() => routeProvider.refresh());
-  fileListWatcher.onDidDelete(() => routeProvider.refresh());
+  fileListWatcher.onDidChange(updateFilesList);
+  fileListWatcher.onDidCreate(updateFilesList);
+  fileListWatcher.onDidDelete(updateFilesList);
   context.subscriptions.push(fileListWatcher);
+
+  // --- Watch class-log.json for Component Props ---
+  loadComponentsFromClassLog(); // Initial load
+  const classLogWatcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(workspaceFolders[0], "settings/class-log.json")
+  );
+  classLogWatcher.onDidChange(loadComponentsFromClassLog);
+  classLogWatcher.onDidCreate(loadComponentsFromClassLog);
+  classLogWatcher.onDidDelete(loadComponentsFromClassLog);
+  context.subscriptions.push(classLogWatcher);
 
   // Setup Features
   setupPPHPFeatures(context);
   setupRouteFeatures(context, routeProvider, workspaceFolders[0]);
+  setupPrismaFeatures(context, workspaceFolders[0]);
+  setupComponentPropsFeatures(context, rootPath);
+  setupComponentImportFeatures(context); // <--- New Component Import Setup
 
   // Note: Ensure your mustache validator also checks for 'php' languageId internally if needed
   registerMustacheValidator(context);
@@ -89,6 +163,313 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//   COMPONENT IMPORT FEATURE
+// ─────────────────────────────────────────────────────────────────────────────
+
+function setupComponentImportFeatures(context: vscode.ExtensionContext) {
+  // 1. Register Code Action Provider (The "Quick Fix" lightbulb)
+  context.subscriptions.push(
+    vscode.languages.registerCodeActionsProvider(
+      SELECTORS.PHP,
+      new ComponentImportCodeActionProvider(() => getComponentsFromClassLog()),
+      { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] }
+    )
+  );
+
+  // 2. Register the Command (Triggered by the Quick Fix)
+  context.subscriptions.push(
+    vscode.commands.registerCommand(COMMAND_ADD_IMPORT, importComponentCommand)
+  );
+
+  // 3. Register Diagnostics (Finds the missing imports)
+  const importDiagnostics =
+    vscode.languages.createDiagnosticCollection("pp-imports");
+
+  const updateDiagnostics = (doc: vscode.TextDocument) => {
+    const { shouldAnalyze } = shouldAnalyzeFile(doc);
+    validateMissingImports(doc, shouldAnalyze, importDiagnostics);
+  };
+
+  context.subscriptions.push(
+    importDiagnostics,
+    vscode.workspace.onDidOpenTextDocument(updateDiagnostics),
+    vscode.workspace.onDidSaveTextDocument(updateDiagnostics),
+    vscode.workspace.onDidChangeTextDocument((e) =>
+      updateDiagnostics(e.document)
+    )
+  );
+
+  // Initial validation
+  if (vscode.window.activeTextEditor) {
+    updateDiagnostics(vscode.window.activeTextEditor.document);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//   COMPONENT PROPS & ATTRIBUTES FEATURE
+// ─────────────────────────────────────────────────────────────────────────────
+
+function setupComponentPropsFeatures(
+  context: vscode.ExtensionContext,
+  rootPath: string
+) {
+  // 1. Define FQCN to File resolver using the global allProjectFiles list
+  const fqcnToFile = (fqcn: string): string | undefined => {
+    // Basic heuristic: Match ShortName.php
+    const shortName = fqcn.split("\\").pop();
+    if (!shortName) return undefined;
+
+    const expectedEnd = `/${shortName}.php`;
+    const foundRelative = allProjectFiles.find((f) => f.endsWith(expectedEnd));
+
+    if (foundRelative) {
+      // Remove leading ./ if present for path.join
+      const cleanRel = foundRelative.startsWith("./")
+        ? foundRelative.slice(2)
+        : foundRelative;
+      return path.join(rootPath, cleanRel);
+    }
+    return undefined;
+  };
+
+  // 2. Initialize Provider
+  const componentPropsProvider = new ComponentPropsProvider(
+    componentsCache,
+    fqcnToFile
+  );
+
+  // 3. Register Attribute Completion Provider
+  context.subscriptions.push(
+    vscode.languages.registerCompletionItemProvider(
+      SELECTORS.PHP,
+      {
+        provideCompletionItems(
+          document: vscode.TextDocument,
+          position: vscode.Position
+        ) {
+          const { shouldAnalyze } = shouldAnalyzeFile(document);
+          if (!shouldAnalyze) return undefined;
+
+          const linePrefix = document
+            .lineAt(position)
+            .text.substr(0, position.character);
+
+          const tagMatch = /<([A-Z][a-zA-Z0-9_]*)\s+([^>]*)$/.exec(linePrefix);
+
+          if (!tagMatch) {
+            return undefined;
+          }
+
+          const tagName = tagMatch[1];
+          const existingAttrsText = tagMatch[2];
+
+          const writtenAttributes = new Set<string>();
+          const attrRegex = /([a-zA-Z0-9_-]+)(?:=|$)/g;
+          let match;
+          while ((match = attrRegex.exec(existingAttrsText)) !== null) {
+            writtenAttributes.add(match[1]);
+          }
+
+          const isTypingNew = linePrefix.endsWith(" ");
+          const currentWord = isTypingNew
+            ? ""
+            : existingAttrsText.split(" ").pop() || "";
+
+          if (
+            existingAttrsText.match(/=[^"]*$/) ||
+            existingAttrsText.match(/=[^']*$/)
+          ) {
+            return undefined;
+          }
+
+          return buildDynamicAttrItems(
+            tagName,
+            writtenAttributes,
+            currentWord,
+            componentPropsProvider
+          );
+        },
+      },
+      " "
+    )
+  );
+
+  // 4. Register Diagnostics
+  const compPropsDiag =
+    vscode.languages.createDiagnosticCollection("pp-component-props");
+
+  const updateDiagnostics = (doc: vscode.TextDocument) => {
+    validateComponentPropValues(doc, componentPropsProvider);
+  };
+
+  context.subscriptions.push(
+    compPropsDiag,
+    vscode.workspace.onDidOpenTextDocument(updateDiagnostics),
+    vscode.workspace.onDidSaveTextDocument(updateDiagnostics),
+    vscode.workspace.onDidChangeTextDocument((e) =>
+      updateDiagnostics(e.document)
+    )
+  );
+
+  // Initial run
+  if (vscode.window.activeTextEditor) {
+    updateDiagnostics(vscode.window.activeTextEditor.document);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//   HELPER FUNCTIONS (File Analysis & Caching)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function loadComponentsFromClassLog(): Promise<void> {
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (!workspaceFolders || workspaceFolders.length === 0) {
+    return;
+  }
+  const workspaceFolder = workspaceFolders[0];
+  const jsonUri = vscode.Uri.joinPath(
+    workspaceFolder.uri,
+    "settings",
+    "class-log.json"
+  );
+  try {
+    if (fs.existsSync(jsonUri.fsPath)) {
+      const data = await vscode.workspace.fs.readFile(jsonUri);
+      const jsonStr = Buffer.from(data).toString("utf8").trim();
+      if (jsonStr) {
+        const jsonMapping = JSON.parse(jsonStr);
+        componentsCache.clear();
+        Object.keys(jsonMapping).forEach((fqcn) => {
+          const shortName = getLastPart(fqcn);
+          componentsCache.set(shortName, fqcn);
+        });
+      }
+    }
+  } catch (error) {
+    console.error("Error reading class-log.json:", error);
+  }
+}
+
+export function getComponentsFromClassLog(): Map<string, string> {
+  return componentsCache;
+}
+
+function getLastPart(fqcn: string): string {
+  return fqcn.split("\\").pop() || "";
+}
+
+export function shouldAnalyzeFile(document: vscode.TextDocument): {
+  shouldAnalyze: boolean;
+  cache: FileAnalysisCache;
+} {
+  const cached = fileAnalysisCache.get(document.uri.toString());
+
+  if (cached && cached.version === document.version) {
+    return {
+      shouldAnalyze: cached.hasMixedContent || cached.hasHeredocs,
+      cache: cached,
+    };
+  }
+
+  const text = document.getText();
+  const lineCount = document.lineCount;
+
+  if (lineCount > 5000) {
+    const cache: FileAnalysisCache = {
+      version: document.version,
+      hasMixedContent: false,
+      hasHeredocs: false,
+      heredocRanges: [],
+    };
+    fileAnalysisCache.set(document.uri.toString(), cache);
+    return { shouldAnalyze: false, cache };
+  }
+
+  const hasMixedContent = detectMixedContent(text);
+  const heredocInfo = detectHtmlHeredocs(text);
+
+  const cache: FileAnalysisCache = {
+    version: document.version,
+    hasMixedContent,
+    hasHeredocs: heredocInfo.length > 0,
+    heredocRanges: heredocInfo,
+  };
+
+  fileAnalysisCache.set(document.uri.toString(), cache);
+
+  return {
+    shouldAnalyze: hasMixedContent || heredocInfo.length > 0,
+    cache,
+  };
+}
+
+function detectMixedContent(text: string): boolean {
+  const htmlTagPattern =
+    /<(?:html|head|body|div|span|p|h[1-6]|a|img|ul|li|table|form|input|button|nav|header|footer|section|article|template|Fragment|[A-Z][A-Za-z0-9_]*)\b/i;
+
+  if (!htmlTagPattern.test(text)) {
+    return false;
+  }
+
+  const phpBlocks = extractPhpBlockRanges(text);
+  const htmlRegex =
+    /<(?:html|head|body|div|span|p|h[1-6]|a|img|ul|li|table|form|input|button|nav|header|footer|section|article|template|Fragment|[A-Z][A-Za-z0-9_]*)\b/gi;
+
+  let match: RegExpExecArray | null;
+  while ((match = htmlRegex.exec(text)) !== null) {
+    const matchIndex = match.index;
+    const isOutsidePhp = !phpBlocks.some(
+      (block) => matchIndex >= block.start && matchIndex < block.end
+    );
+
+    if (isOutsidePhp) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function detectHtmlHeredocs(
+  text: string
+): Array<{ start: number; end: number }> {
+  const heredocs: Array<{ start: number; end: number }> = [];
+
+  const heredocRegex =
+    /<<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\s*\2\s*;/gm;
+
+  let match: RegExpExecArray | null;
+  while ((match = heredocRegex.exec(text)) !== null) {
+    const content = match[3];
+    if (/<[a-z]/i.test(content)) {
+      const contentStart = match.index + match[0].indexOf(content);
+      heredocs.push({
+        start: contentStart,
+        end: contentStart + content.length,
+      });
+    }
+  }
+
+  return heredocs;
+}
+
+function extractPhpBlockRanges(
+  text: string
+): Array<{ start: number; end: number }> {
+  const ranges = [];
+  const regex = /<\?(?:php|=)[\s\S]*?\?>/gi;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    ranges.push({ start: match.index, end: match.index + match[0].length });
+  }
+  return ranges;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//   EXISTING FEATURES (PulsePoint, Routes, Prisma)
+// ─────────────────────────────────────────────────────────────────────────────
 
 function setupPPHPFeatures(context: vscode.ExtensionContext) {
   // --- Existing PulsePoint Features (PHP Only) ---
@@ -319,6 +700,89 @@ function setupRouteFeatures(
       new MustacheHoverProvider()
     )
   );
+}
+
+function setupPrismaFeatures(
+  context: vscode.ExtensionContext,
+  workspaceFolder: vscode.WorkspaceFolder
+) {
+  // 1. Register Auto-Completion
+  context.subscriptions.push(registerPrismaFieldProvider());
+
+  // 2. Schema Watching
+  const schemaWatcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(workspaceFolder, "settings/prisma-schema.json")
+  );
+
+  const reloadPrismaSchema = () => {
+    clearPrismaSchemaCache();
+    if (
+      vscode.window.activeTextEditor &&
+      vscode.window.activeTextEditor.document.languageId === "php"
+    ) {
+      updatePrismaDiagnostics(vscode.window.activeTextEditor.document);
+    }
+  };
+
+  schemaWatcher.onDidChange(reloadPrismaSchema);
+  schemaWatcher.onDidCreate(reloadPrismaSchema);
+  schemaWatcher.onDidDelete(reloadPrismaSchema);
+  context.subscriptions.push(schemaWatcher);
+
+  // 3. Register Diagnostics
+  const diagRead = vscode.languages.createDiagnosticCollection("prisma-read");
+  const diagCreate =
+    vscode.languages.createDiagnosticCollection("prisma-create");
+  const diagUpdate =
+    vscode.languages.createDiagnosticCollection("prisma-update");
+  const diagDelete =
+    vscode.languages.createDiagnosticCollection("prisma-delete");
+  const diagUpsert =
+    vscode.languages.createDiagnosticCollection("prisma-upsert");
+  const diagGroupBy =
+    vscode.languages.createDiagnosticCollection("prisma-groupby");
+  const diagAgg =
+    vscode.languages.createDiagnosticCollection("prisma-aggregate");
+
+  const updatePrismaDiagnostics = async (document: vscode.TextDocument) => {
+    if (document.languageId !== "php") {
+      diagRead.delete(document.uri);
+      diagCreate.delete(document.uri);
+      diagUpdate.delete(document.uri);
+      diagDelete.delete(document.uri);
+      diagUpsert.delete(document.uri);
+      diagGroupBy.delete(document.uri);
+      diagAgg.delete(document.uri);
+      return;
+    }
+
+    await validateReadCall(document, diagRead);
+    await validateCreateCall(document, diagCreate);
+    await validateUpdateCall(document, diagUpdate);
+    await validateDeleteCall(document, diagDelete);
+    await validateUpsertCall(document, diagUpsert);
+    await validateGroupByCall(document, diagGroupBy);
+    await validateAggregateCall(document, diagAgg);
+  };
+
+  context.subscriptions.push(
+    diagRead,
+    diagCreate,
+    diagUpdate,
+    diagDelete,
+    diagUpsert,
+    diagGroupBy,
+    diagAgg,
+    vscode.workspace.onDidOpenTextDocument(updatePrismaDiagnostics),
+    vscode.workspace.onDidSaveTextDocument(updatePrismaDiagnostics),
+    vscode.workspace.onDidChangeTextDocument((e) =>
+      updatePrismaDiagnostics(e.document)
+    )
+  );
+
+  if (vscode.window.activeTextEditor) {
+    updatePrismaDiagnostics(vscode.window.activeTextEditor.document);
+  }
 }
 
 export function deactivate() {}

@@ -14,93 +14,128 @@ export function registerMustacheValidator(context: vscode.ExtensionContext) {
     diagnosticCollection
   );
 
-  // Validate currently open documents
   vscode.workspace.textDocuments.forEach(validate);
 }
 
 function validate(document: vscode.TextDocument) {
-  // Ensure we validate PHP files (and HTML)
   if (document.languageId !== "html" && document.languageId !== "php") return;
 
   const text = document.getText();
   const diagnostics: vscode.Diagnostic[] = [];
-
-  // Use AST-based HTML parser
   const htmlDoc = parseHTMLDocument(text);
 
-  /**
-   * REGEX STRATEGY:
-   * 1. Match PHP tags first so we can IGNORE them.
-   * UPDATED: Matches `<?php` until `?>` OR End-of-File ($).
-   * This fixes the issue in Class files that do not have a closing PHP tag.
-   * 2. Match Heredocs explicitly to ensure we don't validate inside them.
-   * (Although usually inside PHP tags, this is a safety net).
-   * 3. Match PulsePoint syntax ({ ... }) to VALIDATE it.
-   */
-  const regex =
-    /(<\?(?:php|=)[\s\S]*?(?:\?>|$))|(<<<([a-zA-Z0-9_]+)[\s\S]*?\3;)|(\{([^{}]+)\})/gi;
+  // Regex boundaries: PHP Start, PHP End, Heredoc Start, Mustache Start
+  const boundaryRegex =
+    /(<\?(?:php|=))|(\?>)|(<<<['"]?([a-zA-Z0-9_]+)['"]?)|(\{)/g;
 
   let match;
+  let inPhp = false;
+  let inHeredoc = false;
+  let heredocTag = "";
 
-  while ((match = regex.exec(text)) !== null) {
-    // [1] is PHP Tag (<?php ... ?> or ...EOF)
-    // [2] is Heredoc (<<<HTML ... HTML;)
-    if (match[1] || match[2]) {
+  while ((match = boundaryRegex.exec(text)) !== null) {
+    const [phpStart, phpEnd, heredocStart, heredocId, mustacheStart] = match;
+
+    // 1. Enter PHP Mode
+    if (phpStart) {
+      inPhp = true;
       continue;
     }
 
-    // [4] is PulsePoint match: { ... }
-    // [5] is the inner expression: ...
-    const expr = match[5]?.trim();
-
-    // Ignore empty expressions
-    if (!expr) continue;
-
-    const pos = match.index;
-
-    // Check if position is inside <script>, <style>, or pp-ignore excluded regions
-    if (htmlDoc.isInsideExcludedRegion(pos)) {
+    // 2. Exit PHP Mode
+    if (phpEnd) {
+      inPhp = false;
+      inHeredoc = false;
       continue;
     }
 
-    // 3. Validate the JavaScript expression
-    const error = parseExpression(expr);
-    if (error) {
-      // Calculate range for the full PulsePoint match (match[4])
-      const start = document.positionAt(match.index);
-      const end = document.positionAt(match.index + match[0].length);
+    // 3. Enter Heredoc Mode
+    if (heredocStart && inPhp && !inHeredoc) {
+      inHeredoc = true;
+      heredocTag = heredocId;
+      continue;
+    }
 
-      diagnostics.push(
-        new vscode.Diagnostic(
-          new vscode.Range(start, end),
-          `Invalid JS: ${error}`,
-          vscode.DiagnosticSeverity.Error
-        )
-      );
+    // 4. Check for Heredoc End (Heuristic check)
+    if (inHeredoc) {
+      const restOfText = text.slice(0, match.index);
+      const lastHeredocClose = restOfText.lastIndexOf(`\n${heredocTag};`);
+      const lastHeredocStart = restOfText.lastIndexOf(`<<<`);
+
+      if (lastHeredocClose > lastHeredocStart) {
+        inHeredoc = false;
+      }
+    }
+
+    // 5. Handle Mustache Match '{'
+    if (mustacheStart) {
+      // VALIDATE IF: We are NOT in PHP, OR we ARE in PHP but INSIDE a Heredoc
+      const shouldValidate = !inPhp || (inPhp && inHeredoc);
+
+      if (shouldValidate) {
+        // FIX: Ignore PHP Complex Syntax "{$...}" immediately
+        // If the character immediately following '{' is '$', it's PHP interpolation.
+        if (text[match.index + 1] === "$") {
+          continue;
+        }
+
+        const exprMatch = extractBalancedBrace(text, match.index);
+
+        if (exprMatch) {
+          const { content, endPos } = exprMatch;
+
+          boundaryRegex.lastIndex = endPos;
+
+          if (content.trim() && !htmlDoc.isInsideExcludedRegion(match.index)) {
+            const error = parseExpression(content);
+            if (error) {
+              const start = document.positionAt(match.index);
+              const end = document.positionAt(endPos);
+              diagnostics.push(
+                new vscode.Diagnostic(
+                  new vscode.Range(start, end),
+                  `Invalid JS: ${error}`,
+                  vscode.DiagnosticSeverity.Error
+                )
+              );
+            }
+          }
+        }
+      }
     }
   }
 
   diagnosticCollection.set(document.uri, diagnostics);
 }
 
-/**
- * Validates the expression using Babel parser.
- * Supports Object Literals (e.g. { ...spread }) common in PulsePoint patterns.
- */
+function extractBalancedBrace(
+  text: string,
+  startIndex: number
+): { content: string; endPos: number } | null {
+  let balance = 0;
+  for (let i = startIndex; i < text.length; i++) {
+    if (text[i] === "{") balance++;
+    else if (text[i] === "}") balance--;
+
+    if (balance === 0) {
+      return {
+        content: text.substring(startIndex + 1, i),
+        endPos: i + 1,
+      };
+    }
+  }
+  return null;
+}
+
 function parseExpression(expr: string): string | null {
   try {
-    // Attempt 1: Standard expression validation
-    // Example: { user.name } -> parses as (user.name)
     parse(`(${expr})`, { sourceType: "module", plugins: ["jsx"] });
     return null;
   } catch (e: any) {
-    // Attempt 2: Object Literal / Spread Syntax Check
-    // Example: { ...props } -> parses as ({ ...props })
     try {
       parse(`({${expr}})`, { sourceType: "module", plugins: ["jsx"] });
       return null;
     } catch (e2) {
-      // Return the original error message
       return e.message?.split("\n")[0] || "Invalid syntax";
     }
   }
