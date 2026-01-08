@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "scopeName": "text.caspian.mustache.injection",
-  "injectionSelector": "L:text.html -comment, L:source.php -comment",
+  "injectionSelector": "L:text.html.php -meta.embedded.block.php, L:string.quoted.heredoc.php, L:string.quoted.nowdoc.php, L:meta.embedded.html",
   "patterns": [
     {
       "name": "meta.embedded.expression.caspian",

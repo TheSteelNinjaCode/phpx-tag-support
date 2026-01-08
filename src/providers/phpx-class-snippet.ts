@@ -28,8 +28,7 @@ export class PhpxClassSnippetProvider implements vscode.CompletionItemProvider {
     const namespace = this.resolveNamespace(document);
 
     // 3. Build Snippet
-    // Note: We perform double escaping for backslashes in the namespace because
-    // it goes into a template string, then into a SnippetString.
+    // Double escape backslashes for snippet engine
     const escapedNamespace = namespace.replace(/\\/g, "\\\\");
 
     item.insertText = new vscode.SnippetString(
@@ -122,11 +121,9 @@ class \${2:${className}} extends PHPX
         // Check if the current document is inside this source directory
         if (docPath.startsWith(absSrcPath)) {
           // Get the path relative to the source root
-          // e.g., if doc is .../app/View/Components/Alert.php and root is .../app/
-          // relative is View/Components/Alert.php
           const relativePath = path.relative(absSrcPath, docPath);
 
-          // Get the directory part: View/Components
+          // Get the directory part
           const directory = path.dirname(relativePath);
 
           // If the file is directly in the root, directory is "."
@@ -136,10 +133,15 @@ class \${2:${className}} extends PHPX
             subNamespace = directory.split(path.sep).join("\\");
           }
 
-          // Clean up the prefix (remove trailing backslash for joining)
+          // Clean up the prefix (remove trailing backslash)
           const cleanPrefix = prefix.endsWith("\\")
             ? prefix.slice(0, -1)
             : prefix;
+
+          // FIX: Handle empty prefix case (e.g., "" mapping) to prevent leading backslash
+          if (!cleanPrefix) {
+            return subNamespace;
+          }
 
           return subNamespace ? `${cleanPrefix}\\${subNamespace}` : cleanPrefix;
         }

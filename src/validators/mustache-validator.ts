@@ -30,27 +30,28 @@ function validate(document: vscode.TextDocument) {
 
   /**
    * REGEX STRATEGY:
-   * 1. Match PHP tags first (<?php ... ?> or <?= ... ?>) so we can IGNORE them.
-   * This prevents the validator from trying to parse curly braces inside PHP logic (e.g., if ($a) { ... }).
-   * 2. Match PulsePoint syntax ({ ... }) so we can VALIDATE it.
-   * * Capture Groups:
-   * [1] PHP Tag:       <? ... ?>
-   * [2] PulsePoint:    { ... }    (The full match including braces)
-   * [3] Expression:      ...      (The content inside the braces)
+   * 1. Match PHP tags first so we can IGNORE them.
+   * UPDATED: Matches `<?php` until `?>` OR End-of-File ($).
+   * This fixes the issue in Class files that do not have a closing PHP tag.
+   * 2. Match Heredocs explicitly to ensure we don't validate inside them.
+   * (Although usually inside PHP tags, this is a safety net).
+   * 3. Match PulsePoint syntax ({ ... }) to VALIDATE it.
    */
-  const regex = /(<\?(?:php|=)[\s\S]*?\?>)|(\{([^{}]+)\})/gi;
+  const regex =
+    /(<\?(?:php|=)[\s\S]*?(?:\?>|$))|(<<<([a-zA-Z0-9_]+)[\s\S]*?\3;)|(\{([^{}]+)\})/gi;
 
   let match;
 
   while ((match = regex.exec(text)) !== null) {
-    // 1. If match[1] exists, it is a PHP tag. Skip it.
-    if (match[1]) {
+    // [1] is PHP Tag (<?php ... ?> or ...EOF)
+    // [2] is Heredoc (<<<HTML ... HTML;)
+    if (match[1] || match[2]) {
       continue;
     }
 
-    // 2. Otherwise, it's a PulsePoint match.
-    // match[3] is the inner expression (content inside { }).
-    const expr = match[3]?.trim();
+    // [4] is PulsePoint match: { ... }
+    // [5] is the inner expression: ...
+    const expr = match[5]?.trim();
 
     // Ignore empty expressions
     if (!expr) continue;
@@ -65,7 +66,7 @@ function validate(document: vscode.TextDocument) {
     // 3. Validate the JavaScript expression
     const error = parseExpression(expr);
     if (error) {
-      // Calculate range for the full PulsePoint match (match[2])
+      // Calculate range for the full PulsePoint match (match[4])
       const start = document.positionAt(match.index);
       const end = document.positionAt(match.index + match[0].length);
 
