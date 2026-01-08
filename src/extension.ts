@@ -30,6 +30,11 @@ import {
   SrcDiagnosticProvider,
   SrcHoverProvider,
 } from "./providers/routes-completion";
+import { MustacheCompletionProvider } from "./providers/mustache-completion";
+import { PulseDefinitionProvider } from "./providers/go-to-definition";
+import { MustacheHoverProvider } from "./providers/mustache-hover";
+// Import the new snippet provider
+import { PhpxClassSnippetProvider } from "./providers/phpx-class-snippet";
 
 // Modified: Only targeting PHP language ID
 const SELECTORS = {
@@ -105,6 +110,21 @@ function setupPPHPFeatures(context: vscode.ExtensionContext) {
     )
   );
 
+  // --- Snippet Registration (PHP & Plaintext) ---
+  const phpxSnippetProvider = new PhpxClassSnippetProvider();
+  context.subscriptions.push(
+    // Register for PHP
+    vscode.languages.registerCompletionItemProvider(
+      SELECTORS.PHP,
+      phpxSnippetProvider
+    ),
+    // Register for Plaintext (Untitled files)
+    vscode.languages.registerCompletionItemProvider(
+      SELECTORS.PLAINTEXT,
+      phpxSnippetProvider
+    )
+  );
+
   // --- Fetch Function Features (PHP Only) ---
   const fetchFunctionCompletionProvider = new FetchFunctionCompletionProvider();
   const fetchFunctionDefinitionProvider = new FetchFunctionDefinitionProvider();
@@ -146,6 +166,10 @@ function setupPPHPFeatures(context: vscode.ExtensionContext) {
     vscode.languages.registerHoverProvider(
       SELECTORS.PHP,
       fetchFunctionHoverProvider
+    ),
+    vscode.languages.registerDefinitionProvider(
+      SELECTORS.PHP,
+      new PulseDefinitionProvider()
     )
   );
 }
@@ -283,6 +307,16 @@ function setupRouteFeatures(
     vscode.languages.registerDefinitionProvider(
       SELECTORS.PHP,
       scriptRedirectDefinition
+    ),
+    vscode.languages.registerCompletionItemProvider(
+      SELECTORS.PHP,
+      new MustacheCompletionProvider(),
+      "{",
+      "."
+    ),
+    vscode.languages.registerHoverProvider(
+      SELECTORS.PHP,
+      new MustacheHoverProvider()
     )
   );
 }
