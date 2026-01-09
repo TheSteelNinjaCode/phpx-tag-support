@@ -15,7 +15,7 @@ export interface HTMLRegion {
 
 export interface PulseStateVar {
   name: string;
-  type: "Boolean" | "Number" | "String" | "Object" | "Unknown";
+  type: "Boolean" | "Number" | "String" | "Object" | "Array" | "Unknown";
   keys?: string[];
   start: number;
   end: number;
@@ -26,12 +26,19 @@ export interface ParsedFunction {
   isStateSetter: boolean;
 }
 
+export interface LoopScope {
+  alias: string;
+  list: string;
+  region: HTMLRegion;
+}
+
 export interface ParsedHTMLDocument {
   scripts: HTMLRegion[];
   styles: HTMLRegion[];
   templates: HTMLRegion[];
   ignored: HTMLRegion[];
   getRegionAtOffset(offset: number): HTMLRegion | null;
+  getLoopScopeAtOffset(offset: number): LoopScope | null;
   isInsideScript(offset: number): boolean;
   isInsideStyle(offset: number): boolean;
   isInsidePpForTemplate(offset: number): boolean;
@@ -43,7 +50,6 @@ export interface ParsedHTMLDocument {
 // ============ MAIN PARSER ============
 
 export function parseHTMLDocument(text: string): ParsedHTMLDocument {
-  // Fix TS error by casting options to 'any'
   const root = parseHTML(text, {
     comment: true,
     lowerCaseTagName: true,
@@ -91,6 +97,30 @@ export function parseHTMLDocument(text: string): ParsedHTMLDocument {
       );
     },
 
+    getLoopScopeAtOffset(offset: number): LoopScope | null {
+      const matching = templates.filter(
+        (t) => offset >= t.start && offset < t.end
+      );
+
+      if (matching.length === 0) return null;
+
+      matching.sort((a, b) => a.end - a.start - (b.end - b.start));
+      const target = matching[0];
+
+      const ppFor = target.attributes?.["pp-for"];
+      if (!ppFor) return null;
+
+      // Parse "u in users"
+      const parts = ppFor.split(" in ");
+      if (parts.length !== 2) return null;
+
+      return {
+        alias: parts[0].trim(),
+        list: parts[1].trim(),
+        region: target,
+      };
+    },
+
     isInsideScript(offset: number): boolean {
       return scripts.some((r) => offset >= r.start && offset < r.end);
     },
@@ -127,7 +157,6 @@ function createRegion(
   type: HTMLRegion["type"],
   fullText: string
 ): HTMLRegion | null {
-  // Use 'any' to access 'range' which exists at runtime in v7.0.1
   const range = (el as any).range;
 
   if (range && Array.isArray(range)) {
@@ -140,8 +169,6 @@ function createRegion(
       tagName: el.tagName?.toLowerCase(),
     };
   }
-
-  // Fallback (Should rarely be reached with v7+)
   return null;
 }
 
@@ -180,7 +207,6 @@ export function parseScriptForState(fullText: string): PulseStateVar[] {
         const firstElement = id.elements[0];
         const varName = firstElement.name;
 
-        // [SAFETY] Force conversion to number or 0 to avoid NaN
         const start =
           typeof firstElement.start === "number" ? firstElement.start : 0;
         const end = typeof firstElement.end === "number" ? firstElement.end : 0;
@@ -201,6 +227,19 @@ export function parseScriptForState(fullText: string): PulseStateVar[] {
                 varKeys.push(prop.key.name);
               }
             });
+          }
+          else if (arg.type === "ArrayExpression") {
+            varType = "Array";
+            if (
+              arg.elements.length > 0 &&
+              arg.elements[0].type === "ObjectExpression"
+            ) {
+              arg.elements[0].properties.forEach((prop: any) => {
+                if (prop.key && prop.key.name) {
+                  varKeys.push(prop.key.name);
+                }
+              });
+            }
           }
         }
 
