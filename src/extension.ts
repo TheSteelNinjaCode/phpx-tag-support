@@ -79,6 +79,7 @@ import {
   validateMissingImports,
   COMMAND_ADD_IMPORT,
 } from "./providers/component-import";
+import { registerXmlValidator } from "./validators/xml-validator";
 
 // Modified: Only targeting PHP language ID
 const SELECTORS = {
@@ -176,6 +177,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Note: Ensure your mustache validator also checks for 'php' languageId internally if needed
   registerMustacheValidator(context);
+  registerXmlValidator(context);
 
   vscode.window.setStatusBarMessage("Prisma PHP Active", 3000);
 }

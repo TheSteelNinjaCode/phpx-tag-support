@@ -70,6 +70,7 @@
   "dependencies": {
     "@babel/parser": "^7.28.5",
     "@babel/traverse": "^7.28.5",
+    "fast-xml-parser": "^5.3.3",
     "node-html-parser": "^7.0.2",
     "php-parser": "^3.2.5"
   }
