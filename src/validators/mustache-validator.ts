@@ -22,85 +22,133 @@ function validate(document: vscode.TextDocument) {
 
   const text = document.getText();
   const diagnostics: vscode.Diagnostic[] = [];
-  const htmlDoc = parseHTMLDocument(text);
 
-  // Regex boundaries: PHP Start, PHP End, Heredoc Start, Mustache Start
+  // If your html-parser ever throws, don't kill validation entirely.
+  let htmlDoc: { isInsideExcludedRegion: (offset: number) => boolean };
+  try {
+    htmlDoc = parseHTMLDocument(text);
+  } catch {
+    htmlDoc = { isInsideExcludedRegion: () => false };
+  }
+
+  // Groups:
+  // 1) PHP start   (<\?(?:php|=))
+  // 2) PHP end     (\?>)
+  // 3) Heredoc     (<<< ... )
+  // 4) Heredoc id  ([a-zA-Z0-9_]+)
+  // 5) Mustache    (\{)
   const boundaryRegex =
     /(<\?(?:php|=))|(\?>)|(<<<['"]?([a-zA-Z0-9_]+)['"]?)|(\{)/g;
 
-  let match;
+  let match: RegExpExecArray | null;
   let inPhp = false;
   let inHeredoc = false;
   let heredocTag = "";
 
   while ((match = boundaryRegex.exec(text)) !== null) {
-    const [phpStart, phpEnd, heredocStart, heredocId, mustacheStart] = match;
+    // IMPORTANT: match[0] is full match; groups start at match[1]
+    const phpStart = match[1];
+    const phpEnd = match[2];
+    const heredocStart = match[3];
+    const heredocId = match[4];
+    const mustacheStart = match[5];
 
-    // 1. Enter PHP Mode
+    // 1) Enter PHP Mode
     if (phpStart) {
       inPhp = true;
       continue;
     }
 
-    // 2. Exit PHP Mode
+    // 2) Exit PHP Mode
     if (phpEnd) {
       inPhp = false;
       inHeredoc = false;
+      heredocTag = "";
       continue;
     }
 
-    // 3. Enter Heredoc Mode
+    // 3) Enter Heredoc Mode
     if (heredocStart && inPhp && !inHeredoc) {
       inHeredoc = true;
-      heredocTag = heredocId;
+      heredocTag = heredocId || "";
       continue;
     }
 
-    // 4. Check for Heredoc End (Heuristic check)
-    if (inHeredoc) {
+    // 4) Check for Heredoc End (heuristic)
+    if (inHeredoc && heredocTag) {
       const restOfText = text.slice(0, match.index);
-      const lastHeredocClose = restOfText.lastIndexOf(`\n${heredocTag};`);
-      const lastHeredocStart = restOfText.lastIndexOf(`<<<`);
-
-      if (lastHeredocClose > lastHeredocStart) {
+      // Common close forms:
+      //   \nTAG;
+      //   \nTAG
+      // plus optional whitespace
+      const closeRe = new RegExp(
+        `\\n\\s*${escapeRegExp(heredocTag)}\\s*;?\\s*$`,
+        "m"
+      );
+      // Only check the tail chunk to avoid scanning huge docs repeatedly
+      const tail = restOfText.slice(Math.max(0, restOfText.length - 2000));
+      if (closeRe.test(tail)) {
         inHeredoc = false;
       }
     }
 
-    // 5. Handle Mustache Match '{'
+    // 5) Handle Mustache '{'
     if (mustacheStart) {
-      // VALIDATE IF: We are NOT in PHP, OR we ARE in PHP but INSIDE a Heredoc
+      const startIndex = match.index;
+
+      // Validate IF: NOT in PHP, OR in PHP but inside a Heredoc
       const shouldValidate = !inPhp || (inPhp && inHeredoc);
+      if (!shouldValidate) continue;
 
-      if (shouldValidate) {
-        // FIX: Ignore PHP Complex Syntax "{$...}" immediately
-        // If the character immediately following '{' is '$', it's PHP interpolation.
-        if (text[match.index + 1] === "$") {
-          continue;
-        }
+      // Skip excluded regions early (script/style, etc.)
+      if (htmlDoc.isInsideExcludedRegion(startIndex)) continue;
 
-        const exprMatch = extractBalancedBrace(text, match.index);
+      const nextChar = text[startIndex + 1];
+      const prevChar = text[startIndex - 1];
 
-        if (exprMatch) {
-          const { content, endPos } = exprMatch;
+      // Ignore PHP complex syntax "{$...}"
+      if (nextChar === "$") continue;
 
-          boundaryRegex.lastIndex = endPos;
+      // Ignore handlebars/double-mustache "{{ ... }}"
+      if (nextChar === "{") continue;
 
-          if (content.trim() && !htmlDoc.isInsideExcludedRegion(match.index)) {
-            const error = parseExpression(content);
-            if (error) {
-              const start = document.positionAt(match.index);
-              const end = document.positionAt(endPos);
-              diagnostics.push(
-                new vscode.Diagnostic(
-                  new vscode.Range(start, end),
-                  `Invalid JS: ${error}`,
-                  vscode.DiagnosticSeverity.Error
-                )
-              );
-            }
-          }
-        }
+      // Ignore escaped brace "\{"
+      if (prevChar === "\\") continue;
+
+      const exprMatch = extractBalancedBrace(text, startIndex);
+
+      if (!exprMatch) {
+        // Unclosed mustache expression
+        const start = document.positionAt(startIndex);
+        const end = document.positionAt(Math.min(text.length, startIndex + 1));
+        diagnostics.push(
+          new vscode.Diagnostic(
+            new vscode.Range(start, end),
+            "Unclosed { ... } expression",
+            vscode.DiagnosticSeverity.Error
+          )
+        );
+        continue;
+      }
+
+      const { content, endPos } = exprMatch;
+
+      // Continue scanning after the closing brace
+      boundaryRegex.lastIndex = endPos;
+
+      if (!content.trim()) continue;
+
+      const error = parseExpression(content);
+      if (error) {
+        const start = document.positionAt(startIndex);
+        const end = document.positionAt(endPos);
+        diagnostics.push(
+          new vscode.Diagnostic(
+            new vscode.Range(start, end),
+            `Invalid JS: ${error}`,
+            vscode.DiagnosticSeverity.Error
+          )
+        );
       }
     }
   }
@@ -113,9 +161,85 @@ function extractBalancedBrace(
   startIndex: number
 ): { content: string; endPos: number } | null {
   let balance = 0;
+
+  // simple JS-aware scanning (avoid braces inside quotes/comments)
+  let inSingle = false;
+  let inDouble = false;
+  let inBacktick = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
   for (let i = startIndex; i < text.length; i++) {
-    if (text[i] === "{") balance++;
-    else if (text[i] === "}") balance--;
+    const c = text[i];
+    const n = text[i + 1];
+
+    if (inLineComment) {
+      if (c === "\n") inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (c === "*" && n === "/") {
+        inBlockComment = false;
+        i++;
+      }
+      continue;
+    }
+
+    // strings
+    if (inSingle) {
+      if (c === "\\") {
+        i++;
+        continue;
+      }
+      if (c === "'") inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      if (c === "\\") {
+        i++;
+        continue;
+      }
+      if (c === '"') inDouble = false;
+      continue;
+    }
+    if (inBacktick) {
+      if (c === "\\") {
+        i++;
+        continue;
+      }
+      if (c === "`") inBacktick = false;
+      continue;
+    }
+
+    // comment starts
+    if (c === "/" && n === "/") {
+      inLineComment = true;
+      i++;
+      continue;
+    }
+    if (c === "/" && n === "*") {
+      inBlockComment = true;
+      i++;
+      continue;
+    }
+
+    // string starts
+    if (c === "'") {
+      inSingle = true;
+      continue;
+    }
+    if (c === '"') {
+      inDouble = true;
+      continue;
+    }
+    if (c === "`") {
+      inBacktick = true;
+      continue;
+    }
+
+    // brace balance
+    if (c === "{") balance++;
+    else if (c === "}") balance--;
 
     if (balance === 0) {
       return {
@@ -124,6 +248,7 @@ function extractBalancedBrace(
       };
     }
   }
+
   return null;
 }
 
@@ -133,12 +258,17 @@ function parseExpression(expr: string): string | null {
     return null;
   } catch (e: any) {
     try {
+      // Allow attribute-like fragments: key="x", onClick={...}, etc.
       parse(`({${expr}})`, { sourceType: "module", plugins: ["jsx"] });
       return null;
-    } catch (e2) {
-      return e.message?.split("\n")[0] || "Invalid syntax";
+    } catch {
+      return e?.message?.split("\n")[0] || "Invalid syntax";
     }
   }
+}
+
+function escapeRegExp(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export function deactivate() {
