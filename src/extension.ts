@@ -1,16 +1,29 @@
 import path from "path";
 import * as vscode from "vscode";
 import fs from "fs";
+
+// --- PulsePoint Providers ---
 import { PulsePointAttributeCompletionProvider } from "./providers/pulsepoint-attributes-completion";
 import { PulsePointCompletionProvider } from "./providers/pulsepoint-methods-completion";
 import { PulsePointHoverProvider } from "./providers/pulsepoint-methods-hover";
+
+// --- Validators ---
 import { registerMustacheValidator } from "./validators/mustache-validator";
+
+// --- Global Functions (New) ---
+import { GlobalFunctionsLoader } from "./services/global-functions-loader";
+import { GlobalFunctionCompletionProvider } from "./providers/global-function-completion";
+import { GlobalFunctionHoverProvider } from "./providers/global-function-hover";
+
+// --- Fetch Function Providers ---
 import {
   FetchFunctionCompletionProvider,
   FetchFunctionDefinitionProvider,
   FetchFunctionDiagnosticProvider,
   FetchFunctionHoverProvider,
 } from "./providers/fetch-function";
+
+// --- Route Providers ---
 import {
   RouteProvider,
   HrefCompletionProvider,
@@ -30,9 +43,13 @@ import {
   SrcDiagnosticProvider,
   SrcHoverProvider,
 } from "./providers/routes-completion";
+
+// --- Mustache Providers ---
 import { MustacheCompletionProvider } from "./providers/mustache-completion";
 import { PulseDefinitionProvider } from "./providers/go-to-definition";
 import { MustacheHoverProvider } from "./providers/mustache-hover";
+
+// --- Snippet Providers ---
 import { PhpxClassSnippetProvider } from "./providers/phpx-class-snippet";
 
 // --- Prisma ORM Imports ---
@@ -101,6 +118,13 @@ export function activate(context: vscode.ExtensionContext) {
   // --- Initialize Route Provider ---
   const routeProvider = new RouteProvider(workspaceFolders[0]);
 
+  // --- Initialize Global Functions Loader (New) ---
+  // This starts watching .casp/global-functions.d.ts for changes
+  GlobalFunctionsLoader.getInstance().initialize(
+    context,
+    workspaceFolders[0].uri
+  );
+
   // --- Global File List Management (Shared by Routes & Component Props) ---
   const filesListUri = vscode.Uri.joinPath(
     workspaceFolders[0].uri,
@@ -147,20 +171,32 @@ export function activate(context: vscode.ExtensionContext) {
   setupRouteFeatures(context, routeProvider, workspaceFolders[0]);
   setupPrismaFeatures(context, workspaceFolders[0]);
   setupComponentPropsFeatures(context, rootPath);
-  setupComponentImportFeatures(context); // <--- New Component Import Setup
+  setupComponentImportFeatures(context);
+  setupGlobalFunctionFeatures(context);
 
   // Note: Ensure your mustache validator also checks for 'php' languageId internally if needed
   registerMustacheValidator(context);
 
+  vscode.window.setStatusBarMessage("Prisma PHP Active", 3000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//   GLOBAL FUNCTIONS FEATURE (New)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function setupGlobalFunctionFeatures(context: vscode.ExtensionContext) {
   context.subscriptions.push(
-    vscode.commands.registerCommand("pphp.init", async () => {
-      if (fs.existsSync(configPath)) {
-        vscode.window.showInformationMessage(
-          "prisma-php.json already exists in the workspace."
-        );
-        return;
-      }
-    })
+    // 1. Completion Provider for Global Functions
+    vscode.languages.registerCompletionItemProvider(
+      SELECTORS.PHP,
+      new GlobalFunctionCompletionProvider()
+    ),
+
+    // 2. Hover Provider for Global Functions
+    vscode.languages.registerHoverProvider(
+      SELECTORS.PHP,
+      new GlobalFunctionHoverProvider()
+    )
   );
 }
 
