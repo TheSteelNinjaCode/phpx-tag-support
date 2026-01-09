@@ -140,7 +140,7 @@ function runXmlValidation(
       if (!looksLikeDocument) {
         const prefix = "<__pp_fragment__>";
         const suffix = "</__pp_fragment__>";
-        const wrapped = prefix + safeContent + suffix;
+        const wrapped = prefix + contentForValidation + suffix;
 
         const wrappedResult = XMLValidator.validate(wrapped, options);
 
@@ -191,7 +191,8 @@ function runXmlValidation(
     // Normal XML error mapping
     if (err) {
       const absoluteOffset =
-        offsetAdjustment + offsetFromLineCol(safeContent, err.line, err.col);
+        offsetAdjustment +
+        offsetFromLineCol(contentForValidation, err.line, err.col);
 
       diagnostics.push(
         makeDiagnosticAtOffset(
