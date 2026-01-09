@@ -100,13 +100,15 @@ function validateHeredocs(
   return diagnostics;
 }
 
-/**
- * Validate XML/HTML-like fragments using fast-xml-parser:
- * - allowBooleanAttributes: true  => <button disabled> is allowed
- * - but we add a warning suggesting disabled="true"
- * - do not validate script/style bodies
- * - allow multiple root nodes by wrapping in a synthetic root for fragment validation
- */
+function maskBareAmpersandsPreserveLength(input: string): string {
+  // Replace '&' that is NOT starting a valid XML entity:
+  //   &name;  or  &#123;  or  &#x1A;
+  return input.replace(
+    /&(?![A-Za-z][A-Za-z0-9._:-]*;|#\d+;|#x[0-9A-Fa-f]+;)/g,
+    "＆" // Fullwidth ampersand, length-preserving
+  );
+}
+
 function runXmlValidation(
   xmlContent: string,
   offsetAdjustment: number,
@@ -117,12 +119,13 @@ function runXmlValidation(
 
   // Ignore contents of <script> and <style> (JS/CSS can contain "<" which is not XML-safe)
   const safeContent = maskScriptAndStyleBodiesPreserveLength(xmlContent);
+  const contentForValidation = maskBareAmpersandsPreserveLength(safeContent);
 
   const options = {
     allowBooleanAttributes: true,
   };
 
-  let result = XMLValidator.validate(safeContent, options);
+  let result = XMLValidator.validate(contentForValidation, options);
 
   // If XML complains about multiple roots, treat it as an HTML fragment: wrap and re-validate.
   if (result !== true) {
