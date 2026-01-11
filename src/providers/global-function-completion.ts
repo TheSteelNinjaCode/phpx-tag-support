@@ -40,7 +40,7 @@ export class GlobalFunctionCompletionProvider
       item.detail = `Global Helper`;
       item.documentation = new vscode.MarkdownString()
         .appendCodeblock(`const ${fn.name}: ${fn.signature}`, "typescript")
-        .appendMarkdown(`\n\n*Defined in .casp/global-functions.d.ts*`);
+        .appendMarkdown(`\n\n*Defined in .pp/global-functions.d.ts*`);
 
       // Snippet for easier insertion
       item.insertText = new vscode.SnippetString(`${fn.name}($0)`);

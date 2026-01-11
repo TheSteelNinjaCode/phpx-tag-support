@@ -46,7 +46,10 @@ import {
 
 // --- Mustache Providers ---
 import { MustacheCompletionProvider } from "./providers/mustache-completion";
-import { PulseDefinitionProvider } from "./providers/go-to-definition";
+import {
+  GlobalFunctionDefinitionProvider,
+  PulseDefinitionProvider,
+} from "./providers/go-to-definition";
 import { MustacheHoverProvider } from "./providers/mustache-hover";
 
 // --- Snippet Providers ---
@@ -120,7 +123,7 @@ export function activate(context: vscode.ExtensionContext) {
   const routeProvider = new RouteProvider(workspaceFolders[0]);
 
   // --- Initialize Global Functions Loader (New) ---
-  // This starts watching .casp/global-functions.d.ts for changes
+  // This starts watching .pp/global-functions.d.ts for changes
   GlobalFunctionsLoader.getInstance().initialize(
     context,
     workspaceFolders[0].uri
@@ -589,6 +592,12 @@ function setupPPHPFeatures(context: vscode.ExtensionContext) {
     vscode.languages.registerDefinitionProvider(
       SELECTORS.PHP,
       new PulseDefinitionProvider()
+    ),
+    vscode.languages.registerDefinitionProvider(
+      SELECTORS.PHP,
+      new GlobalFunctionDefinitionProvider(
+        vscode.workspace.workspaceFolders![0].uri
+      )
     )
   );
 }
