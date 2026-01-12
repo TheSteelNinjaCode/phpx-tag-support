@@ -598,6 +598,38 @@ function setupPPHPFeatures(context: vscode.ExtensionContext) {
       new GlobalFunctionDefinitionProvider(
         vscode.workspace.workspaceFolders![0].uri
       )
+    ),
+    vscode.languages.registerCompletionItemProvider(
+      SELECTORS.PHP,
+      {
+        provideCompletionItems(document, position) {
+          const line = document.lineAt(position.line).text;
+          const beforeCursor = line.slice(0, position.character);
+
+          if (beforeCursor.endsWith("<!")) {
+            const item = new vscode.CompletionItem(
+              "![CDATA[",
+              vscode.CompletionItemKind.Snippet
+            );
+
+            const replaceStart = position.translate(0, -1);
+            const replaceRange = new vscode.Range(replaceStart, position);
+
+            item.insertText = new vscode.SnippetString("![CDATA[$0]]>");
+            item.range = replaceRange;
+            item.detail = "XML CDATA Section";
+            item.documentation = new vscode.MarkdownString(
+              "Insert a CDATA section to escape special characters in XML/HTML content"
+            );
+            item.sortText = "0";
+
+            return [item];
+          }
+
+          return undefined;
+        },
+      },
+      "!"
     )
   );
 }
