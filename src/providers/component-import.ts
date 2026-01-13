@@ -90,9 +90,10 @@ export const importComponentCommand = async (
     if (!existingComponents.includes(componentName)) {
       existingComponents.push(componentName);
       existingComponents.sort();
+      // FIX: Removed trailing "\\" before "};"
       const newGroupImport = `use ${groupPrefix}\\{${existingComponents.join(
         ", "
-      )}\\};`;
+      )}};`;
 
       const startPos = document.positionAt(groupMatch.index);
       const endPos = document.positionAt(
@@ -128,9 +129,10 @@ export const importComponentCommand = async (
       }
       existingComponents = Array.from(new Set(existingComponents)).sort();
 
+      // FIX: Removed trailing "\\" before "};"
       const newGroupImport = `use ${groupPrefix}\\{${existingComponents.join(
         ", "
-      )}\\};`;
+      )}};`;
 
       const firstMatch = matchArray[0];
       const lastMatch = matchArray[matchArray.length - 1];
@@ -185,7 +187,7 @@ export const validateMissingImports = (
 
   // Sanitize text to avoid false positives in comments/strings
   let cleanText = removePhpComments(originalText);
-  cleanText = blankOutHeredocOpeners(cleanText); // 👈 FIXED: Remove <<<HTML to prevent mismatch
+  cleanText = blankOutHeredocOpeners(cleanText);
   cleanText = cleanText.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (m) =>
     " ".repeat(m.length)
   );
@@ -294,9 +296,7 @@ function removePhpStringLiterals(text: string): string {
     .replace(/"(?:[^"\\]|\\.)*"/g, (m) => " ".repeat(m.length));
 }
 
-// 👈 NEW: Helper to mask heredoc openers
 function blankOutHeredocOpeners(text: string): string {
-  // Matches <<<HTML, <<<"HTML", or <<<'HTML'
   return text.replace(/<<<\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/g, (match) =>
     " ".repeat(match.length)
   );

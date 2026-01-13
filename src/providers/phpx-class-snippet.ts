@@ -7,6 +7,13 @@ export class PhpxClassSnippetProvider implements vscode.CompletionItemProvider {
     document: vscode.TextDocument,
     position: vscode.Position
   ): vscode.CompletionItem[] {
+    const linePrefix = document
+      .lineAt(position)
+      .text.substring(0, position.character);
+    if (/=['"][^'"]*$/.test(linePrefix)) {
+      return [];
+    }
+
     const item = new vscode.CompletionItem(
       "phpxclass",
       vscode.CompletionItemKind.Snippet

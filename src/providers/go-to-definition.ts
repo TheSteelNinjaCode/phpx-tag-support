@@ -123,3 +123,36 @@ export class GlobalFunctionDefinitionProvider
     return undefined;
   }
 }
+
+// =========================================================
+// 8. COMPONENT DEFINITION PROVIDER (New)
+// =========================================================
+
+export class ComponentDefinitionProvider implements vscode.DefinitionProvider {
+  constructor(
+    private resolvePath: (componentName: string) => string | undefined
+  ) {}
+
+  public provideDefinition(
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): vscode.ProviderResult<vscode.Definition> {
+    const wordRange = document.getWordRangeAtPosition(position);
+    if (!wordRange) return undefined;
+
+    // Get the word (e.g., "Card")
+    const word = document.getText(wordRange);
+
+    // Resolve path using the callback provided during registration
+    const parsedPath = this.resolvePath(word);
+
+    if (parsedPath && fs.existsSync(parsedPath)) {
+      return new vscode.Location(
+        vscode.Uri.file(parsedPath),
+        new vscode.Position(0, 0)
+      );
+    }
+
+    return undefined;
+  }
+}

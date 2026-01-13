@@ -47,6 +47,7 @@ import {
 // --- Mustache Providers ---
 import { MustacheCompletionProvider } from "./providers/mustache-completion";
 import {
+  ComponentDefinitionProvider,
   GlobalFunctionDefinitionProvider,
   PulseDefinitionProvider,
 } from "./providers/go-to-definition";
@@ -83,6 +84,9 @@ import {
   COMMAND_ADD_IMPORT,
 } from "./providers/component-import";
 import { registerXmlValidator } from "./validators/xml-validator";
+import { ComponentTagCompletionProvider } from "./providers/component-tag-completion";
+import { ComponentHoverProvider } from "./providers/component-hover";
+import { ComponentAttributeValueProvider } from "./providers/component-attribute-value";
 
 // Modified: Only targeting PHP language ID
 const SELECTORS = {
@@ -334,6 +338,29 @@ function setupComponentPropsFeatures(
         },
       },
       " "
+    ),
+    vscode.languages.registerCompletionItemProvider(
+      SELECTORS.PHP,
+      new ComponentTagCompletionProvider(() => getComponentsFromClassLog()),
+      "<"
+    ),
+    vscode.languages.registerDefinitionProvider(
+      SELECTORS.PHP,
+      new ComponentDefinitionProvider((shortName) => {
+        const fqcn = componentsCache.get(shortName);
+        if (!fqcn) return undefined;
+        return fqcnToFile(fqcn);
+      })
+    ),
+    vscode.languages.registerHoverProvider(
+      SELECTORS.PHP,
+      new ComponentHoverProvider(() => getComponentsFromClassLog(), fqcnToFile)
+    ),
+    vscode.languages.registerCompletionItemProvider(
+      SELECTORS.PHP,
+      new ComponentAttributeValueProvider(componentPropsProvider),
+      '"',
+      "'"
     )
   );
 
