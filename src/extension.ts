@@ -256,26 +256,105 @@ function setupComponentImportFeatures(context: vscode.ExtensionContext) {
 //   COMPONENT PROPS & ATTRIBUTES FEATURE
 // ─────────────────────────────────────────────────────────────────────────────
 
+function resolveClassFileByScanningProject(
+  fqcn: string,
+  rootPath: string
+): string | undefined {
+  const parts = fqcn.split("\\").filter(Boolean);
+  const shortName = parts.at(-1);
+  if (!shortName) return undefined;
+
+  const namespacePart = parts.slice(0, -1).join("\\");
+  const namespacePath = namespacePart.replace(/\\/g, "/");
+
+  // Only scan PHP files from files-list.json.
+  const phpFiles = allProjectFiles.filter((f) => f.endsWith(".php"));
+  if (phpFiles.length === 0) return undefined;
+
+  // Heuristic ordering: prefer files under the expected namespace directory.
+  const scored = phpFiles
+    .map((rel) => {
+      const cleanRel = rel.startsWith("./") ? rel.slice(2) : rel;
+      const relNorm = cleanRel.replace(/\\/g, "/");
+      const base = path.posix.basename(relNorm);
+
+      let score = 0;
+      if (namespacePath && relNorm.includes(namespacePath)) score += 3;
+      if (base.toLowerCase().includes(shortName.toLowerCase())) score += 2;
+      if (relNorm.toLowerCase().includes("component")) score += 1;
+
+      return { rel: cleanRel, score };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  const classDeclRe = new RegExp(
+    `\\b(?:final\\s+|abstract\\s+)?class\\s+${escapeRegExp(shortName)}\\b`,
+    "m"
+  );
+
+  for (const item of scored) {
+    const abs = path.join(rootPath, item.rel);
+    if (!fs.existsSync(abs)) continue;
+
+    let content: string;
+    try {
+      content = fs.readFileSync(abs, "utf8");
+    } catch {
+      continue;
+    }
+
+    // Fast reject.
+    if (!content.includes(shortName)) continue;
+
+    // Namespace match (when available) to avoid false positives.
+    if (namespacePart) {
+      const nsMatch = /^\s*namespace\s+([^;]+);/m.exec(content);
+      const fileNs = nsMatch?.[1]?.trim();
+      if (fileNs && fileNs !== namespacePart) continue;
+    }
+
+    if (classDeclRe.test(content)) {
+      return abs;
+    }
+  }
+
+  return undefined;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function setupComponentPropsFeatures(
   context: vscode.ExtensionContext,
   rootPath: string
 ) {
-  // 1. Define FQCN to File resolver using the global allProjectFiles list
+  const classFileFallbackCache = new Map<string, string>();
   const fqcnToFile = (fqcn: string): string | undefined => {
-    // Basic heuristic: Match ShortName.php
     const shortName = fqcn.split("\\").pop();
     if (!shortName) return undefined;
 
+    // 1) Fast path: conventional 1-class-per-file
     const expectedEnd = `/${shortName}.php`;
     const foundRelative = allProjectFiles.find((f) => f.endsWith(expectedEnd));
 
     if (foundRelative) {
-      // Remove leading ./ if present for path.join
       const cleanRel = foundRelative.startsWith("./")
         ? foundRelative.slice(2)
         : foundRelative;
       return path.join(rootPath, cleanRel);
     }
+
+    // 2) Fallback: multi-class-per-file or non-matching filenames.
+    const cached = classFileFallbackCache.get(fqcn);
+    if (cached && fs.existsSync(cached)) return cached;
+
+    const resolved = resolveClassFileByScanningProject(fqcn, rootPath);
+    if (resolved) {
+      classFileFallbackCache.set(fqcn, resolved);
+      return resolved;
+    }
+
     return undefined;
   };
 
