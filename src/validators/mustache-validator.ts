@@ -32,18 +32,20 @@ function validate(document: vscode.TextDocument) {
   }
 
   // Groups:
-  // 1) PHP start   (<\?(?:php|=))
-  // 2) PHP end     (\?>)
-  // 3) Heredoc     (<<< ... )
-  // 4) Heredoc id  ([a-zA-Z0-9_]+)
-  // 5) Mustache    (\{)
+  // 1) PHP start       (<\?(?:php|=))
+  // 2) PHP end         (\?>)
+  // 3) Heredoc         (<<< ... )
+  // 4) Heredoc id      ([a-zA-Z0-9_]+)
+  // 5) Script/Style    (<\/?(?:script|style)\b)  <-- NEW GROUP
+  // 6) Mustache        (\{)                      <-- SHIFTED INDEX
   const boundaryRegex =
-    /(<\?(?:php|=))|(\?>)|(<<<['"]?([a-zA-Z0-9_]+)['"]?)|(\{)/g;
+    /(<\?(?:php|=))|(\?>)|(<<<['"]?([a-zA-Z0-9_]+)['"]?)|(<\/?(?:script|style)\b)|(\{)/gi;
 
   let match: RegExpExecArray | null;
   let inPhp = false;
   let inHeredoc = false;
   let heredocTag = "";
+  let inScriptOrStyle = false; // Manual tracking for Heredoc content
 
   while ((match = boundaryRegex.exec(text)) !== null) {
     // IMPORTANT: match[0] is full match; groups start at match[1]
@@ -51,7 +53,8 @@ function validate(document: vscode.TextDocument) {
     const phpEnd = match[2];
     const heredocStart = match[3];
     const heredocId = match[4];
-    const mustacheStart = match[5];
+    const tagMatch = match[5]; // <script, </script, <style, etc.
+    const mustacheStart = match[6];
 
     // 1) Enter PHP Mode
     if (phpStart) {
@@ -71,36 +74,54 @@ function validate(document: vscode.TextDocument) {
     if (heredocStart && inPhp && !inHeredoc) {
       inHeredoc = true;
       heredocTag = heredocId || "";
+      // Reset script/style state when entering a new Heredoc block
+      inScriptOrStyle = false; 
       continue;
     }
 
     // 4) Check for Heredoc End (heuristic)
     if (inHeredoc && heredocTag) {
       const restOfText = text.slice(0, match.index);
-      // Common close forms:
-      //   \nTAG;
-      //   \nTAG
-      // plus optional whitespace
       const closeRe = new RegExp(
         `\\n\\s*${escapeRegExp(heredocTag)}\\s*;?\\s*$`,
         "m"
       );
-      // Only check the tail chunk to avoid scanning huge docs repeatedly
       const tail = restOfText.slice(Math.max(0, restOfText.length - 2000));
       if (closeRe.test(tail)) {
         inHeredoc = false;
+        inScriptOrStyle = false;
       }
     }
 
-    // 5) Handle Mustache '{'
+    // 5) Handle Script/Style Tags (Manual Guard)
+    if (tagMatch) {
+      // Only track tags if we are effectively in HTML mode
+      // (either raw HTML or inside a PHP Heredoc)
+      if (!inPhp || (inPhp && inHeredoc)) {
+        if (tagMatch.startsWith("</")) {
+            // Closing tag
+            inScriptOrStyle = false;
+        } else {
+            // Opening tag
+            inScriptOrStyle = true;
+        }
+      }
+      continue;
+    }
+
+    // 6) Handle Mustache '{'
     if (mustacheStart) {
       const startIndex = match.index;
 
       // Validate IF: NOT in PHP, OR in PHP but inside a Heredoc
       const shouldValidate = !inPhp || (inPhp && inHeredoc);
+      
+      // SKIP if we are inside manual script/style guard
+      if (inScriptOrStyle) continue;
+
       if (!shouldValidate) continue;
 
-      // Skip excluded regions early (script/style, etc.)
+      // Skip excluded regions early (via HTML Parser)
       if (htmlDoc.isInsideExcludedRegion(startIndex)) continue;
 
       const nextChar = text[startIndex + 1];
