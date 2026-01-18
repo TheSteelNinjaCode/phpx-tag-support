@@ -106,6 +106,125 @@ interface FileAnalysisCache {
   heredocRanges: Array<{ start: number; end: number }>;
 }
 
+const FS_WALK_EXCLUDED_DIRS = new Set([
+  "node_modules",
+  ".git",
+  ".casp",
+  "caches",
+  "dist",
+  "build",
+  "out",
+  ".next",
+  "coverage",
+]);
+
+function walkPhpFilesForClassSearch(
+  startDir: string,
+  opts: {
+    shortName: string;
+    namespacePart: string;
+    classDeclRe: RegExp;
+    maxFiles: number;
+  },
+): string | undefined {
+  const stack: string[] = [startDir];
+  let checked = 0;
+
+  while (stack.length) {
+    const dir = stack.pop()!;
+
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const ent of entries) {
+      if (checked >= opts.maxFiles) return undefined;
+
+      const full = path.join(dir, ent.name);
+
+      if (ent.isDirectory()) {
+        if (FS_WALK_EXCLUDED_DIRS.has(ent.name)) continue;
+        if (ent.name.startsWith(".")) continue;
+        stack.push(full);
+        continue;
+      }
+
+      if (!ent.isFile() || !ent.name.endsWith(".php")) continue;
+
+      checked++;
+
+      let content: string;
+      try {
+        const stat = fs.statSync(full);
+        if (stat.size > 2_000_000) continue;
+        content = fs.readFileSync(full, "utf8");
+      } catch {
+        continue;
+      }
+
+      if (!content.includes(opts.shortName)) continue;
+
+      if (opts.namespacePart) {
+        const nsMatch = /^\s*namespace\s+([^;]+);/m.exec(content);
+        const fileNs = nsMatch?.[1]?.trim();
+        if (fileNs && fileNs !== opts.namespacePart) continue;
+      }
+
+      if (opts.classDeclRe.test(content)) return full;
+    }
+  }
+
+  return undefined;
+}
+
+function resolveClassFileByWalkingWorkspace(
+  fqcn: string,
+  rootPath: string,
+): string | undefined {
+  const parts = fqcn.split("\\").filter(Boolean);
+  const shortName = parts.at(-1);
+  if (!shortName) return undefined;
+
+  const namespacePart = parts.slice(0, -1).join("\\");
+  const namespacePath = namespacePart.replace(/\\/g, "/");
+
+  const classDeclRe = new RegExp(
+    `\\b(?:final\\s+|abstract\\s+)?class\\s+${escapeRegExp(shortName)}\\b`,
+    "m",
+  );
+
+  const startDirs = [
+    namespacePath ? path.join(rootPath, namespacePath) : "",
+    path.join(rootPath, "src"),
+    path.join(rootPath, "lib"),
+    path.join(rootPath, "app"),
+    path.join(rootPath, "components"),
+    path.join(rootPath, "vendor"),
+    rootPath,
+  ].filter(Boolean);
+
+  const seen = new Set<string>();
+  for (const dir of startDirs) {
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    if (!fs.existsSync(dir)) continue;
+
+    const hit = walkPhpFilesForClassSearch(dir, {
+      shortName,
+      namespacePart,
+      classDeclRe,
+      maxFiles: 8000,
+    });
+
+    if (hit) return hit;
+  }
+
+  return undefined;
+}
+
 export function activate(context: vscode.ExtensionContext) {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders) {
@@ -117,7 +236,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   if (!fs.existsSync(configPath)) {
     console.log(
-      "Prisma PHP: prisma-php.json not found. Extension features standing by."
+      "Prisma PHP: prisma-php.json not found. Extension features standing by.",
     );
   } else {
     console.log('Prisma PHP: Found "prisma-php.json". Extension active.');
@@ -130,14 +249,14 @@ export function activate(context: vscode.ExtensionContext) {
   // This starts watching .pp/global-functions.d.ts for changes
   GlobalFunctionsLoader.getInstance().initialize(
     context,
-    workspaceFolders[0].uri
+    workspaceFolders[0].uri,
   );
 
   // --- Global File List Management (Shared by Routes & Component Props) ---
   const filesListUri = vscode.Uri.joinPath(
     workspaceFolders[0].uri,
     "settings",
-    "files-list.json"
+    "files-list.json",
   );
 
   const updateFilesList = async () => {
@@ -157,7 +276,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Watch for changes in files-list.json
   const fileListWatcher = vscode.workspace.createFileSystemWatcher(
-    new vscode.RelativePattern(workspaceFolders[0], "settings/files-list.json")
+    new vscode.RelativePattern(workspaceFolders[0], "settings/files-list.json"),
   );
   fileListWatcher.onDidChange(updateFilesList);
   fileListWatcher.onDidCreate(updateFilesList);
@@ -167,7 +286,7 @@ export function activate(context: vscode.ExtensionContext) {
   // --- Watch class-log.json for Component Props ---
   loadComponentsFromClassLog(); // Initial load
   const classLogWatcher = vscode.workspace.createFileSystemWatcher(
-    new vscode.RelativePattern(workspaceFolders[0], "settings/class-log.json")
+    new vscode.RelativePattern(workspaceFolders[0], "settings/class-log.json"),
   );
   classLogWatcher.onDidChange(loadComponentsFromClassLog);
   classLogWatcher.onDidCreate(loadComponentsFromClassLog);
@@ -198,14 +317,14 @@ function setupGlobalFunctionFeatures(context: vscode.ExtensionContext) {
     // 1. Completion Provider for Global Functions
     vscode.languages.registerCompletionItemProvider(
       SELECTORS.PHP,
-      new GlobalFunctionCompletionProvider()
+      new GlobalFunctionCompletionProvider(),
     ),
 
     // 2. Hover Provider for Global Functions
     vscode.languages.registerHoverProvider(
       SELECTORS.PHP,
-      new GlobalFunctionHoverProvider()
-    )
+      new GlobalFunctionHoverProvider(),
+    ),
   );
 }
 
@@ -219,13 +338,13 @@ function setupComponentImportFeatures(context: vscode.ExtensionContext) {
     vscode.languages.registerCodeActionsProvider(
       SELECTORS.PHP,
       new ComponentImportCodeActionProvider(() => getComponentsFromClassLog()),
-      { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] }
-    )
+      { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] },
+    ),
   );
 
   // 2. Register the Command (Triggered by the Quick Fix)
   context.subscriptions.push(
-    vscode.commands.registerCommand(COMMAND_ADD_IMPORT, importComponentCommand)
+    vscode.commands.registerCommand(COMMAND_ADD_IMPORT, importComponentCommand),
   );
 
   // 3. Register Diagnostics (Finds the missing imports)
@@ -242,8 +361,8 @@ function setupComponentImportFeatures(context: vscode.ExtensionContext) {
     vscode.workspace.onDidOpenTextDocument(updateDiagnostics),
     vscode.workspace.onDidSaveTextDocument(updateDiagnostics),
     vscode.workspace.onDidChangeTextDocument((e) =>
-      updateDiagnostics(e.document)
-    )
+      updateDiagnostics(e.document),
+    ),
   );
 
   // Initial validation
@@ -258,7 +377,7 @@ function setupComponentImportFeatures(context: vscode.ExtensionContext) {
 
 function resolveClassFileByScanningProject(
   fqcn: string,
-  rootPath: string
+  rootPath: string,
 ): string | undefined {
   const parts = fqcn.split("\\").filter(Boolean);
   const shortName = parts.at(-1);
@@ -267,58 +386,53 @@ function resolveClassFileByScanningProject(
   const namespacePart = parts.slice(0, -1).join("\\");
   const namespacePath = namespacePart.replace(/\\/g, "/");
 
-  // Only scan PHP files from files-list.json.
   const phpFiles = allProjectFiles.filter((f) => f.endsWith(".php"));
-  if (phpFiles.length === 0) return undefined;
-
-  // Heuristic ordering: prefer files under the expected namespace directory.
-  const scored = phpFiles
-    .map((rel) => {
-      const cleanRel = rel.startsWith("./") ? rel.slice(2) : rel;
-      const relNorm = cleanRel.replace(/\\/g, "/");
-      const base = path.posix.basename(relNorm);
-
-      let score = 0;
-      if (namespacePath && relNorm.includes(namespacePath)) score += 3;
-      if (base.toLowerCase().includes(shortName.toLowerCase())) score += 2;
-      if (relNorm.toLowerCase().includes("component")) score += 1;
-
-      return { rel: cleanRel, score };
-    })
-    .sort((a, b) => b.score - a.score);
 
   const classDeclRe = new RegExp(
     `\\b(?:final\\s+|abstract\\s+)?class\\s+${escapeRegExp(shortName)}\\b`,
-    "m"
+    "m",
   );
 
-  for (const item of scored) {
-    const abs = path.join(rootPath, item.rel);
-    if (!fs.existsSync(abs)) continue;
+  if (phpFiles.length > 0) {
+    const scored = phpFiles
+      .map((rel) => {
+        const cleanRel = rel.startsWith("./") ? rel.slice(2) : rel;
+        const relNorm = cleanRel.replace(/\\/g, "/");
+        const base = path.posix.basename(relNorm);
 
-    let content: string;
-    try {
-      content = fs.readFileSync(abs, "utf8");
-    } catch {
-      continue;
-    }
+        let score = 0;
+        if (namespacePath && relNorm.includes(namespacePath)) score += 3;
+        if (base.toLowerCase().includes(shortName.toLowerCase())) score += 2;
+        if (relNorm.toLowerCase().includes("component")) score += 1;
 
-    // Fast reject.
-    if (!content.includes(shortName)) continue;
+        return { rel: cleanRel, score };
+      })
+      .sort((a, b) => b.score - a.score);
 
-    // Namespace match (when available) to avoid false positives.
-    if (namespacePart) {
-      const nsMatch = /^\s*namespace\s+([^;]+);/m.exec(content);
-      const fileNs = nsMatch?.[1]?.trim();
-      if (fileNs && fileNs !== namespacePart) continue;
-    }
+    for (const item of scored) {
+      const abs = path.join(rootPath, item.rel);
+      if (!fs.existsSync(abs)) continue;
 
-    if (classDeclRe.test(content)) {
-      return abs;
+      let content: string;
+      try {
+        content = fs.readFileSync(abs, "utf8");
+      } catch {
+        continue;
+      }
+
+      if (!content.includes(shortName)) continue;
+
+      if (namespacePart) {
+        const nsMatch = /^\s*namespace\s+([^;]+);/m.exec(content);
+        const fileNs = nsMatch?.[1]?.trim();
+        if (fileNs && fileNs !== namespacePart) continue;
+      }
+
+      if (classDeclRe.test(content)) return abs;
     }
   }
 
-  return undefined;
+  return resolveClassFileByWalkingWorkspace(fqcn, rootPath);
 }
 
 function escapeRegExp(text: string): string {
@@ -327,7 +441,7 @@ function escapeRegExp(text: string): string {
 
 function setupComponentPropsFeatures(
   context: vscode.ExtensionContext,
-  rootPath: string
+  rootPath: string,
 ) {
   const classFileFallbackCache = new Map<string, string>();
   const fqcnToFile = (fqcn: string): string | undefined => {
@@ -358,10 +472,59 @@ function setupComponentPropsFeatures(
     return undefined;
   };
 
+  const resolveFqcnFromUseStatements = (
+    text: string,
+    shortName: string,
+  ): string | undefined => {
+    // Group use: use Namespace\{A, B as C};
+    const groupRe = /\buse\s+([^;{]+)\{([^}]+)\}\s*;/g;
+    let m: RegExpExecArray | null;
+
+    while ((m = groupRe.exec(text)) !== null) {
+      const prefix = m[1].trim();
+      const list = m[2]
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean);
+
+      for (const item of list) {
+        const asParts = item.split(/\s+as\s+/i).map((x) => x.trim());
+        const className = asParts[0];
+        const alias = asParts[1] || "";
+
+        if (alias === shortName || className === shortName) {
+          const cleanPrefix = prefix.endsWith("\\") ? prefix : prefix + "\\";
+          return cleanPrefix + className;
+        }
+      }
+    }
+
+    // Simple use: use Namespace\Class; (optionally comma-separated)
+    const simpleRe = /\buse\s+([^;{]+);/g;
+    while ((m = simpleRe.exec(text)) !== null) {
+      const raw = m[1].trim();
+      const parts = raw
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean);
+
+      for (const part of parts) {
+        const asParts = part.split(/\s+as\s+/i).map((x) => x.trim());
+        const fqcn = asParts[0];
+        const alias = asParts[1] || "";
+        const cls = fqcn.split("\\").pop() || "";
+
+        if (alias === shortName || cls === shortName) return fqcn;
+      }
+    }
+
+    return undefined;
+  };
+
   // 2. Initialize Provider
   const componentPropsProvider = new ComponentPropsProvider(
     componentsCache,
-    fqcnToFile
+    fqcnToFile,
   );
 
   // 3. Register Attribute Completion Provider
@@ -371,7 +534,7 @@ function setupComponentPropsFeatures(
       {
         provideCompletionItems(
           document: vscode.TextDocument,
-          position: vscode.Position
+          position: vscode.Position,
         ) {
           const { shouldAnalyze } = shouldAnalyzeFile(document);
           if (!shouldAnalyze) return undefined;
@@ -412,35 +575,38 @@ function setupComponentPropsFeatures(
             tagName,
             writtenAttributes,
             currentWord,
-            componentPropsProvider
+            componentPropsProvider,
           );
         },
       },
-      " "
+      " ",
     ),
     vscode.languages.registerCompletionItemProvider(
       SELECTORS.PHP,
       new ComponentTagCompletionProvider(() => getComponentsFromClassLog()),
-      "<"
+      "<",
     ),
     vscode.languages.registerDefinitionProvider(
       SELECTORS.PHP,
-      new ComponentDefinitionProvider((shortName) => {
-        const fqcn = componentsCache.get(shortName);
+      new ComponentDefinitionProvider((document, shortName) => {
+        const fqcn =
+          componentsCache.get(shortName) ||
+          resolveFqcnFromUseStatements(document.getText(), shortName);
+
         if (!fqcn) return undefined;
         return fqcnToFile(fqcn);
-      })
+      }),
     ),
     vscode.languages.registerHoverProvider(
       SELECTORS.PHP,
-      new ComponentHoverProvider(() => getComponentsFromClassLog(), fqcnToFile)
+      new ComponentHoverProvider(() => getComponentsFromClassLog(), fqcnToFile),
     ),
     vscode.languages.registerCompletionItemProvider(
       SELECTORS.PHP,
       new ComponentAttributeValueProvider(componentPropsProvider),
       '"',
-      "'"
-    )
+      "'",
+    ),
   );
 
   // 4. Register Diagnostics
@@ -456,8 +622,8 @@ function setupComponentPropsFeatures(
     vscode.workspace.onDidOpenTextDocument(updateDiagnostics),
     vscode.workspace.onDidSaveTextDocument(updateDiagnostics),
     vscode.workspace.onDidChangeTextDocument((e) =>
-      updateDiagnostics(e.document)
-    )
+      updateDiagnostics(e.document),
+    ),
   );
 
   // Initial run
@@ -479,7 +645,7 @@ async function loadComponentsFromClassLog(): Promise<void> {
   const jsonUri = vscode.Uri.joinPath(
     workspaceFolder.uri,
     "settings",
-    "class-log.json"
+    "class-log.json",
   );
   try {
     if (fs.existsSync(jsonUri.fsPath)) {
@@ -568,7 +734,7 @@ function detectMixedContent(text: string): boolean {
   while ((match = htmlRegex.exec(text)) !== null) {
     const matchIndex = match.index;
     const isOutsidePhp = !phpBlocks.some(
-      (block) => matchIndex >= block.start && matchIndex < block.end
+      (block) => matchIndex >= block.start && matchIndex < block.end,
     );
 
     if (isOutsidePhp) {
@@ -580,7 +746,7 @@ function detectMixedContent(text: string): boolean {
 }
 
 function detectHtmlHeredocs(
-  text: string
+  text: string,
 ): Array<{ start: number; end: number }> {
   const heredocs: Array<{ start: number; end: number }> = [];
 
@@ -603,7 +769,7 @@ function detectHtmlHeredocs(
 }
 
 function extractPhpBlockRanges(
-  text: string
+  text: string,
 ): Array<{ start: number; end: number }> {
   const ranges = [];
   const regex = /<\?(?:php|=)[\s\S]*?\?>/gi;
@@ -624,18 +790,18 @@ function setupPPHPFeatures(context: vscode.ExtensionContext) {
     vscode.languages.registerCompletionItemProvider(
       SELECTORS.PHP,
       new PulsePointCompletionProvider(),
-      "."
+      ".",
     ),
     vscode.languages.registerHoverProvider(
       SELECTORS.PHP,
-      new PulsePointHoverProvider()
+      new PulsePointHoverProvider(),
     ),
     vscode.languages.registerCompletionItemProvider(
       SELECTORS.PHP,
       new PulsePointAttributeCompletionProvider(),
       " ",
-      "-"
-    )
+      "-",
+    ),
   );
 
   // --- Snippet Registration (PHP & Plaintext) ---
@@ -644,13 +810,13 @@ function setupPPHPFeatures(context: vscode.ExtensionContext) {
     // Register for PHP
     vscode.languages.registerCompletionItemProvider(
       SELECTORS.PHP,
-      phpxSnippetProvider
+      phpxSnippetProvider,
     ),
     // Register for Plaintext (Untitled files)
     vscode.languages.registerCompletionItemProvider(
       SELECTORS.PLAINTEXT,
-      phpxSnippetProvider
-    )
+      phpxSnippetProvider,
+    ),
   );
 
   // --- Fetch Function Features (PHP Only) ---
@@ -678,32 +844,32 @@ function setupPPHPFeatures(context: vscode.ExtensionContext) {
     vscode.workspace.onDidOpenTextDocument(updateFetchDiagnostics),
     vscode.workspace.onDidSaveTextDocument(updateFetchDiagnostics),
     vscode.workspace.onDidChangeTextDocument((e) =>
-      updateFetchDiagnostics(e.document)
+      updateFetchDiagnostics(e.document),
     ),
 
     vscode.languages.registerCompletionItemProvider(
       SELECTORS.PHP,
       fetchFunctionCompletionProvider,
       "'",
-      '"'
+      '"',
     ),
     vscode.languages.registerDefinitionProvider(
       SELECTORS.PHP,
-      fetchFunctionDefinitionProvider
+      fetchFunctionDefinitionProvider,
     ),
     vscode.languages.registerHoverProvider(
       SELECTORS.PHP,
-      fetchFunctionHoverProvider
+      fetchFunctionHoverProvider,
     ),
     vscode.languages.registerDefinitionProvider(
       SELECTORS.PHP,
-      new PulseDefinitionProvider()
+      new PulseDefinitionProvider(),
     ),
     vscode.languages.registerDefinitionProvider(
       SELECTORS.PHP,
       new GlobalFunctionDefinitionProvider(
-        vscode.workspace.workspaceFolders![0].uri
-      )
+        vscode.workspace.workspaceFolders![0].uri,
+      ),
     ),
     vscode.languages.registerCompletionItemProvider(
       SELECTORS.PHP,
@@ -715,7 +881,7 @@ function setupPPHPFeatures(context: vscode.ExtensionContext) {
           if (beforeCursor.endsWith("<!")) {
             const item = new vscode.CompletionItem(
               "![CDATA[",
-              vscode.CompletionItemKind.Snippet
+              vscode.CompletionItemKind.Snippet,
             );
 
             const replaceStart = position.translate(0, -1);
@@ -725,7 +891,7 @@ function setupPPHPFeatures(context: vscode.ExtensionContext) {
             item.range = replaceRange;
             item.detail = "XML CDATA Section";
             item.documentation = new vscode.MarkdownString(
-              "Insert a CDATA section to escape special characters in XML/HTML content"
+              "Insert a CDATA section to escape special characters in XML/HTML content",
             );
             item.sortText = "0";
 
@@ -735,22 +901,22 @@ function setupPPHPFeatures(context: vscode.ExtensionContext) {
           return undefined;
         },
       },
-      "!"
-    )
+      "!",
+    ),
   );
 }
 
 function setupRouteFeatures(
   context: vscode.ExtensionContext,
   routeProvider: RouteProvider,
-  workspaceFolder: vscode.WorkspaceFolder
+  workspaceFolder: vscode.WorkspaceFolder,
 ) {
   // 1. Initialize Providers
   const hrefCompletion = new HrefCompletionProvider(routeProvider);
   const hrefHover = new HrefHoverProvider(routeProvider);
   const hrefDefinition = new HrefDefinitionProvider(
     routeProvider,
-    workspaceFolder
+    workspaceFolder,
   );
   const hrefDiagnostic = new HrefDiagnosticProvider(routeProvider);
 
@@ -758,34 +924,34 @@ function setupRouteFeatures(
   const srcHover = new SrcHoverProvider(routeProvider);
   const srcDefinition = new SrcDefinitionProvider(
     routeProvider,
-    workspaceFolder
+    workspaceFolder,
   );
   const srcDiagnostic = new SrcDiagnosticProvider(routeProvider);
 
   const phpRedirectCompletion = new PhpRedirectCompletionProvider(
-    routeProvider
+    routeProvider,
   );
   const phpRedirectHover = new PhpRedirectHoverProvider(routeProvider);
   const phpRedirectDefinition = new PhpRedirectDefinitionProvider(
     routeProvider,
-    workspaceFolder
+    workspaceFolder,
   );
   const phpRedirectDiagnostic = new PhpRedirectDiagnosticProvider(
-    routeProvider
+    routeProvider,
   );
 
   const scriptRedirectCompletion = new PphpScriptRedirectCompletionProvider(
-    routeProvider
+    routeProvider,
   );
   const scriptRedirectHover = new PphpScriptRedirectHoverProvider(
-    routeProvider
+    routeProvider,
   );
   const scriptRedirectDefinition = new PphpScriptRedirectDefinitionProvider(
     routeProvider,
-    workspaceFolder
+    workspaceFolder,
   );
   const scriptRedirectDiagnostic = new PphpScriptRedirectDiagnosticProvider(
-    routeProvider
+    routeProvider,
   );
 
   // 2. Register Diagnostics
@@ -814,8 +980,8 @@ function setupRouteFeatures(
     vscode.workspace.onDidOpenTextDocument(updateRouteDiagnostics),
     vscode.workspace.onDidSaveTextDocument(updateRouteDiagnostics),
     vscode.workspace.onDidChangeTextDocument((e) =>
-      updateRouteDiagnostics(e.document)
-    )
+      updateRouteDiagnostics(e.document),
+    ),
   );
 
   // Trigger diagnostics for active editor on start
@@ -831,14 +997,14 @@ function setupRouteFeatures(
       hrefCompletion,
       '"',
       "/",
-      "."
+      ".",
     ),
     vscode.languages.registerCompletionItemProvider(
       SELECTORS.PHP,
       srcCompletion,
       '"',
       "/",
-      "."
+      ".",
     ),
     vscode.languages.registerCompletionItemProvider(
       SELECTORS.PHP,
@@ -846,7 +1012,7 @@ function setupRouteFeatures(
       "'",
       '"',
       "/",
-      "."
+      ".",
     ),
     vscode.languages.registerCompletionItemProvider(
       SELECTORS.PHP,
@@ -854,7 +1020,7 @@ function setupRouteFeatures(
       "'",
       '"',
       "/",
-      "."
+      ".",
     ),
 
     // Hovers
@@ -868,35 +1034,35 @@ function setupRouteFeatures(
     vscode.languages.registerDefinitionProvider(SELECTORS.PHP, srcDefinition),
     vscode.languages.registerDefinitionProvider(
       SELECTORS.PHP,
-      phpRedirectDefinition
+      phpRedirectDefinition,
     ),
     vscode.languages.registerDefinitionProvider(
       SELECTORS.PHP,
-      scriptRedirectDefinition
+      scriptRedirectDefinition,
     ),
     vscode.languages.registerCompletionItemProvider(
       SELECTORS.PHP,
       new MustacheCompletionProvider(),
       "{",
-      "."
+      ".",
     ),
     vscode.languages.registerHoverProvider(
       SELECTORS.PHP,
-      new MustacheHoverProvider()
-    )
+      new MustacheHoverProvider(),
+    ),
   );
 }
 
 function setupPrismaFeatures(
   context: vscode.ExtensionContext,
-  workspaceFolder: vscode.WorkspaceFolder
+  workspaceFolder: vscode.WorkspaceFolder,
 ) {
   // 1. Register Auto-Completion
   context.subscriptions.push(registerPrismaFieldProvider());
 
   // 2. Schema Watching
   const schemaWatcher = vscode.workspace.createFileSystemWatcher(
-    new vscode.RelativePattern(workspaceFolder, "settings/prisma-schema.json")
+    new vscode.RelativePattern(workspaceFolder, "settings/prisma-schema.json"),
   );
 
   const reloadPrismaSchema = () => {
@@ -961,8 +1127,8 @@ function setupPrismaFeatures(
     vscode.workspace.onDidOpenTextDocument(updatePrismaDiagnostics),
     vscode.workspace.onDidSaveTextDocument(updatePrismaDiagnostics),
     vscode.workspace.onDidChangeTextDocument((e) =>
-      updatePrismaDiagnostics(e.document)
-    )
+      updatePrismaDiagnostics(e.document),
+    ),
   );
 
   if (vscode.window.activeTextEditor) {

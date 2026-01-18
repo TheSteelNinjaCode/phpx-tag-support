@@ -8,7 +8,7 @@ export class PulseDefinitionProvider implements vscode.DefinitionProvider {
   public async provideDefinition(
     document: vscode.TextDocument,
     position: vscode.Position,
-    token: vscode.CancellationToken
+    token: vscode.CancellationToken,
   ): Promise<vscode.Definition | undefined> {
     const wordRange = document.getWordRangeAtPosition(position);
     if (!wordRange) return undefined;
@@ -38,7 +38,7 @@ export class PulseDefinitionProvider implements vscode.DefinitionProvider {
         const endPos = document.positionAt(absoluteEnd);
         return new vscode.Location(
           document.uri,
-          new vscode.Range(startPos, endPos)
+          new vscode.Range(startPos, endPos),
         );
       }
     }
@@ -58,7 +58,7 @@ export class GlobalFunctionDefinitionProvider
 
   public provideDefinition(
     document: vscode.TextDocument,
-    position: vscode.Position
+    position: vscode.Position,
   ): vscode.ProviderResult<vscode.Definition> {
     const wordRange = document.getWordRangeAtPosition(position);
     if (!wordRange) return undefined;
@@ -83,14 +83,14 @@ export class GlobalFunctionDefinitionProvider
       targetPath = path.resolve(
         this.workspaceRoot.fsPath,
         "ts",
-        fn.rawImportPath
+        fn.rawImportPath,
       );
     } else {
       // It's a node module
       targetPath = path.join(
         this.workspaceRoot.fsPath,
         "node_modules",
-        fn.rawImportPath
+        fn.rawImportPath,
       );
     }
 
@@ -103,7 +103,7 @@ export class GlobalFunctionDefinitionProvider
       if (fs.existsSync(pkgJson)) {
         return new vscode.Location(
           vscode.Uri.file(pkgJson),
-          new vscode.Position(0, 0)
+          new vscode.Position(0, 0),
         );
       }
     }
@@ -115,7 +115,7 @@ export class GlobalFunctionDefinitionProvider
       if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
         return new vscode.Location(
           vscode.Uri.file(candidate),
-          new vscode.Position(0, 0)
+          new vscode.Position(0, 0),
         );
       }
     }
@@ -125,31 +125,33 @@ export class GlobalFunctionDefinitionProvider
 }
 
 // =========================================================
-// 8. COMPONENT DEFINITION PROVIDER (New)
+// 8. COMPONENT DEFINITION PROVIDER
 // =========================================================
 
 export class ComponentDefinitionProvider implements vscode.DefinitionProvider {
   constructor(
-    private resolvePath: (componentName: string) => string | undefined
+    private resolveFilePath: (
+      document: vscode.TextDocument,
+      componentName: string,
+    ) => string | undefined,
   ) {}
 
   public provideDefinition(
     document: vscode.TextDocument,
-    position: vscode.Position
+    position: vscode.Position,
   ): vscode.ProviderResult<vscode.Definition> {
     const wordRange = document.getWordRangeAtPosition(position);
     if (!wordRange) return undefined;
 
-    // Get the word (e.g., "Card")
+    // e.g. "ToggleSwitch"
     const word = document.getText(wordRange);
 
-    // Resolve path using the callback provided during registration
-    const parsedPath = this.resolvePath(word);
+    const parsedPath = this.resolveFilePath(document, word);
 
     if (parsedPath && fs.existsSync(parsedPath)) {
       return new vscode.Location(
         vscode.Uri.file(parsedPath),
-        new vscode.Position(0, 0)
+        new vscode.Position(0, 0),
       );
     }
 

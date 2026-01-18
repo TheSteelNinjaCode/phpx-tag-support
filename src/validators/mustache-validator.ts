@@ -3,7 +3,7 @@ import { parse } from "@babel/parser";
 import { parseHTMLDocument } from "../utils/html-parser";
 
 const diagnosticCollection = vscode.languages.createDiagnosticCollection(
-  "pulsepoint-mustache"
+  "pulsepoint-mustache",
 );
 
 export function registerMustacheValidator(context: vscode.ExtensionContext) {
@@ -11,7 +11,7 @@ export function registerMustacheValidator(context: vscode.ExtensionContext) {
     vscode.workspace.onDidOpenTextDocument(validate),
     vscode.workspace.onDidSaveTextDocument(validate),
     vscode.workspace.onDidChangeTextDocument((e) => validate(e.document)),
-    diagnosticCollection
+    diagnosticCollection,
   );
 
   vscode.workspace.textDocuments.forEach(validate);
@@ -36,8 +36,8 @@ function validate(document: vscode.TextDocument) {
   // 2) PHP end         (\?>)
   // 3) Heredoc         (<<< ... )
   // 4) Heredoc id      ([a-zA-Z0-9_]+)
-  // 5) Script/Style    (<\/?(?:script|style)\b)  <-- NEW GROUP
-  // 6) Mustache        (\{)                      <-- SHIFTED INDEX
+  // 5) Script/Style    (<\/?(?:script|style)\b)
+  // 6) Mustache        (\{)
   const boundaryRegex =
     /(<\?(?:php|=))|(\?>)|(<<<['"]?([a-zA-Z0-9_]+)['"]?)|(<\/?(?:script|style)\b)|(\{)/gi;
 
@@ -45,15 +45,14 @@ function validate(document: vscode.TextDocument) {
   let inPhp = false;
   let inHeredoc = false;
   let heredocTag = "";
-  let inScriptOrStyle = false; // Manual tracking for Heredoc content
+  let inScriptOrStyle = false;
 
   while ((match = boundaryRegex.exec(text)) !== null) {
-    // IMPORTANT: match[0] is full match; groups start at match[1]
     const phpStart = match[1];
     const phpEnd = match[2];
     const heredocStart = match[3];
     const heredocId = match[4];
-    const tagMatch = match[5]; // <script, </script, <style, etc.
+    const tagMatch = match[5];
     const mustacheStart = match[6];
 
     // 1) Enter PHP Mode
@@ -74,8 +73,7 @@ function validate(document: vscode.TextDocument) {
     if (heredocStart && inPhp && !inHeredoc) {
       inHeredoc = true;
       heredocTag = heredocId || "";
-      // Reset script/style state when entering a new Heredoc block
-      inScriptOrStyle = false; 
+      inScriptOrStyle = false;
       continue;
     }
 
@@ -84,7 +82,7 @@ function validate(document: vscode.TextDocument) {
       const restOfText = text.slice(0, match.index);
       const closeRe = new RegExp(
         `\\n\\s*${escapeRegExp(heredocTag)}\\s*;?\\s*$`,
-        "m"
+        "m",
       );
       const tail = restOfText.slice(Math.max(0, restOfText.length - 2000));
       if (closeRe.test(tail)) {
@@ -93,17 +91,13 @@ function validate(document: vscode.TextDocument) {
       }
     }
 
-    // 5) Handle Script/Style Tags (Manual Guard)
+    // 5) Handle Script/Style Tags
     if (tagMatch) {
-      // Only track tags if we are effectively in HTML mode
-      // (either raw HTML or inside a PHP Heredoc)
       if (!inPhp || (inPhp && inHeredoc)) {
         if (tagMatch.startsWith("</")) {
-            // Closing tag
-            inScriptOrStyle = false;
+          inScriptOrStyle = false;
         } else {
-            // Opening tag
-            inScriptOrStyle = true;
+          inScriptOrStyle = true;
         }
       }
       continue;
@@ -115,13 +109,11 @@ function validate(document: vscode.TextDocument) {
 
       // Validate IF: NOT in PHP, OR in PHP but inside a Heredoc
       const shouldValidate = !inPhp || (inPhp && inHeredoc);
-      
-      // SKIP if we are inside manual script/style guard
+
       if (inScriptOrStyle) continue;
 
       if (!shouldValidate) continue;
 
-      // Skip excluded regions early (via HTML Parser)
       if (htmlDoc.isInsideExcludedRegion(startIndex)) continue;
 
       const nextChar = text[startIndex + 1];
@@ -139,15 +131,14 @@ function validate(document: vscode.TextDocument) {
       const exprMatch = extractBalancedBrace(text, startIndex);
 
       if (!exprMatch) {
-        // Unclosed mustache expression
         const start = document.positionAt(startIndex);
         const end = document.positionAt(Math.min(text.length, startIndex + 1));
         diagnostics.push(
           new vscode.Diagnostic(
             new vscode.Range(start, end),
             "Unclosed { ... } expression",
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
         continue;
       }
@@ -156,6 +147,14 @@ function validate(document: vscode.TextDocument) {
 
       // Continue scanning after the closing brace
       boundaryRegex.lastIndex = endPos;
+
+      // --- FIX START ---
+      // If the content contains a PHP opening tag (<? or <?=), skip JS validation.
+      // This prevents "Unexpected token" errors when PHP is used to inject values.
+      if (/<\?/.test(content)) {
+        continue;
+      }
+      // --- FIX END ---
 
       if (!content.trim()) continue;
 
@@ -167,8 +166,8 @@ function validate(document: vscode.TextDocument) {
           new vscode.Diagnostic(
             new vscode.Range(start, end),
             `Invalid JS: ${error}`,
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
       }
     }
@@ -179,11 +178,11 @@ function validate(document: vscode.TextDocument) {
 
 function extractBalancedBrace(
   text: string,
-  startIndex: number
+  startIndex: number,
 ): { content: string; endPos: number } | null {
   let balance = 0;
 
-  // simple JS-aware scanning (avoid braces inside quotes/comments)
+  // simple JS-aware scanning
   let inSingle = false;
   let inDouble = false;
   let inBacktick = false;
@@ -206,7 +205,6 @@ function extractBalancedBrace(
       continue;
     }
 
-    // strings
     if (inSingle) {
       if (c === "\\") {
         i++;
@@ -232,7 +230,6 @@ function extractBalancedBrace(
       continue;
     }
 
-    // comment starts
     if (c === "/" && n === "/") {
       inLineComment = true;
       i++;
@@ -244,7 +241,6 @@ function extractBalancedBrace(
       continue;
     }
 
-    // string starts
     if (c === "'") {
       inSingle = true;
       continue;
@@ -258,7 +254,6 @@ function extractBalancedBrace(
       continue;
     }
 
-    // brace balance
     if (c === "{") balance++;
     else if (c === "}") balance--;
 
@@ -279,7 +274,6 @@ function parseExpression(expr: string): string | null {
     return null;
   } catch (e: any) {
     try {
-      // Allow attribute-like fragments: key="x", onClick={...}, etc.
       parse(`({${expr}})`, { sourceType: "module", plugins: ["jsx"] });
       return null;
     } catch {
