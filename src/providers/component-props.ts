@@ -13,7 +13,7 @@ interface PropMeta {
   type: string;
   default?: string;
   doc?: string;
-  optional: boolean; // true ↔ nullable (…|null)
+  optional: boolean; // true ↔ nullable (…|null) or has default value
   allowed?: string; //  allowed literals, e.g. "1|2|3|4|5|6"
 }
 
@@ -90,7 +90,7 @@ function isAllowed(meta: PropMeta, value: string): boolean {
 function isValidType(
   type: string,
   value: string,
-  optional: boolean = false
+  optional: boolean = false,
 ): boolean {
   // ✅ FIXED: Allow empty values for optional properties
   if (!value.trim() && !optional) {
@@ -190,7 +190,7 @@ function inferTypeFromValue(v: any | undefined): string {
     case "array": {
       // ¿array homogéneo de strings?  →  string[]
       const allStrings = (v.items as any[]).every(
-        (it) => (it.value ?? it).kind === "string"
+        (it) => (it.value ?? it).kind === "string",
       );
       return allStrings ? "string[]" : "array";
     }
@@ -239,7 +239,8 @@ function parsePublicProps(body: string): PropMeta[] {
       name,
       type: rawType, // dejamos todos los "|" para el tooltip
       default: def?.trim(),
-      optional: /\bnull\b/i.test(rawType), // ← lo que pide tu interfaz
+      // ✅ FIX: If a default value string is present (def), it is optional
+      optional: !!def || /\bnull\b/i.test(rawType),
       // doc y allowed los puedes añadir más tarde si lo necesitas
     });
   }
@@ -259,7 +260,7 @@ export function buildPropsFromPhpFile(fqcn: string, src: string): PropMeta[] {
 function extractDocForProp(
   node: any,
   allComments: any[],
-  propName: string
+  propName: string,
 ): string | undefined {
   /* 1) node.doc generado por extractDoc:true */
   if (node.doc) {
@@ -304,14 +305,14 @@ function extractDocForProp(
 }
 
 /* ------------------------------------------------------------- *
- *  ComponentPropsProvider – extracts public props from PHPX classes
+ * ComponentPropsProvider – extracts public props from PHPX classes
  * ------------------------------------------------------------- */
 export class ComponentPropsProvider {
   private readonly cache = new Map<string, Cached>();
 
   constructor(
     private readonly tagMap: TagMap,
-    private readonly fqcnToFile: FqcnToFile
+    private readonly fqcnToFile: FqcnToFile,
   ) {}
 
   public getProps(tag: string): PropMeta[] {
@@ -344,7 +345,7 @@ export class ComponentPropsProvider {
       stmt: any,
       propNode: any,
       nameNode: any,
-      valueNode: any | undefined
+      valueNode: any | undefined,
     ) => {
       const name =
         typeof nameNode === "string" ? nameNode : (nameNode?.name as string);
@@ -368,7 +369,7 @@ export class ComponentPropsProvider {
       if (docRaw) {
         const rx = new RegExp(
           `@property\\s+([^\\s]+)\\s+\\$${name}\\s*(.*)`,
-          "i"
+          "i",
         );
         const mProp = rx.exec(docRaw);
         if (mProp) {
@@ -399,11 +400,16 @@ export class ComponentPropsProvider {
         finalType = inferTypeFromValue(valueNode);
       }
 
-      /* D) optional por nullable o default null ---------------------- */
-      const defaultIsNull = valueNode?.kind === "nullkeyword";
+      /* D) optional por nullable o default value --------------------- */
+      // ✅ FIX: Determine optionality.
+      // A property is optional if:
+      // 1. It has ANY default value (valueNode is present), OR
+      // 2. It is explicitly nullable (?Type), OR
+      // 3. The type definition allows null (e.g. string|null)
+      const hasDefault = valueNode !== undefined && valueNode !== null;
       optional =
         optional ||
-        defaultIsNull ||
+        hasDefault || // <--- Crucial fix: Default value implies optional
         propNode.nullable === true ||
         /\bnull\b/.test(finalType);
 
@@ -466,8 +472,8 @@ export class ComponentPropsProvider {
 
           const members =
             stmt.kind !== "classconstant"
-              ? stmt.properties ?? []
-              : stmt.constants ?? [];
+              ? (stmt.properties ?? [])
+              : (stmt.constants ?? []);
 
           for (const member of members) {
             pushProp(stmt, member, member.name, member.value);
@@ -523,7 +529,7 @@ const ATTR_VALUE_DIAG =
 
 export function validateComponentPropValues(
   doc: vscode.TextDocument,
-  propsProvider: ComponentPropsProvider
+  propsProvider: ComponentPropsProvider,
 ) {
   if (doc.languageId !== "php") {
     return;
@@ -724,11 +730,11 @@ export function validateComponentPropValues(
           new vscode.Diagnostic(
             new vscode.Range(
               doc.positionAt(attr.startPos),
-              doc.positionAt(attr.endPos)
+              doc.positionAt(attr.endPos),
             ),
             `Invalid value "${attr.value}". ${allowedInfo}`,
-            vscode.DiagnosticSeverity.Warning
-          )
+            vscode.DiagnosticSeverity.Warning,
+          ),
         );
       }
     }
@@ -752,11 +758,11 @@ export function validateComponentPropValues(
             new vscode.Diagnostic(
               new vscode.Range(
                 doc.positionAt(tagNameStart),
-                doc.positionAt(tagNameEnd)
+                doc.positionAt(tagNameEnd),
               ),
               `Missing required attribute "${p.name}" for component <${tag}>.`,
-              vscode.DiagnosticSeverity.Error
-            )
+              vscode.DiagnosticSeverity.Error,
+            ),
           );
         }
       }
@@ -770,7 +776,7 @@ export function buildDynamicAttrItems(
   tag: string,
   written: Set<string>,
   partial: string,
-  provider: ComponentPropsProvider
+  provider: ComponentPropsProvider,
 ): vscode.CompletionItem[] {
   return provider
     .getProps(tag)
@@ -829,7 +835,7 @@ export function buildDynamicAttrItems(
          * ─────────────────────────────────────────────────────────── */
         const item = new vscode.CompletionItem(
           name,
-          vscode.CompletionItemKind.Field
+          vscode.CompletionItemKind.Field,
         );
 
         // Simplified insertion - always use placeholder, let value completion provider handle values
@@ -871,7 +877,7 @@ export function buildDynamicAttrItems(
             optional
               ? "🔸 _This property is **optional** (nullable)_"
               : "🔹 _This property is **required**_"
-          }`
+          }`,
         );
 
         // Allowed values section with enhanced formatting
@@ -890,7 +896,7 @@ export function buildDynamicAttrItems(
           // Add helpful hint for multiple values
           if (finalAllowed.includes("|")) {
             md.appendMarkdown(
-              `\n\n💡 _Press **Ctrl+Space** inside the quotes to see all available options_`
+              `\n\n💡 _Press **Ctrl+Space** inside the quotes to see all available options_`,
             );
           }
         }
@@ -905,7 +911,7 @@ export function buildDynamicAttrItems(
 
         // ✅ NEW: Add PHP support hint
         md.appendMarkdown(
-          `\n\n**💻 PHP Support:** Dynamic values like \`<?= $variable ?>\` are supported`
+          `\n\n**💻 PHP Support:** Dynamic values like \`<?= $variable ?>\` are supported`,
         );
 
         // Original documentation from PHP docblock
@@ -917,15 +923,15 @@ export function buildDynamicAttrItems(
         if (finalAllowed && finalAllowed.includes("|")) {
           const exampleValue = finalAllowed.split("|")[0].trim();
           md.appendMarkdown(
-            `\n\n---\n\n**📋 Example:**\n\`\`\`php\n<${tag} ${name}="${exampleValue}" />\n<${tag} ${name}="<?= $dynamicValue ?>" />\n\`\`\``
+            `\n\n---\n\n**📋 Example:**\n\`\`\`php\n<${tag} ${name}="${exampleValue}" />\n<${tag} ${name}="<?= $dynamicValue ?>" />\n\`\`\``,
           );
         } else if (def) {
           md.appendMarkdown(
-            `\n\n---\n\n**📋 Example:**\n\`\`\`php\n<${tag} ${name}="${def}" />\n<${tag} ${name}="<?= $dynamicValue ?>" />\n\`\`\``
+            `\n\n---\n\n**📋 Example:**\n\`\`\`php\n<${tag} ${name}="${def}" />\n<${tag} ${name}="<?= $dynamicValue ?>" />\n\`\`\``,
           );
         } else {
           md.appendMarkdown(
-            `\n\n---\n\n**📋 Example:**\n\`\`\`php\n<${tag} ${name}="value" />\n<${tag} ${name}="<?= $dynamicValue ?>" />\n\`\`\``
+            `\n\n---\n\n**📋 Example:**\n\`\`\`php\n<${tag} ${name}="value" />\n<${tag} ${name}="<?= $dynamicValue ?>" />\n\`\`\``,
           );
         }
 
@@ -971,6 +977,6 @@ export function buildDynamicAttrItems(
         (item as any).defaultValue = def?.trim();
 
         return item;
-      }
+      },
     );
 }

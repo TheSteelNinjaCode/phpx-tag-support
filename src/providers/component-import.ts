@@ -5,7 +5,6 @@ const PHP_LANGUAGE = "php";
 
 /**
  * 1. CODE ACTION PROVIDER
- * Provides the "Quick Fix" lightbulb when a missing import diagnostic is found.
  */
 export class ComponentImportCodeActionProvider
   implements vscode.CodeActionProvider
@@ -15,7 +14,7 @@ export class ComponentImportCodeActionProvider
   public provideCodeActions(
     document: vscode.TextDocument,
     range: vscode.Range,
-    context: vscode.CodeActionContext
+    context: vscode.CodeActionContext,
   ): vscode.CodeAction[] {
     const fixes: vscode.CodeAction[] = [];
     const missingImportRe =
@@ -37,7 +36,7 @@ export class ComponentImportCodeActionProvider
 
       const action = new vscode.CodeAction(
         `Import <${tagName}/> from ${fullComponent}`,
-        vscode.CodeActionKind.QuickFix
+        vscode.CodeActionKind.QuickFix,
       );
 
       action.command = {
@@ -56,11 +55,10 @@ export class ComponentImportCodeActionProvider
 
 /**
  * 2. COMMAND HANDLER
- * Inserts the 'use' statement into the document.
  */
 export const importComponentCommand = async (
   document: vscode.TextDocument,
-  fullComponent: string
+  fullComponent: string,
 ) => {
   const text = document.getText();
 
@@ -77,7 +75,7 @@ export const importComponentCommand = async (
   // Try to find an existing group import: use Namespace\{A, B};
   const groupImportRegex = new RegExp(
     `use\\s+${escapeRegex(groupPrefix)}\\\\\\{([^}]+)\\};`,
-    "m"
+    "m",
   );
   const groupMatch = groupImportRegex.exec(text);
 
@@ -90,24 +88,23 @@ export const importComponentCommand = async (
     if (!existingComponents.includes(componentName)) {
       existingComponents.push(componentName);
       existingComponents.sort();
-      // FIX: Removed trailing "\\" before "};"
       const newGroupImport = `use ${groupPrefix}\\{${existingComponents.join(
-        ", "
+        ", ",
       )}};`;
 
       const startPos = document.positionAt(groupMatch.index);
       const endPos = document.positionAt(
-        groupMatch.index + groupMatch[0].length
+        groupMatch.index + groupMatch[0].length,
       );
       const groupRange = new vscode.Range(startPos, endPos);
 
       edit.replace(document.uri, groupRange, newGroupImport);
     }
   } else {
-    // Look for single imports to group them or find insertion point
+    // Look for single imports to group them
     const sepRegex = new RegExp(
       `use\\s+${escapeRegex(groupPrefix)}\\\\([A-Za-z0-9_]+);`,
-      "gm"
+      "gm",
     );
 
     const matchArray: { component: string; index: number; length: number }[] =
@@ -122,16 +119,14 @@ export const importComponentCommand = async (
     }
 
     if (matchArray.length > 0) {
-      // Convert single imports to a group import
       let existingComponents = matchArray.map((x) => x.component);
       if (!existingComponents.includes(componentName)) {
         existingComponents.push(componentName);
       }
       existingComponents = Array.from(new Set(existingComponents)).sort();
 
-      // FIX: Removed trailing "\\" before "};"
       const newGroupImport = `use ${groupPrefix}\\{${existingComponents.join(
-        ", "
+        ", ",
       )}};`;
 
       const firstMatch = matchArray[0];
@@ -170,12 +165,12 @@ export const importComponentCommand = async (
 
 /**
  * 3. DIAGNOSTIC LOGIC
- * Scans the file for <Tags> that are missing a 'use' statement.
  */
 export const validateMissingImports = (
   document: vscode.TextDocument,
   shouldAnalyze: boolean,
-  diagnosticCollection: vscode.DiagnosticCollection
+  diagnosticCollection: vscode.DiagnosticCollection,
+  componentMap: Map<string, string>,
 ): void => {
   if (document.languageId !== PHP_LANGUAGE || !shouldAnalyze) {
     diagnosticCollection.delete(document.uri);
@@ -185,23 +180,29 @@ export const validateMissingImports = (
   const originalText = document.getText();
   const useMap = parsePhpUseStatements(originalText);
 
-  // Sanitize text to avoid false positives in comments/strings
+  // Sanitize text
   let cleanText = removePhpComments(originalText);
-  cleanText = blankOutHeredocOpeners(cleanText);
-  cleanText = cleanText.replace(/<\?(?:php|=)?[\s\S]*?\?>/g, (m) =>
-    " ".repeat(m.length)
-  );
-  cleanText = removePhpStringLiterals(cleanText);
+  // cleanText = blankOutHeredocOpeners(cleanText); // Optional: usually fine to leave in
+  // ✅ FIX: Do NOT remove string literals. This ensures tags inside "$html = '<Cmp>'" are detected.
+  // cleanText = removePhpStringLiterals(cleanText);
 
-  const BUILTIN_COMPONENTS = new Set(["Fragment", "slot", "template"]);
+  const BUILTIN_COMPONENTS = new Set(["Fragment"]);
   const diagnostics: vscode.Diagnostic[] = [];
 
-  // Find all component tags: <ComponentName
-  const tagMatches = [...cleanText.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g)];
+  // Regex: <Component followed by space, /, >, or end of word boundary
+  // Added `_` to allowed characters just in case.
+  const tagMatches = [
+    ...cleanText.matchAll(/<([A-Z][A-Za-z0-9_]*)(?=[\s/>])/g),
+  ];
 
   tagMatches.forEach((match) => {
     const tag = match[1];
-    if (!useMap.has(tag) && !BUILTIN_COMPONENTS.has(tag)) {
+
+    if (
+      !useMap.has(tag) &&
+      !BUILTIN_COMPONENTS.has(tag) &&
+      componentMap.has(tag)
+    ) {
       const start = document.positionAt((match.index ?? 0) + 1);
       const range = new vscode.Range(start, start.translate(0, tag.length));
 
@@ -209,8 +210,8 @@ export const validateMissingImports = (
         new vscode.Diagnostic(
           range,
           `Missing import for component <${tag} />`,
-          vscode.DiagnosticSeverity.Warning
-        )
+          vscode.DiagnosticSeverity.Warning,
+        ),
       );
     }
   });
@@ -237,7 +238,7 @@ function parsePhpUseStatements(text: string): Map<string, string> {
     const braceCloseIndex = importBody.lastIndexOf("}");
 
     if (braceOpenIndex !== -1 && braceCloseIndex !== -1) {
-      // Group import: use Prefix\{A, B};
+      // Group import
       const prefix = importBody.substring(0, braceOpenIndex).trim();
       const insideBraces = importBody
         .substring(braceOpenIndex + 1, braceCloseIndex)
@@ -258,7 +259,7 @@ function parsePhpUseStatements(text: string): Map<string, string> {
 function processSingleImport(
   prefix: string,
   item: string,
-  map: Map<string, string>
+  map: Map<string, string>,
 ) {
   const asMatch = /\bas\b\s+([\w]+)/i.exec(item);
   if (asMatch) {
@@ -285,19 +286,7 @@ function removePhpComments(text: string): string {
   return text
     .replace(
       /(^|[^:])\/\/[^\r\n]*/g,
-      (m, p) => p + " ".repeat(m.length - p.length)
+      (m, p) => p + " ".repeat(m.length - p.length),
     )
     .replace(/\/\*[\s\S]*?\*\//g, (m) => " ".repeat(m.length));
-}
-
-function removePhpStringLiterals(text: string): string {
-  return text
-    .replace(/'(?:[^'\\]|\\.)*'/g, (m) => " ".repeat(m.length))
-    .replace(/"(?:[^"\\]|\\.)*"/g, (m) => " ".repeat(m.length));
-}
-
-function blankOutHeredocOpeners(text: string): string {
-  return text.replace(/<<<\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/g, (match) =>
-    " ".repeat(match.length)
-  );
 }

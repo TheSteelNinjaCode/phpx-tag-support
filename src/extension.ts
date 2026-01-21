@@ -353,7 +353,12 @@ function setupComponentImportFeatures(context: vscode.ExtensionContext) {
 
   const updateDiagnostics = (doc: vscode.TextDocument) => {
     const { shouldAnalyze } = shouldAnalyzeFile(doc);
-    validateMissingImports(doc, shouldAnalyze, importDiagnostics);
+    validateMissingImports(
+      doc,
+      shouldAnalyze,
+      importDiagnostics,
+      getComponentsFromClassLog(),
+    );
   };
 
   context.subscriptions.push(
@@ -565,8 +570,8 @@ function setupComponentPropsFeatures(
             : existingAttrsText.split(" ").pop() || "";
 
           if (
-            existingAttrsText.match(/=[^"]*$/) ||
-            existingAttrsText.match(/=[^']*$/)
+            existingAttrsText.match(/="[^"]*$/) ||
+            existingAttrsText.match(/='[^']*$/)
           ) {
             return undefined;
           }
