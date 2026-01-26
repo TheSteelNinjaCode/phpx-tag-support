@@ -149,7 +149,7 @@ function isEntry(node: any): node is Entry {
 function sectionOfEntry(
   entry: Entry,
   curOffset: number,
-  baseOffset: number
+  baseOffset: number,
 ): "key" | "value" | null {
   /* ① key not written yet – PHP short‑form entry */
   if (!entry.key && entry.value?.loc) {
@@ -188,7 +188,7 @@ function sectionOfEntry(
 function arrayUnderCursor(
   arr: PhpArray,
   cur: number,
-  base: number
+  base: number,
 ): PhpArray | null {
   if (!arr.loc) {
     return null;
@@ -216,7 +216,7 @@ function arrayUnderCursor(
 function makeReplaceRange(
   doc: vscode.TextDocument,
   pos: vscode.Position,
-  alreadyLen: number
+  alreadyLen: number,
 ): vscode.Range {
   const start = pos.translate(0, -alreadyLen);
   const tail = doc.getText(new vscode.Range(pos, pos.translate(0, 4)));
@@ -251,14 +251,14 @@ export function registerPrismaFieldProvider(): vscode.Disposable {
       },
     },
     "'", // single-quote trigger
-    '"' // double-quote trigger
+    '"', // double-quote trigger
   );
 }
 
 // ========== CONTEXT PARSING ==========
 async function parseCompletionContext(
   doc: vscode.TextDocument,
-  pos: vscode.Position
+  pos: vscode.Position,
 ): Promise<CompletionContext | null> {
   const parsedCode = extractAndParseCode(doc, pos);
   if (!parsedCode) {
@@ -318,7 +318,7 @@ function extractAndParseCode(doc: vscode.TextDocument, pos: vscode.Position) {
 }
 
 function findPrismaCall(
-  ast: Node
+  ast: Node,
 ): { callNode: Call; opName: PrismaOp; modelName: string } | null {
   let result: {
     callNode: Call;
@@ -380,7 +380,7 @@ function analyzeArrayContext(context: CompletionContext): ArrayContext | null {
     argsArr,
     curOffset,
     lastPrisma,
-    context.rootKeys
+    context.rootKeys,
   );
 
   // **FIXED**: Enhanced nested context detection
@@ -404,7 +404,7 @@ function analyzeArrayContext(context: CompletionContext): ArrayContext | null {
 
 function resolveRelationChain(
   chain: RelationChainItem[],
-  context: CompletionContext
+  context: CompletionContext,
 ): RelationChainItem[] {
   const { modelMap, fieldMap } = context;
   const resolvedChain: RelationChainItem[] = [];
@@ -436,7 +436,7 @@ function resolveRelationChain(
 function findNestedContext(
   argsArr: PhpArray,
   hostArray: PhpArray,
-  currentRoot?: RootKey
+  currentRoot?: RootKey,
 ): NestedContext | null {
   if (!currentRoot || !isArray(argsArr) || hostArray === argsArr) {
     return null;
@@ -518,7 +518,7 @@ function isCountContext(path: string[]): boolean {
 
 function parsePathToRelationChain(
   path: string[],
-  rootOperation: RootKey
+  rootOperation: RootKey,
 ): RelationChainItem[] {
   const chain: RelationChainItem[] = [];
 
@@ -584,7 +584,7 @@ function parsePathToRelationChain(
 
 function determineFieldSuggestions(
   context: CompletionContext,
-  arrayContext: ArrayContext
+  arrayContext: ArrayContext,
 ): [string, FieldInfo][] {
   const { fieldMap, modelMap } = context;
   const { currentRoot, relationChain, nestedOperation, nestedRoot } =
@@ -646,7 +646,7 @@ function determineFieldSuggestions(
   // **ENHANCED: Better path-based relation detection**
   const path = findArrayPath(
     context.callNode.arguments?.[0] as PhpArray,
-    arrayContext.hostArray
+    arrayContext.hostArray,
   );
 
   if (path && path.length >= 3) {
@@ -716,7 +716,7 @@ function determineFieldSuggestions(
 function findArrayPath(
   rootArray: PhpArray,
   targetArray: PhpArray,
-  currentPath: string[] = []
+  currentPath: string[] = [],
 ): string[] | null {
   if (rootArray === targetArray) {
     return currentPath;
@@ -735,7 +735,7 @@ function findArrayPath(
         const subPath = findArrayPath(
           entry.value as PhpArray,
           targetArray,
-          newPath
+          newPath,
         );
         if (subPath) {
           return subPath;
@@ -750,7 +750,7 @@ function findArrayPath(
 function determineEntrySide(
   hostArray: PhpArray,
   curOffset: number,
-  lastPrisma: number
+  lastPrisma: number,
 ): "key" | "value" | null {
   for (const entry of hostArray.items.filter(isEntry)) {
     const side = sectionOfEntry(entry, curOffset, lastPrisma);
@@ -765,7 +765,7 @@ function findCurrentRoot(
   argsArr: PhpArray,
   curOffset: number,
   lastPrisma: number,
-  rootKeys: readonly RootKey[]
+  rootKeys: readonly RootKey[],
 ): RootKey | undefined {
   for (const entry of argsArr.items as Entry[]) {
     if (entry.key?.kind !== "string" || !entry.value?.loc) {
@@ -789,7 +789,7 @@ function findCurrentRoot(
 
 function generateCompletions(
   context: CompletionContext,
-  arrayContext: ArrayContext
+  arrayContext: ArrayContext,
 ): vscode.CompletionItem[] {
   const { currentRoot, entrySide } = arrayContext;
 
@@ -802,7 +802,7 @@ function generateCompletions(
   if (currentRoot === "data" && entrySide === "key") {
     const path = findArrayPath(
       context.callNode.arguments?.[0] as PhpArray,
-      arrayContext.hostArray
+      arrayContext.hostArray,
     );
 
     if (path && path.length >= 2) {
@@ -821,7 +821,7 @@ function generateCompletions(
   if (entrySide === "key") {
     const path = findArrayPath(
       context.callNode.arguments?.[0] as PhpArray,
-      arrayContext.hostArray
+      arrayContext.hostArray,
     );
 
     if (path && path.length >= 2) {
@@ -876,7 +876,7 @@ function generateCompletions(
           return createRelationOperationCompletions(
             context,
             relationField,
-            relationInfo.type
+            relationInfo.type,
           );
         }
       }
@@ -998,7 +998,7 @@ function isRelationField(fieldInfo: FieldInfo, modelMap: ModelMap): boolean {
 
 function createRelatedModelFieldCompletions(
   context: CompletionContext,
-  relatedFields: Map<string, FieldInfo>
+  relatedFields: Map<string, FieldInfo>,
 ): vscode.CompletionItem[] {
   const { pos, already, doc } = context;
 
@@ -1010,7 +1010,7 @@ function createRelatedModelFieldCompletions(
 
   // **Filter out already used fields**
   const availableFields = Array.from(relatedFields.entries()).filter(
-    ([fieldName]) => !usedKeys.has(fieldName)
+    ([fieldName]) => !usedKeys.has(fieldName),
   );
 
   return availableFields.map(([fieldName, fieldInfo]) => {
@@ -1024,7 +1024,7 @@ function createRelatedModelFieldCompletions(
 
     const item = new vscode.CompletionItem(
       label,
-      vscode.CompletionItemKind.Field
+      vscode.CompletionItemKind.Field,
     );
 
     item.sortText = `1_${fieldName}`;
@@ -1032,7 +1032,7 @@ function createRelatedModelFieldCompletions(
     item.documentation = new vscode.MarkdownString(
       `**Type**: \`${typeStr}\`\n\n- **Required**: ${!fieldInfo.nullable}\n- **Nullable**: ${
         fieldInfo.nullable
-      }`
+      }`,
     );
     item.range = makeReplaceRange(doc, pos, already.length);
 
@@ -1041,7 +1041,7 @@ function createRelatedModelFieldCompletions(
 }
 
 function createCountOperationCompletions(
-  context: CompletionContext
+  context: CompletionContext,
 ): vscode.CompletionItem[] {
   const { pos, already, doc } = context;
 
@@ -1051,14 +1051,14 @@ function createCountOperationCompletions(
   return countOps.map((op) => {
     const item = new vscode.CompletionItem(
       op,
-      vscode.CompletionItemKind.Keyword
+      vscode.CompletionItemKind.Keyword,
     );
 
     item.insertText = new vscode.SnippetString(`${op}' => [\n\t$0\n]`);
     item.documentation = new vscode.MarkdownString(
       `**${op}** - ${
         op === "select" ? "Select specific relations to count" : op
-      }`
+      }`,
     );
     item.range = makeReplaceRange(doc, pos, already.length);
     item.sortText = `0_${op}`; // Prioritize these completions
@@ -1069,7 +1069,7 @@ function createCountOperationCompletions(
 
 function shouldProvideRootKeys(
   context: CompletionContext,
-  arrayContext: ArrayContext
+  arrayContext: ArrayContext,
 ): boolean {
   const { callNode, curOffset, lastPrisma } = context;
   const { hostArray } = arrayContext;
@@ -1118,7 +1118,7 @@ function shouldProvideRootKeys(
 }
 
 function createRootKeyCompletions(
-  context: CompletionContext
+  context: CompletionContext,
 ): vscode.CompletionItem[] {
   const { rootKeys, pos, already, doc } = context;
 
@@ -1131,7 +1131,7 @@ function createRootKeyCompletions(
   return availableKeys.map((rootKey): vscode.CompletionItem => {
     const item = new vscode.CompletionItem(
       `${rootKey}`,
-      vscode.CompletionItemKind.Keyword
+      vscode.CompletionItemKind.Keyword,
     );
     item.insertText = new vscode.SnippetString(`${rootKey}' => $0`);
     item.range = makeReplaceRange(doc, pos, already.length);
@@ -1163,7 +1163,7 @@ function getUsedKeys(context: CompletionContext): Set<RootKey> {
 
 function handleSpecialCompletions(
   context: CompletionContext,
-  arrayContext: ArrayContext
+  arrayContext: ArrayContext,
 ): vscode.CompletionItem[] | null {
   const { currentRoot, entrySide } = arrayContext;
 
@@ -1192,7 +1192,7 @@ function handleSpecialCompletions(
 
 function createOrderByCompletions(
   context: CompletionContext,
-  arrayContext: ArrayContext
+  arrayContext: ArrayContext,
 ): vscode.CompletionItem[] {
   const { pos, already, doc, fieldMap, modelMap } = context;
   const { entrySide, hostArray } = arrayContext;
@@ -1203,7 +1203,7 @@ function createOrderByCompletions(
 
   const path = findArrayPath(
     context.callNode.arguments?.[0] as PhpArray,
-    hostArray
+    hostArray,
   );
 
   // ✅ FIXED: Better detection of nested orderBy context
@@ -1223,14 +1223,14 @@ function createOrderByCompletions(
           // ✅ One-to-many relation: ONLY show _count
           const countItem = new vscode.CompletionItem(
             "_count",
-            vscode.CompletionItemKind.Keyword
+            vscode.CompletionItemKind.Keyword,
           );
           countItem.insertText = new vscode.SnippetString(`_count' => '$0'`);
           countItem.documentation = new vscode.MarkdownString(
             `**Order by relation count**\n\n` +
               `Order ${context.modelName} records by the count of related **${relationInfo.type}** records.\n\n` +
               `Since \`${relationFieldName}\` is a one-to-many relation (\`${relationInfo.type}[]\`), ` +
-              `you can only order by \`_count\`.`
+              `you can only order by \`_count\`.`,
           );
           countItem.range = makeReplaceRange(doc, pos, already.length);
           countItem.sortText = `0__count`;
@@ -1244,7 +1244,7 @@ function createOrderByCompletions(
 
         if (relatedFields) {
           const scalarFields = Array.from(relatedFields.entries()).filter(
-            ([, info]) => !isRelationField(info, modelMap)
+            ([, info]) => !isRelationField(info, modelMap),
           );
 
           const items = scalarFields.map(([fieldName, fieldInfo]) => {
@@ -1256,14 +1256,14 @@ function createOrderByCompletions(
 
             const item = new vscode.CompletionItem(
               label,
-              vscode.CompletionItemKind.Field
+              vscode.CompletionItemKind.Field,
             );
 
             item.insertText = new vscode.SnippetString(`${fieldName}' => '$0'`);
             item.documentation = new vscode.MarkdownString(
               `Order by **${relationFieldName}.${fieldName}**\n\n` +
                 `Type: \`${typeStr}\`\n\n` +
-                `This will order ${context.modelName} records by the ${fieldName} field of their related ${relationInfo.type}.`
+                `This will order ${context.modelName} records by the ${fieldName} field of their related ${relationInfo.type}.`,
             );
             item.range = makeReplaceRange(doc, pos, already.length);
             item.sortText = `1_${fieldName}`;
@@ -1274,12 +1274,12 @@ function createOrderByCompletions(
           // Add _count for singular relations too
           const countItem = new vscode.CompletionItem(
             "_count",
-            vscode.CompletionItemKind.Keyword
+            vscode.CompletionItemKind.Keyword,
           );
           countItem.insertText = new vscode.SnippetString(`_count' => '$0'`);
           countItem.documentation = new vscode.MarkdownString(
             `**Order by relation count**\n\n` +
-              `Order by whether the related ${relationInfo.type} record exists (0 or 1).`
+              `Order by whether the related ${relationInfo.type} record exists (0 or 1).`,
           );
           countItem.range = makeReplaceRange(doc, pos, already.length);
           countItem.sortText = `0__count`;
@@ -1294,7 +1294,7 @@ function createOrderByCompletions(
   // ✅ Top-level orderBy - show current model's fields
   const usedKeys = getUsedFieldKeys(context, arrayContext);
   const availableFields = Array.from(fieldMap.entries()).filter(
-    ([fieldName]) => !usedKeys.has(fieldName)
+    ([fieldName]) => !usedKeys.has(fieldName),
   );
 
   return availableFields.map(([fieldName, fieldInfo]) => {
@@ -1310,7 +1310,7 @@ function createOrderByCompletions(
       label,
       isRelation
         ? vscode.CompletionItemKind.Property
-        : vscode.CompletionItemKind.Field
+        : vscode.CompletionItemKind.Field,
     );
 
     if (isRelation) {
@@ -1328,13 +1328,13 @@ function createOrderByCompletions(
           `${canOrderBy}\n\n` +
           `Example:\n\`\`\`php\n'${fieldName}' => [\n  ${
             fieldInfo.isList ? "'_count'" : "'fieldName'"
-          } => 'asc'\n]\n\`\`\``
+          } => 'asc'\n]\n\`\`\``,
       );
       item.sortText = `2_${fieldName}`;
     } else {
       item.insertText = new vscode.SnippetString(`${fieldName}' => '$0'`);
       item.documentation = new vscode.MarkdownString(
-        `Order by **${fieldName}**\n\nType: \`${typeStr}\``
+        `Order by **${fieldName}**\n\nType: \`${typeStr}\``,
       );
       item.sortText = `1_${fieldName}`;
     }
@@ -1345,14 +1345,14 @@ function createOrderByCompletions(
 }
 
 function createOrderByValueCompletions(
-  context: CompletionContext
+  context: CompletionContext,
 ): vscode.CompletionItem[] {
   const { pos, already, doc } = context;
 
   return ["asc", "desc"].map((direction) => {
     const item = new vscode.CompletionItem(
       direction,
-      vscode.CompletionItemKind.Value
+      vscode.CompletionItemKind.Value,
     );
     item.insertText = new vscode.SnippetString(`${direction}'`);
     item.range = makeReplaceRange(doc, pos, already.length);
@@ -1361,14 +1361,14 @@ function createOrderByValueCompletions(
 }
 
 function createBooleanCompletions(
-  context: CompletionContext
+  context: CompletionContext,
 ): vscode.CompletionItem[] {
   const { pos, already, doc } = context;
 
   return ["true", "false"].map((value) => {
     const item = new vscode.CompletionItem(
       value,
-      vscode.CompletionItemKind.Value
+      vscode.CompletionItemKind.Value,
     );
     item.insertText = new vscode.SnippetString(`${value}`);
     item.range = makeReplaceRange(doc, pos, already.length);
@@ -1378,7 +1378,7 @@ function createBooleanCompletions(
 
 function createWhereCompletions(
   context: CompletionContext,
-  arrayContext: ArrayContext
+  arrayContext: ArrayContext,
 ): vscode.CompletionItem[] {
   const { pos, already, doc, modelMap } = context;
   const { parentKey, entrySide } = arrayContext;
@@ -1388,7 +1388,7 @@ function createWhereCompletions(
     // Get the current field context based on the array path
     const path = findArrayPath(
       context.callNode.arguments?.[0] as PhpArray,
-      arrayContext.hostArray
+      arrayContext.hostArray,
     );
 
     if (path && path.length >= 2) {
@@ -1421,7 +1421,7 @@ function createWhereCompletions(
   // Get the current field context based on the array path
   const path = findArrayPath(
     context.callNode.arguments?.[0] as PhpArray,
-    arrayContext.hostArray
+    arrayContext.hostArray,
   );
 
   if (path && path.length >= 2) {
@@ -1468,14 +1468,14 @@ function createWhereCompletions(
         return createRelationOperatorCompletions(
           context,
           currentFieldName,
-          currentFieldInfo
+          currentFieldInfo,
         );
       } else {
         // Scalar field - show filter operators
         return FILTER_OPERATORS.map((operator) => {
           const item = new vscode.CompletionItem(
             operator,
-            vscode.CompletionItemKind.Keyword
+            vscode.CompletionItemKind.Keyword,
           );
           item.sortText = `2_${operator}`;
           item.insertText = new vscode.SnippetString(`${operator}' => $0`);
@@ -1500,7 +1500,7 @@ function createWhereCompletions(
             `**${operator}** - ${
               descriptions[operator] ||
               `Filter operator for ${currentFieldName}`
-            }`
+            }`,
           );
 
           return item;
@@ -1520,11 +1520,11 @@ function createWhereCompletions(
 
     // Default fallback - show filter operators only (no relation operators in generic case)
     return FILTER_OPERATORS.filter(
-      (op) => !RELATION_OPERATORS.includes(op as any)
+      (op) => !RELATION_OPERATORS.includes(op as any),
     ).map((operator) => {
       const item = new vscode.CompletionItem(
         operator,
-        vscode.CompletionItemKind.Keyword
+        vscode.CompletionItemKind.Keyword,
       );
       item.sortText = `2_${operator}`;
       item.insertText = new vscode.SnippetString(`${operator}' => $0`);
@@ -1538,7 +1538,7 @@ function createWhereCompletions(
 
 function createFilterValueCompletions(
   context: CompletionContext,
-  operator: string
+  operator: string,
 ): vscode.CompletionItem[] {
   const { pos, already, doc } = context;
 
@@ -1615,12 +1615,12 @@ function createFilterValueCompletions(
   return suggestions.map((suggestion, index) => {
     const item = new vscode.CompletionItem(
       suggestion.value,
-      vscode.CompletionItemKind.Value
+      vscode.CompletionItemKind.Value,
     );
 
     item.insertText = suggestion.value;
     item.documentation = new vscode.MarkdownString(
-      `**${operator}** value - ${suggestion.description}`
+      `**${operator}** value - ${suggestion.description}`,
     );
     item.sortText = `${index}_${suggestion.value}`;
     item.range = makeReplaceRange(doc, pos, already.length);
@@ -1631,7 +1631,7 @@ function createFilterValueCompletions(
 
 function getRelationContext(
   context: CompletionContext,
-  arrayContext: ArrayContext
+  arrayContext: ArrayContext,
 ): { fieldName: string; fieldInfo: FieldInfo } | null {
   const { fieldMap, callNode } = context;
   const { hostArray } = arrayContext;
@@ -1645,7 +1645,7 @@ function getRelationContext(
   function findPathToArray(
     arr: PhpArray,
     target: PhpArray,
-    path: string[] = []
+    path: string[] = [],
   ): string[] | null {
     if (arr === target) {
       return path;
@@ -1709,14 +1709,14 @@ function getRelationContext(
 function createRelationOperatorCompletions(
   context: CompletionContext,
   fieldName: string,
-  fieldInfo: FieldInfo
+  fieldInfo: FieldInfo,
 ): vscode.CompletionItem[] {
   const { pos, already, doc } = context;
 
   return RELATION_OPERATORS.map((operator) => {
     const item = new vscode.CompletionItem(
       operator,
-      vscode.CompletionItemKind.Keyword
+      vscode.CompletionItemKind.Keyword,
     );
 
     item.sortText = `1_${operator}`; // Higher priority than regular operators
@@ -1734,7 +1734,7 @@ function createRelationOperatorCompletions(
       `**${operator}** - ${descriptions[operator]}\n\n` +
         `Use this to filter ${fieldName} relation where ${descriptions[
           operator
-        ].toLowerCase()}.`
+        ].toLowerCase()}.`,
     );
 
     return item;
@@ -1743,7 +1743,7 @@ function createRelationOperatorCompletions(
 
 function isTopLevelWhere(
   context: CompletionContext,
-  arrayContext: ArrayContext
+  arrayContext: ArrayContext,
 ): boolean {
   const { callNode } = context;
   const { hostArray } = arrayContext;
@@ -1753,21 +1753,21 @@ function isTopLevelWhere(
     (e) =>
       e.key?.kind === "string" &&
       (e.key as any).value === "where" &&
-      isArray(e.value)
+      isArray(e.value),
   );
 
   return topWhereEntry?.value === hostArray;
 }
 
 function createCombinatorCompletions(
-  context: CompletionContext
+  context: CompletionContext,
 ): vscode.CompletionItem[] {
   const { pos, already, doc } = context;
 
   return ["AND", "OR", "NOT"].map((combinator) => {
     const item = new vscode.CompletionItem(
       combinator,
-      vscode.CompletionItemKind.Keyword
+      vscode.CompletionItemKind.Keyword,
     );
     item.sortText = `1_${combinator}`;
     item.insertText = new vscode.SnippetString(`${combinator}' => $0`);
@@ -1779,7 +1779,7 @@ function createCombinatorCompletions(
 function createRelationOperationCompletions(
   context: CompletionContext,
   relationName: string,
-  relationModelType: string
+  relationModelType: string,
 ): vscode.CompletionItem[] {
   const { pos, already, doc } = context;
 
@@ -1795,7 +1795,7 @@ function createRelationOperationCompletions(
   return relationOps.map((op) => {
     const item = new vscode.CompletionItem(
       op,
-      vscode.CompletionItemKind.Keyword
+      vscode.CompletionItemKind.Keyword,
     );
 
     // Provide better snippets based on operation
@@ -1803,13 +1803,13 @@ function createRelationOperationCompletions(
       case "select":
         item.insertText = new vscode.SnippetString(`${op}' => [\n\t$0\n]`);
         item.documentation = new vscode.MarkdownString(
-          `**${op}** - Select specific fields from **${relationName}**`
+          `**${op}** - Select specific fields from **${relationName}**`,
         );
         break;
       case "include":
         item.insertText = new vscode.SnippetString(`${op}' => [\n\t$0\n]`);
         item.documentation = new vscode.MarkdownString(
-          `**${op}** - Include related data from **${relationName}**`
+          `**${op}** - Include related data from **${relationName}**`,
         );
         break;
       default:
@@ -1828,7 +1828,7 @@ function createRelationOperationCompletions(
 
 function shouldProvideFieldCompletions(
   currentRoot?: RootKey,
-  entrySide?: "key" | "value" | null
+  entrySide?: "key" | "value" | null,
 ): boolean {
   if (!currentRoot || entrySide !== "key") {
     return false;
@@ -1858,7 +1858,7 @@ function shouldProvideFieldCompletions(
 
 function createFieldCompletions(
   context: CompletionContext,
-  arrayContext: ArrayContext
+  arrayContext: ArrayContext,
 ): vscode.CompletionItem[] {
   const { pos, already, doc } = context;
 
@@ -1868,7 +1868,7 @@ function createFieldCompletions(
   // **NEW: Filter out already used field keys**
   const usedKeys = getUsedFieldKeys(context, arrayContext);
   const availableFields = fieldSuggestions.filter(
-    ([fieldName]) => !usedKeys.has(fieldName)
+    ([fieldName]) => !usedKeys.has(fieldName),
   );
 
   return availableFields.map(([fieldName, fieldInfo]) => {
@@ -1884,7 +1884,7 @@ function createFieldCompletions(
 
     const item = new vscode.CompletionItem(
       label,
-      vscode.CompletionItemKind.Field
+      vscode.CompletionItemKind.Field,
     );
 
     // **ENHANCED: Add proper sorting**
@@ -1897,7 +1897,7 @@ function createFieldCompletions(
     item.documentation = new vscode.MarkdownString(
       `**Type**: \`${typeStr}\`\n\n- **Required**: ${!fieldInfo.nullable}\n- **Nullable**: ${
         fieldInfo.nullable
-      }\n- **List**: ${fieldInfo.isList ? "Yes" : "No"}`
+      }\n- **List**: ${fieldInfo.isList ? "Yes" : "No"}`,
     );
 
     // **ENHANCED: Add proper range replacement if available**
@@ -1911,7 +1911,7 @@ function createFieldCompletions(
 
 function getUsedFieldKeys(
   context: CompletionContext,
-  arrayContext: ArrayContext
+  arrayContext: ArrayContext,
 ): Set<string> {
   const usedKeys = new Set<string>();
   const { hostArray } = arrayContext;
@@ -1934,12 +1934,12 @@ function getUsedFieldKeys(
 function filterFieldsByOperation(
   allFields: [string, FieldInfo][],
   operation: string,
-  modelMap: ModelMap
+  modelMap: ModelMap,
 ): [string, FieldInfo][] {
   if (operation === "include") {
     // For include: only show relations (fields whose type is another model)
     return allFields.filter(([, info]) =>
-      Array.from(modelMap.keys()).includes(info.type.toLowerCase())
+      Array.from(modelMap.keys()).includes(info.type.toLowerCase()),
     );
   }
 
@@ -1980,7 +1980,7 @@ export async function getModelMap(): Promise<ModelMap> {
   const schemaUri = vscode.Uri.joinPath(
     ws.uri,
     "settings",
-    "prisma-schema.json"
+    "prisma-schema.json",
   );
 
   let raw: Uint8Array;
@@ -1990,7 +1990,7 @@ export async function getModelMap(): Promise<ModelMap> {
     // ➋ File missing or unreadable – log & fall back gracefully
     console.warn(
       "[phpx] prisma-schema.json not found – schema‑aware " +
-        "diagnostics disabled for now."
+        "diagnostics disabled for now.",
     );
     prismaSchemaCache = new Map();
     return prismaSchemaCache;
@@ -2040,7 +2040,7 @@ function validateFieldAssignments(
   offset: number,
   fields: Map<string, FieldInfo>,
   modelName: string,
-  diags: vscode.Diagnostic[]
+  diags: vscode.Diagnostic[],
 ) {
   const fieldRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
   let m: RegExpExecArray | null;
@@ -2057,8 +2057,8 @@ function validateFieldAssignments(
         new vscode.Diagnostic(
           range,
           `The column "${key}" does not exist in ${modelName}.`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
       continue;
     }
@@ -2071,8 +2071,8 @@ function validateFieldAssignments(
         new vscode.Diagnostic(
           range,
           `"${key}" expects ${expected}, but received "${expr}".`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     }
   }
@@ -2084,7 +2084,7 @@ export function validateSelectBlock(
   offset: number,
   fields: Map<string, FieldInfo>,
   modelName: string,
-  diags: vscode.Diagnostic[]
+  diags: vscode.Diagnostic[],
 ) {
   const selRe = /['"](\w+)['"]\s*=>\s*([^,\]\r\n]+)/g;
   let m: RegExpExecArray | null;
@@ -2102,8 +2102,8 @@ export function validateSelectBlock(
         new vscode.Diagnostic(
           range,
           `The column "${key}" does not exist in ${modelName}.`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
       continue;
     }
@@ -2119,8 +2119,8 @@ export function validateSelectBlock(
         new vscode.Diagnostic(
           range,
           `\`select\` for "${key}" expects a boolean, but got "${raw}".`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     }
   }
@@ -2132,7 +2132,7 @@ function validateIncludeBlock(
   fields: Map<string, FieldInfo>,
   modelName: string,
   diags: vscode.Diagnostic[],
-  modelMap: ModelMap
+  modelMap: ModelMap,
 ): void {
   /* ——————————————————————— 0. sólo si es array literal ——————————————————— */
   if (!isArray(includeEntry.value) || !includeEntry.value.loc) {
@@ -2156,8 +2156,8 @@ function validateIncludeBlock(
         new vscode.Diagnostic(
           keyRange,
           `The relation "${relName}" does not exist on ${modelName}.`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
       continue;
     }
@@ -2173,8 +2173,8 @@ function validateIncludeBlock(
               keyRange,
               "`include._count` expects a boolean or a nested [ 'select' => [...] ] block, " +
                 `but got ${JSON.stringify(raw)}.`,
-              vscode.DiagnosticSeverity.Error
-            )
+              vscode.DiagnosticSeverity.Error,
+            ),
           );
         }
         continue;
@@ -2183,7 +2183,7 @@ function validateIncludeBlock(
       // ii) array literal → must contain select => [ cols => bool ]
       const countArr = item.value as PhpArray;
       const selEntry = (countArr.items as Entry[]).find(
-        (e) => e.key?.kind === "string" && (e.key as any).value === "select"
+        (e) => e.key?.kind === "string" && (e.key as any).value === "select",
       );
 
       if (!selEntry || !isArray(selEntry.value) || !selEntry.value.loc) {
@@ -2191,8 +2191,8 @@ function validateIncludeBlock(
           new vscode.Diagnostic(
             keyRange,
             "`include._count` array must contain a `select` entry with boolean values for relation fields.",
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
         continue;
       }
@@ -2211,11 +2211,11 @@ function validateIncludeBlock(
               new vscode.Diagnostic(
                 new Range(
                   doc.positionAt(start.offset),
-                  doc.positionAt(end.offset)
+                  doc.positionAt(end.offset),
                 ),
                 `The relation "${relationName}" does not exist in ${modelName}.`,
-                vscode.DiagnosticSeverity.Error
-              )
+                vscode.DiagnosticSeverity.Error,
+              ),
             );
             continue;
           }
@@ -2227,11 +2227,11 @@ function validateIncludeBlock(
               new vscode.Diagnostic(
                 new Range(
                   doc.positionAt(start.offset),
-                  doc.positionAt(end.offset)
+                  doc.positionAt(end.offset),
                 ),
                 `"${relationName}" is not a relation field. _count.select only works with relations.`,
-                vscode.DiagnosticSeverity.Error
-              )
+                vscode.DiagnosticSeverity.Error,
+              ),
             );
             continue;
           }
@@ -2242,8 +2242,8 @@ function validateIncludeBlock(
               .getText(
                 new Range(
                   doc.positionAt(countEnt.value.loc.start.offset),
-                  doc.positionAt(countEnt.value.loc.end.offset)
-                )
+                  doc.positionAt(countEnt.value.loc.end.offset),
+                ),
               )
               .trim();
 
@@ -2252,8 +2252,8 @@ function validateIncludeBlock(
                 new vscode.Diagnostic(
                   rangeOf(doc, countEnt.value.loc),
                   `_count.select for "${relationName}" expects a boolean, but got "${raw}".`,
-                  vscode.DiagnosticSeverity.Error
-                )
+                  vscode.DiagnosticSeverity.Error,
+                ),
               );
             }
           }
@@ -2271,10 +2271,10 @@ function validateIncludeBlock(
           new vscode.Diagnostic(
             keyRange,
             `\`include\` for "${relName}" expects a boolean or a nested array, but got ${JSON.stringify(
-              raw
+              raw,
             )}.`,
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
       }
       continue;
@@ -2293,7 +2293,7 @@ function validateIncludeBlock(
       nestedFlds,
       relInfo!.type,
       diags,
-      modelMap
+      modelMap,
     );
 
     // ii) buscar include anidados aún más profundos
@@ -2309,7 +2309,7 @@ function validateIncludeBlock(
           nestedFlds,
           relInfo!.type,
           diags,
-          modelMap
+          modelMap,
         );
       }
     }
@@ -2322,13 +2322,13 @@ export function validateSelectIncludeEntries(
   fields: Map<string, FieldInfo>,
   modelName: string,
   diags: Diagnostic[],
-  modelMap: ModelMap
+  modelMap: ModelMap,
 ) {
   // ────────────────────────────────────────────────────────────────────
   // 1️⃣ VALIDATE SELECT BLOCK
   // ────────────────────────────────────────────────────────────────────
   const selectEntry = (arr.items as Entry[]).find(
-    (e) => e.key?.kind === "string" && (e.key as any).value === "select"
+    (e) => e.key?.kind === "string" && (e.key as any).value === "select",
   );
 
   if (selectEntry && isArray(selectEntry.value) && selectEntry.value.loc) {
@@ -2346,11 +2346,11 @@ export function validateSelectIncludeEntries(
             new vscode.Diagnostic(
               new Range(
                 doc.positionAt(start.offset),
-                doc.positionAt(end.offset)
+                doc.positionAt(end.offset),
               ),
               `The column "${name}" does not exist in ${modelName}.`,
-              vscode.DiagnosticSeverity.Error
-            )
+              vscode.DiagnosticSeverity.Error,
+            ),
           );
           continue;
         }
@@ -2370,7 +2370,7 @@ export function validateSelectIncludeEntries(
                 relatedModel,
                 fieldInfo.type,
                 diags,
-                modelMap
+                modelMap,
               );
             }
           } else if (ent.value.loc) {
@@ -2379,8 +2379,8 @@ export function validateSelectIncludeEntries(
               .getText(
                 new Range(
                   doc.positionAt(ent.value.loc.start.offset),
-                  doc.positionAt(ent.value.loc.end.offset)
-                )
+                  doc.positionAt(ent.value.loc.end.offset),
+                ),
               )
               .trim();
 
@@ -2390,11 +2390,11 @@ export function validateSelectIncludeEntries(
                 new vscode.Diagnostic(
                   new Range(
                     doc.positionAt(start.offset),
-                    doc.positionAt(end.offset)
+                    doc.positionAt(end.offset),
                   ),
                   `\`select\` for "${name}" expects a boolean or nested selection, but got "${raw}".`,
-                  vscode.DiagnosticSeverity.Error
-                )
+                  vscode.DiagnosticSeverity.Error,
+                ),
               );
             }
           }
@@ -2407,7 +2407,7 @@ export function validateSelectIncludeEntries(
   // 2️⃣ VALIDATE INCLUDE BLOCK
   // ────────────────────────────────────────────────────────────────────
   const includeEntry = (arr.items as Entry[]).find(
-    (e) => e.key?.kind === "string" && (e.key as any).value === "include"
+    (e) => e.key?.kind === "string" && (e.key as any).value === "include",
   );
 
   if (includeEntry) {
@@ -2437,16 +2437,14 @@ const PRISMA_OPERATORS = new Set([
   "not",
 ]);
 
+// - Replace the entire isValidPhpType function with this:
+
 function isValidPhpType(expr: string, info: FieldInfo): boolean {
   /**
-   * For Boolean fields we allow any number of leading “!” operators,
-   * because `!$foo`, `!!$foo`, `!true`, etc. are still valid booleans.
-   * For every other Prisma type we keep the original string intact.
+   * For Boolean fields we allow any number of leading “!” operators.
    */
   const raw =
     info.type === "Boolean" ? expr.replace(/^!+\s*/, "").trim() : expr.trim();
-
-  const allowed = phpDataTypes[info.type] ?? [];
 
   /* ── quick classifiers (all run on the *cleaned* raw string) ── */
   const isString = /^['"]/.test(raw);
@@ -2457,8 +2455,12 @@ function isValidPhpType(expr: string, info: FieldInfo): boolean {
   const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(raw);
   const isNull = /^null$/i.test(raw);
 
-  /* variables are always accepted (type checked at runtime) */
-  if (isVar) {
+  // ✅ NEW: Detect PHP Class Constants (e.g., UserType::ADMIN, self::CONST)
+  // Matches: Namespaced\Class::CONST, Class::CONST, \Root::CONST
+  const isClassConst = /^\\?[A-Za-z_][\w\\]*::[A-Za-z_]\w*$/.test(raw);
+
+  /* Variables and Class Constants are always accepted (type checked at runtime) */
+  if (isVar || isClassConst) {
     return true;
   }
 
@@ -2467,25 +2469,33 @@ function isValidPhpType(expr: string, info: FieldInfo): boolean {
     return info.nullable === true;
   }
 
+  // ✅ NEW: Handle Custom Enums
+  // If the type (e.g., "UserType") isn't in our standard list, treat it as an Enum
+  let allowed = phpDataTypes[info.type];
+  if (!allowed) {
+    allowed = ["enum", "string"];
+  }
+
   /* final decision against the Prisma field type */
   return allowed.some((t) => {
     switch (t) {
       case "string":
-        return isString || isVar;
+        return isString;
       case "int":
         return isNumber && !raw.includes(".");
       case "float":
         return isNumber;
       case "bool":
-        return isBool || isVar; // ← allows cleaned booleans
+        return isBool;
       case "array":
         return isArray;
       case "DateTime":
-        return /^new\s+DateTime/.test(raw) || isFnCall || isString || isVar;
+        return /^new\s+DateTime/.test(raw) || isFnCall || isString;
       case "BigInteger":
       case "BigDecimal":
         return isFnCall;
       case "enum":
+        // We already allowed vars and class constants above, so here we just check strings
         return isString;
       default: /* custom scalar, class, etc. */
         return isFnCall;
@@ -2507,7 +2517,7 @@ const nodeName = (n: Node) =>
 const rangeOf = (doc: vscode.TextDocument, loc: Node["loc"]) =>
   new vscode.Range(
     doc.positionAt(loc!.start.offset),
-    doc.positionAt(loc!.end.offset)
+    doc.positionAt(loc!.end.offset),
   );
 
 function walk(node: Node, visit: (n: Node) => void) {
@@ -2527,11 +2537,11 @@ function walk(node: Node, visit: (n: Node) => void) {
 
 function locToRange(
   doc: vscode.TextDocument,
-  loc: { start: { offset: number }; end: { offset: number } }
+  loc: { start: { offset: number }; end: { offset: number } },
 ) {
   return new vscode.Range(
     doc.positionAt(loc!.start.offset),
-    doc.positionAt(loc!.end.offset)
+    doc.positionAt(loc!.end.offset),
   );
 }
 
@@ -2551,7 +2561,7 @@ function printArrayLiteral(arr: PhpArray): string {
         "value" in item.value
           ? { [String(item.key.value) || ""]: item.value.value || "" }
           : {}),
-      }))
+      })),
     );
   }
 }
@@ -2568,15 +2578,15 @@ function isDynamicKey(key?: Node | null): boolean {
 function validateSelectIncludeExclusivity(
   arr: PhpArray,
   doc: vscode.TextDocument,
-  diags: vscode.Diagnostic[]
+  diags: vscode.Diagnostic[],
 ): boolean {
   // do we have both blocks?
   const entries = arr.items as Entry[];
   const hasSelect = entries.some(
-    (e) => e.key?.kind === "string" && (e.key as any).value === "select"
+    (e) => e.key?.kind === "string" && (e.key as any).value === "select",
   );
   const hasInclude = entries.some(
-    (e) => e.key?.kind === "string" && (e.key as any).value === "include"
+    (e) => e.key?.kind === "string" && (e.key as any).value === "include",
   );
   if (!hasSelect || !hasInclude) {
     return false;
@@ -2593,8 +2603,8 @@ function validateSelectIncludeExclusivity(
           new vscode.Diagnostic(
             new vscode.Range(start, end),
             `You may not use both \`select\` and \`include\` in the same query. Choose one or the other.`,
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
       }
     }
@@ -2609,15 +2619,15 @@ function validateOrderByEntries(
   fields: Map<string, FieldInfo>,
   modelName: string,
   diags: vscode.Diagnostic[],
-  modelMap?: ModelMap
+  modelMap?: ModelMap,
 ) {
   // 1️⃣ Find the "orderBy" entry
   const entries = (arr.items as Node[]).filter(
-    (node): node is Entry => node.kind === "entry"
+    (node): node is Entry => node.kind === "entry",
   ) as Entry[];
 
   const orderByEntry = entries.find(
-    (e) => e.key?.kind === "string" && (e.key as any).value === "orderBy"
+    (e) => e.key?.kind === "string" && (e.key as any).value === "orderBy",
   );
 
   if (!orderByEntry) {
@@ -2631,8 +2641,8 @@ function validateOrderByEntries(
         new vscode.Diagnostic(
           rangeOf(doc, orderByEntry.key.loc),
           "`orderBy` must be an array literal of `{ field => 'asc'|'desc' }` entries.",
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     }
     return;
@@ -2642,7 +2652,7 @@ function validateOrderByEntries(
   const orderArr = orderByEntry.value as PhpArray;
 
   for (const item of (orderArr.items as Node[]).filter(
-    (node): node is Entry => node.kind === "entry"
+    (node): node is Entry => node.kind === "entry",
   ) as Entry[]) {
     if (item.key?.kind !== "string" || !item.value?.loc) {
       continue;
@@ -2659,8 +2669,8 @@ function validateOrderByEntries(
         new vscode.Diagnostic(
           rangeOf(doc, fieldLoc),
           `The column "${fieldName}" does not exist on ${modelName}.`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
       continue;
     }
@@ -2673,8 +2683,8 @@ function validateOrderByEntries(
           new vscode.Diagnostic(
             rangeOf(doc, fieldLoc),
             `Ordering by relation "${fieldName}" requires a nested object like: { ${fieldName}: { fieldName: 'asc' } }`,
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
         continue;
       }
@@ -2691,7 +2701,7 @@ function validateOrderByEntries(
           fieldInfo.type,
           fieldName,
           fieldInfo, // ✅ FIXED: Pass fieldInfo so we can check isList
-          diags
+          diags,
         );
       }
       continue;
@@ -2702,8 +2712,8 @@ function validateOrderByEntries(
       .getText(
         new vscode.Range(
           doc.positionAt(valLoc.start.offset),
-          doc.positionAt(valLoc.end.offset)
-        )
+          doc.positionAt(valLoc.end.offset),
+        ),
       )
       .trim()
       .replace(/^['"]|['"]$/g, "");
@@ -2713,11 +2723,11 @@ function validateOrderByEntries(
         new vscode.Diagnostic(
           new vscode.Range(
             doc.positionAt(valLoc.start.offset),
-            doc.positionAt(valLoc.end.offset)
+            doc.positionAt(valLoc.end.offset),
           ),
           `Invalid sort direction "${raw}". Allowed values: "asc", "desc".`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     }
   }
@@ -2730,10 +2740,10 @@ function validateRelationOrderBy(
   relatedModelName: string,
   relationName: string,
   relationInfo: FieldInfo, // ✅ ADDED: Need this to check isList
-  diags: vscode.Diagnostic[]
+  diags: vscode.Diagnostic[],
 ) {
   for (const item of (arr.items as Node[]).filter(
-    (node): node is Entry => node.kind === "entry"
+    (node): node is Entry => node.kind === "entry",
   ) as Entry[]) {
     if (item.key?.kind !== "string" || !item.value?.loc) {
       continue;
@@ -2749,8 +2759,8 @@ function validateRelationOrderBy(
         .getText(
           new vscode.Range(
             doc.positionAt(valLoc.start.offset),
-            doc.positionAt(valLoc.end.offset)
-          )
+            doc.positionAt(valLoc.end.offset),
+          ),
         )
         .trim()
         .replace(/^['"]|['"]$/g, "");
@@ -2760,8 +2770,8 @@ function validateRelationOrderBy(
           new vscode.Diagnostic(
             rangeOf(doc, valLoc),
             `Invalid sort direction for _count: "${raw}". Allowed values: "asc", "desc".`,
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
       }
       continue;
@@ -2775,8 +2785,8 @@ function validateRelationOrderBy(
           rangeOf(doc, fieldLoc),
           `Cannot order by field "${fieldName}" on one-to-many relation "${relationName}". ` +
             `For \`${relationName}: ${relatedModelName}[]\`, you can only order by \`_count\`.`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
       continue;
     }
@@ -2787,8 +2797,8 @@ function validateRelationOrderBy(
         new vscode.Diagnostic(
           rangeOf(doc, fieldLoc),
           `The column "${fieldName}" does not exist on ${relatedModelName}.`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
       continue;
     }
@@ -2798,8 +2808,8 @@ function validateRelationOrderBy(
       .getText(
         new vscode.Range(
           doc.positionAt(valLoc.start.offset),
-          doc.positionAt(valLoc.end.offset)
-        )
+          doc.positionAt(valLoc.end.offset),
+        ),
       )
       .trim()
       .replace(/^['"]|['"]$/g, "");
@@ -2809,8 +2819,8 @@ function validateRelationOrderBy(
         new vscode.Diagnostic(
           rangeOf(doc, valLoc),
           `Invalid sort direction "${raw}". Allowed values: "asc", "desc".`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     }
   }
@@ -2818,7 +2828,7 @@ function validateRelationOrderBy(
 
 export async function validateCreateCall(
   doc: vscode.TextDocument,
-  collection: vscode.DiagnosticCollection
+  collection: vscode.DiagnosticCollection,
 ): Promise<void> {
   const diagnostics: vscode.Diagnostic[] = [];
   const modelMap = await getModelMap();
@@ -2862,15 +2872,15 @@ export async function validateCreateCall(
       return;
     }
     const dataEntry = (args.items as Entry[]).find(
-      (e) => e.key?.kind === "string" && (e.key as any).value === "data"
+      (e) => e.key?.kind === "string" && (e.key as any).value === "data",
     );
     if (!dataEntry) {
       diagnostics.push(
         new vscode.Diagnostic(
           rangeOf(doc, call.loc),
           `${opName}() requires a 'data' block.`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
       collection.set(doc.uri, diagnostics);
       return;
@@ -2893,8 +2903,8 @@ export async function validateCreateCall(
           new vscode.Diagnostic(
             rangeOf(doc, dataEntry.key!.loc!),
             "`data` must be an array literal or a variable containing array data.",
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
       } else if (isArray(dataEntry.value)) {
         for (const item of (dataEntry.value as PhpArray).items as Entry[]) {
@@ -2919,7 +2929,7 @@ export async function validateCreateCall(
               value.loc!.start.offset,
               fields,
               modelName,
-              diagnostics
+              diagnostics,
             );
             continue;
           }
@@ -2931,8 +2941,8 @@ export async function validateCreateCall(
               new vscode.Diagnostic(
                 keyRange,
                 `The column "${key}" does not exist in ${modelName}.`,
-                vscode.DiagnosticSeverity.Error
-              )
+                vscode.DiagnosticSeverity.Error,
+              ),
             );
             continue;
           }
@@ -2944,8 +2954,8 @@ export async function validateCreateCall(
               new vscode.Diagnostic(
                 keyRange,
                 `"${key}" expects ${expected}, but received "${raw}".`,
-                vscode.DiagnosticSeverity.Error
-              )
+                vscode.DiagnosticSeverity.Error,
+              ),
             );
           }
         }
@@ -2957,7 +2967,7 @@ export async function validateCreateCall(
         fields,
         modelName,
         diagnostics,
-        modelMap
+        modelMap,
       );
     }
 
@@ -2974,8 +2984,8 @@ export async function validateCreateCall(
             new vscode.Diagnostic(
               rangeOf(doc, rowItem.loc!),
               `Each element of 'data' in createMany() must be an array of column=>value pairs.`,
-              vscode.DiagnosticSeverity.Error
-            )
+              vscode.DiagnosticSeverity.Error,
+            ),
           );
           continue;
         }
@@ -2999,8 +3009,8 @@ export async function validateCreateCall(
               new vscode.Diagnostic(
                 keyRange,
                 `The column "${key}" does not exist in ${modelName}.`,
-                vscode.DiagnosticSeverity.Error
-              )
+                vscode.DiagnosticSeverity.Error,
+              ),
             );
             continue;
           }
@@ -3012,8 +3022,8 @@ export async function validateCreateCall(
               new vscode.Diagnostic(
                 keyRange,
                 `"${key}" expects ${expected}, but received "${raw}".`,
-                vscode.DiagnosticSeverity.Error
-              )
+                vscode.DiagnosticSeverity.Error,
+              ),
             );
           }
         }
@@ -3028,7 +3038,7 @@ export async function validateCreateCall(
 
 export async function validateReadCall(
   doc: vscode.TextDocument,
-  collection: vscode.DiagnosticCollection
+  collection: vscode.DiagnosticCollection,
 ) {
   const diags: vscode.Diagnostic[] = [];
   const modelMap = await getModelMap();
@@ -3057,7 +3067,7 @@ export async function validateReadCall(
     const whereEntry = (arr as any).items.find(
       (e: Entry) =>
         e.key?.kind === "string" &&
-        (e.key as unknown as { value: string }).value === "where"
+        (e.key as unknown as { value: string }).value === "where",
     ) as Entry | undefined;
 
     if (!whereEntry) {
@@ -3068,11 +3078,11 @@ export async function validateReadCall(
               ? locToRange(doc, call.loc)
               : new vscode.Range(
                   new vscode.Position(0, 0),
-                  new vscode.Position(0, 0)
+                  new vscode.Position(0, 0),
                 ),
             `findUnique() requires a 'where' block.`,
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
       }
 
@@ -3082,7 +3092,7 @@ export async function validateReadCall(
         fields,
         call.model,
         diags,
-        modelMap
+        modelMap,
       );
 
       validateOrderByEntries(
@@ -3091,7 +3101,7 @@ export async function validateReadCall(
         fields,
         call.model,
         diags,
-        modelMap
+        modelMap,
       );
 
       continue;
@@ -3104,7 +3114,7 @@ export async function validateReadCall(
       fields,
       call.model,
       diags,
-      modelMap
+      modelMap,
     );
 
     validateSelectIncludeEntries(
@@ -3113,7 +3123,7 @@ export async function validateReadCall(
       fields,
       call.model,
       diags,
-      modelMap
+      modelMap,
     );
 
     validateOrderByEntries(doc, arr as PhpArray, fields, call.model, diags);
@@ -3128,7 +3138,7 @@ function validateWhereArray(
   fields: Map<string, FieldInfo>,
   model: string,
   out: vscode.Diagnostic[],
-  modelMap?: ModelMap
+  modelMap?: ModelMap,
 ) {
   if (node.kind !== "array") {
     return;
@@ -3156,8 +3166,8 @@ function validateWhereArray(
         new vscode.Diagnostic(
           keyRange,
           `The column "${key}" does not exist in ${model}.`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
       continue;
     }
@@ -3183,8 +3193,8 @@ function validateWhereArray(
         new vscode.Diagnostic(
           keyRange,
           `"${key}" expects ${expected}, but received "${rawExpr}".`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     }
   }
@@ -3196,7 +3206,7 @@ function validateRelationWhereArray(
   relationInfo: FieldInfo,
   relationName: string,
   out: vscode.Diagnostic[],
-  modelMap: ModelMap
+  modelMap: ModelMap,
 ) {
   if (!isArray(arrayNode)) {
     return;
@@ -3227,15 +3237,15 @@ function validateRelationWhereArray(
           relationFields,
           relationInfo.type,
           out,
-          modelMap
+          modelMap,
         );
       } else {
         out.push(
           new vscode.Diagnostic(
             opRange,
             `Relation operator "${operator}" requires a nested where condition array.`,
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
       }
     } else if (
@@ -3247,16 +3257,16 @@ function validateRelationWhereArray(
         new vscode.Diagnostic(
           opRange,
           `Cannot use scalar operator "${operator}" on relation field "${relationName}". Use "every", "none", or "some" instead.`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     } else {
       out.push(
         new vscode.Diagnostic(
           opRange,
           `Invalid operator "${operator}" for relation field "${relationName}".`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     }
   }
@@ -3267,7 +3277,7 @@ function validateScalarWhereArray(
   arrayNode: Node,
   fieldInfo: FieldInfo,
   fieldName: string,
-  out: vscode.Diagnostic[]
+  out: vscode.Diagnostic[],
 ) {
   if (!isArray(arrayNode)) {
     return;
@@ -3287,8 +3297,8 @@ function validateScalarWhereArray(
         new vscode.Diagnostic(
           opRange,
           `Cannot use relation operator "${op}" on scalar field "${fieldName}".`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
       continue;
     }
@@ -3298,8 +3308,8 @@ function validateScalarWhereArray(
         new vscode.Diagnostic(
           opRange,
           `Invalid filter operator "${op}" for "${fieldName}".`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
       continue;
     }
@@ -3320,8 +3330,8 @@ function validateScalarWhereArray(
             opRange,
             `Filter "${op}" for "${fieldName}" expects an array (e.g. [1, 2, 3]) ` +
               `or an expression that yields an array (e.g. $ids). Got "${raw}".`,
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
         continue;
       }
@@ -3339,8 +3349,8 @@ function validateScalarWhereArray(
                   opRange,
                   `Filter "${op}" for "${fieldName}" expects elements of type ${fieldInfo.type}, ` +
                     `but found "${el}".`,
-                  vscode.DiagnosticSeverity.Error
-                )
+                  vscode.DiagnosticSeverity.Error,
+                ),
               );
               break;
             }
@@ -3356,8 +3366,8 @@ function validateScalarWhereArray(
         new vscode.Diagnostic(
           opRange,
           `Filter "${op}" for "${fieldName}" expects type ${fieldInfo.type}, but received "${raw}".`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     }
   }
@@ -3365,7 +3375,7 @@ function validateScalarWhereArray(
 
 export async function validateUpdateCall(
   doc: vscode.TextDocument,
-  collection: vscode.DiagnosticCollection
+  collection: vscode.DiagnosticCollection,
 ): Promise<void> {
   const diagnostics: vscode.Diagnostic[] = [];
   const modelMap = await getModelMap();
@@ -3415,10 +3425,10 @@ export async function validateUpdateCall(
 
     const items = arg0.items as Entry[];
     const whereEntry = items.find(
-      (e) => e.key?.kind === "string" && (e.key as any).value === "where"
+      (e) => e.key?.kind === "string" && (e.key as any).value === "where",
     ) as Entry | undefined;
     const dataEntry = items.find(
-      (e) => e.key?.kind === "string" && (e.key as any).value === "data"
+      (e) => e.key?.kind === "string" && (e.key as any).value === "data",
     ) as Entry | undefined;
 
     // require both blocks
@@ -3433,8 +3443,8 @@ export async function validateUpdateCall(
         new vscode.Diagnostic(
           rangeOf(doc, call.loc!),
           `${opName}() requires both ${missing} blocks.`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
       collection.set(doc.uri, diagnostics);
       return;
@@ -3453,8 +3463,8 @@ export async function validateUpdateCall(
         new vscode.Diagnostic(
           rangeOf(doc, whereEntry.key!.loc!),
           "`where` must be an array literal or a variable containing filter conditions.",
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     } else if (isArray(whereEntry.value)) {
       validateWhereArray(
@@ -3463,7 +3473,7 @@ export async function validateUpdateCall(
         fields,
         modelName,
         diagnostics,
-        modelMap
+        modelMap,
       );
     }
 
@@ -3473,8 +3483,8 @@ export async function validateUpdateCall(
         new vscode.Diagnostic(
           rangeOf(doc, dataEntry.key!.loc!),
           "`data` must be an array literal or a variable containing array data.",
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     } else if (isArray(dataEntry.value)) {
       // Only validate the contents if it's an array literal, not a variable
@@ -3500,8 +3510,8 @@ export async function validateUpdateCall(
           new vscode.Diagnostic(
             rangeOf(doc, dataEntry.key!.loc!),
             `${opName}() requires at least one real column to be updated in 'data'.`,
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
       }
 
@@ -3528,8 +3538,8 @@ export async function validateUpdateCall(
             new vscode.Diagnostic(
               keyRange,
               `The column "${key}" does not exist in ${modelName}.`,
-              vscode.DiagnosticSeverity.Error
-            )
+              vscode.DiagnosticSeverity.Error,
+            ),
           );
           continue;
         }
@@ -3542,7 +3552,7 @@ export async function validateUpdateCall(
           const hasAtomicOp = arrayEntries.some(
             (op) =>
               op.key?.kind === "string" &&
-              ATOMIC_NUMBER_OPERATORS.includes((op.key as any).value as any)
+              ATOMIC_NUMBER_OPERATORS.includes((op.key as any).value as any),
           );
 
           if (hasAtomicOp) {
@@ -3555,7 +3565,7 @@ export async function validateUpdateCall(
                   info, // ✅ Now info is defined and not undefined
                   key,
                   modelName,
-                  diagnostics
+                  diagnostics,
                 );
               }
             }
@@ -3567,7 +3577,7 @@ export async function validateUpdateCall(
               value.loc!.start.offset,
               fields,
               modelName,
-              diagnostics
+              diagnostics,
             );
           }
           continue;
@@ -3581,8 +3591,8 @@ export async function validateUpdateCall(
             new vscode.Diagnostic(
               keyRange,
               `"${key}" expects ${expected}, but received "${raw}".`,
-              vscode.DiagnosticSeverity.Error
-            )
+              vscode.DiagnosticSeverity.Error,
+            ),
           );
         }
       }
@@ -3595,7 +3605,7 @@ export async function validateUpdateCall(
       fields,
       modelName,
       diagnostics,
-      modelMap
+      modelMap,
     );
     validateSelectIncludeEntries(
       doc,
@@ -3603,7 +3613,7 @@ export async function validateUpdateCall(
       fields,
       modelName,
       diagnostics,
-      modelMap
+      modelMap,
     );
     validateOrderByEntries(doc, arg0, fields, modelName, diagnostics, modelMap);
   });
@@ -3614,7 +3624,7 @@ export async function validateUpdateCall(
 
 export async function validateDeleteCall(
   doc: vscode.TextDocument,
-  collection: vscode.DiagnosticCollection
+  collection: vscode.DiagnosticCollection,
 ): Promise<void> {
   const diagnostics: vscode.Diagnostic[] = [];
   const modelMap = await getModelMap();
@@ -3667,7 +3677,7 @@ export async function validateDeleteCall(
     // find the where entry
     const items = arrayArg.items as Entry[];
     const whereEntry = items.find(
-      (e) => e.key?.kind === "string" && (e.key as any).value === "where"
+      (e) => e.key?.kind === "string" && (e.key as any).value === "where",
     ) as Entry | undefined;
 
     // require 'where'
@@ -3676,8 +3686,8 @@ export async function validateDeleteCall(
         new vscode.Diagnostic(
           rangeOf(doc, call.loc!),
           `${opName}() requires a 'where' block.`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
       collection.set(doc.uri, diagnostics);
       return;
@@ -3687,8 +3697,8 @@ export async function validateDeleteCall(
         new vscode.Diagnostic(
           rangeOf(doc, whereEntry.key!.loc!),
           "`where` must be an array literal.",
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
       collection.set(doc.uri, diagnostics);
       return;
@@ -3708,7 +3718,7 @@ export async function validateDeleteCall(
       fields,
       modelName,
       diagnostics,
-      modelMap
+      modelMap,
     );
 
     // still forbid mixing select/include
@@ -3718,7 +3728,7 @@ export async function validateDeleteCall(
       fields,
       modelName,
       diagnostics,
-      modelMap
+      modelMap,
     );
   });
 
@@ -3727,7 +3737,7 @@ export async function validateDeleteCall(
 
 export async function validateUpsertCall(
   doc: vscode.TextDocument,
-  collection: vscode.DiagnosticCollection
+  collection: vscode.DiagnosticCollection,
 ): Promise<void> {
   const diagnostics: vscode.Diagnostic[] = [];
   const modelMap = await getModelMap();
@@ -3781,13 +3791,13 @@ export async function validateUpsertCall(
 
     // pick out where, update & create
     const whereEntry = items.find(
-      (e) => e.key?.kind === "string" && (e.key as any).value === "where"
+      (e) => e.key?.kind === "string" && (e.key as any).value === "where",
     ) as Entry | undefined;
     const updateEntry = items.find(
-      (e) => e.key?.kind === "string" && (e.key as any).value === "update"
+      (e) => e.key?.kind === "string" && (e.key as any).value === "update",
     ) as Entry | undefined;
     const createEntry = items.find(
-      (e) => e.key?.kind === "string" && (e.key as any).value === "create"
+      (e) => e.key?.kind === "string" && (e.key as any).value === "create",
     ) as Entry | undefined;
 
     // require all three
@@ -3803,8 +3813,8 @@ export async function validateUpsertCall(
         new vscode.Diagnostic(
           rangeOf(doc, call.loc!),
           `upsert() requires ${missing}.`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
       return;
     }
@@ -3822,8 +3832,8 @@ export async function validateUpsertCall(
         new vscode.Diagnostic(
           rangeOf(doc, whereEntry.key!.loc!),
           "`where` must be an array literal or a variable containing filter conditions.",
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     } else if (isArray(whereEntry.value)) {
       validateWhereArray(
@@ -3832,7 +3842,7 @@ export async function validateUpsertCall(
         fields,
         modelName,
         diagnostics,
-        modelMap
+        modelMap,
       );
     }
 
@@ -3842,8 +3852,8 @@ export async function validateUpsertCall(
         new vscode.Diagnostic(
           rangeOf(doc, updateEntry.key!.loc!),
           "`update` must be an array literal or a variable containing array data.",
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     } else if (isArray(updateEntry.value)) {
       for (const item of (updateEntry.value as PhpArray).items as Entry[]) {
@@ -3865,7 +3875,7 @@ export async function validateUpsertCall(
             value.loc!.start.offset,
             fields,
             modelName,
-            diagnostics
+            diagnostics,
           );
           continue;
         }
@@ -3877,8 +3887,8 @@ export async function validateUpsertCall(
             new vscode.Diagnostic(
               keyRange,
               `The column "${key}" does not exist in ${modelName}.`,
-              vscode.DiagnosticSeverity.Error
-            )
+              vscode.DiagnosticSeverity.Error,
+            ),
           );
           continue;
         }
@@ -3890,8 +3900,8 @@ export async function validateUpsertCall(
             new vscode.Diagnostic(
               keyRange,
               `"${key}" expects ${expected}, but received "${raw}".`,
-              vscode.DiagnosticSeverity.Error
-            )
+              vscode.DiagnosticSeverity.Error,
+            ),
           );
         }
       }
@@ -3903,8 +3913,8 @@ export async function validateUpsertCall(
         new vscode.Diagnostic(
           rangeOf(doc, createEntry.key!.loc!),
           "`create` must be an array literal or a variable containing array data.",
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     } else if (isArray(createEntry.value)) {
       for (const item of (createEntry.value as PhpArray).items as Entry[]) {
@@ -3925,7 +3935,7 @@ export async function validateUpsertCall(
             value.loc!.start.offset,
             fields,
             modelName,
-            diagnostics
+            diagnostics,
           );
           continue;
         }
@@ -3937,8 +3947,8 @@ export async function validateUpsertCall(
             new vscode.Diagnostic(
               keyRange,
               `The column "${key}" does not exist in ${modelName}.`,
-              vscode.DiagnosticSeverity.Error
-            )
+              vscode.DiagnosticSeverity.Error,
+            ),
           );
           continue;
         }
@@ -3950,8 +3960,8 @@ export async function validateUpsertCall(
             new vscode.Diagnostic(
               keyRange,
               `"${key}" expects ${expected}, but received "${raw}".`,
-              vscode.DiagnosticSeverity.Error
-            )
+              vscode.DiagnosticSeverity.Error,
+            ),
           );
         }
       }
@@ -3964,7 +3974,7 @@ export async function validateUpsertCall(
       fields,
       modelName,
       diagnostics,
-      modelMap
+      modelMap,
     );
   });
 
@@ -3973,7 +3983,7 @@ export async function validateUpsertCall(
 
 export async function validateGroupByCall(
   doc: vscode.TextDocument,
-  collection: vscode.DiagnosticCollection
+  collection: vscode.DiagnosticCollection,
 ): Promise<void> {
   const diagnostics: vscode.Diagnostic[] = [];
   const modelMap = await getModelMap();
@@ -4024,15 +4034,15 @@ export async function validateGroupByCall(
 
     // require 'by'
     const byEntry = items.find(
-      (e) => e.key?.kind === "string" && (e.key as any).value === "by"
+      (e) => e.key?.kind === "string" && (e.key as any).value === "by",
     ) as Entry | undefined;
     if (!byEntry) {
       diagnostics.push(
         new vscode.Diagnostic(
           rangeOf(doc, call.loc!),
           "groupBy() requires a 'by' block.",
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
       return;
     }
@@ -4058,8 +4068,8 @@ export async function validateGroupByCall(
               new vscode.Diagnostic(
                 rangeOf(doc, v.loc!),
                 `The column "${col}" does not exist in ${modelName}.`,
-                vscode.DiagnosticSeverity.Error
-              )
+                vscode.DiagnosticSeverity.Error,
+              ),
             );
           }
           continue;
@@ -4073,8 +4083,8 @@ export async function validateGroupByCall(
           new vscode.Diagnostic(
             rangeOf(doc, ent.loc!),
             "`by` elements must be string literals or a PHP variable/property.",
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
       }
     } else if (isVariable(byValue) || isPropLookup(byValue)) {
@@ -4085,8 +4095,8 @@ export async function validateGroupByCall(
         new vscode.Diagnostic(
           rangeOf(doc, byValue.loc!),
           "`by` must be either an array of column names (or PHP vars) or a PHP variable/property.",
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     }
     // ------------------------------------------------------------
@@ -4098,7 +4108,7 @@ export async function validateGroupByCall(
 
     // optional 'where'
     const whereEntry = items.find(
-      (e) => e.key?.kind === "string" && (e.key as any).value === "where"
+      (e) => e.key?.kind === "string" && (e.key as any).value === "where",
     );
     if (whereEntry) {
       if (!isArray(whereEntry.value)) {
@@ -4106,8 +4116,8 @@ export async function validateGroupByCall(
           new vscode.Diagnostic(
             rangeOf(doc, whereEntry.key!.loc!),
             "`where` must be an array literal.",
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
       } else {
         validateWhereArray(
@@ -4116,14 +4126,14 @@ export async function validateGroupByCall(
           fields,
           modelName,
           diagnostics,
-          modelMap
+          modelMap,
         );
       }
     }
 
     // **custom orderBy validation**
     const orderEntry = items.find(
-      (e) => e.key?.kind === "string" && (e.key as any).value === "orderBy"
+      (e) => e.key?.kind === "string" && (e.key as any).value === "orderBy",
     );
     if (orderEntry) {
       if (!isArray(orderEntry.value)) {
@@ -4131,8 +4141,8 @@ export async function validateGroupByCall(
           new vscode.Diagnostic(
             rangeOf(doc, orderEntry.key!.loc!),
             "`orderBy` must be an array literal.",
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
       } else {
         const arr = orderEntry.value as PhpArray;
@@ -4147,8 +4157,8 @@ export async function validateGroupByCall(
               new vscode.Diagnostic(
                 keyRange,
                 `The column "${col}" does not exist in ${modelName}.`,
-                vscode.DiagnosticSeverity.Error
-              )
+                vscode.DiagnosticSeverity.Error,
+              ),
             );
             continue;
           }
@@ -4162,8 +4172,8 @@ export async function validateGroupByCall(
               new vscode.Diagnostic(
                 rangeOf(doc, cell.value.loc!),
                 `Invalid sort direction "${raw}" for "${col}". Allowed: "asc", "desc".`,
-                vscode.DiagnosticSeverity.Error
-              )
+                vscode.DiagnosticSeverity.Error,
+              ),
             );
           }
         }
@@ -4173,7 +4183,7 @@ export async function validateGroupByCall(
     // aggregations (_count, _max, …)
     const validateAgg = (keyName: string) => {
       const entry = items.find(
-        (e) => e.key?.kind === "string" && (e.key as any).value === keyName
+        (e) => e.key?.kind === "string" && (e.key as any).value === keyName,
       ) as Entry | undefined;
       if (!entry) {
         return;
@@ -4183,8 +4193,8 @@ export async function validateGroupByCall(
           new vscode.Diagnostic(
             rangeOf(doc, entry.key!.loc!),
             `\`${keyName}\` must be an array literal.`,
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
         return;
       }
@@ -4200,8 +4210,8 @@ export async function validateGroupByCall(
             new vscode.Diagnostic(
               keyRange,
               `The column "${col}" does not exist in ${modelName}.`,
-              vscode.DiagnosticSeverity.Error
-            )
+              vscode.DiagnosticSeverity.Error,
+            ),
           );
           continue;
         }
@@ -4211,8 +4221,8 @@ export async function validateGroupByCall(
             new vscode.Diagnostic(
               rangeOf(doc, cell.value.loc!),
               `\`${keyName}.${col}\` expects a boolean, but got "${raw}".`,
-              vscode.DiagnosticSeverity.Error
-            )
+              vscode.DiagnosticSeverity.Error,
+            ),
           );
         }
       }
@@ -4228,7 +4238,7 @@ export async function validateGroupByCall(
       fields,
       modelName,
       diagnostics,
-      modelMap
+      modelMap,
     );
 
     validateOrderByEntries(doc, arg0, fields, modelName, diagnostics, modelMap);
@@ -4239,7 +4249,7 @@ export async function validateGroupByCall(
 
 export async function validateAggregateCall(
   doc: vscode.TextDocument,
-  collection: vscode.DiagnosticCollection
+  collection: vscode.DiagnosticCollection,
 ): Promise<void> {
   const diagnostics: vscode.Diagnostic[] = [];
   const modelMap = await getModelMap();
@@ -4295,7 +4305,7 @@ export async function validateAggregateCall(
 
     for (const agg of AGG_KEYS) {
       const entry = items.find(
-        (e) => e.key?.kind === "string" && (e.key as any).value === agg
+        (e) => e.key?.kind === "string" && (e.key as any).value === agg,
       ) as Entry | undefined;
       if (!entry) {
         continue;
@@ -4307,8 +4317,8 @@ export async function validateAggregateCall(
           new vscode.Diagnostic(
             rangeOf(doc, entry.key!.loc!),
             `\`${agg}\` must be an array literal.`,
-            vscode.DiagnosticSeverity.Error
-          )
+            vscode.DiagnosticSeverity.Error,
+          ),
         );
         continue;
       }
@@ -4328,8 +4338,8 @@ export async function validateAggregateCall(
             new vscode.Diagnostic(
               keyRange,
               `The column "${col}" does not exist in ${modelName}.`,
-              vscode.DiagnosticSeverity.Error
-            )
+              vscode.DiagnosticSeverity.Error,
+            ),
           );
           continue;
         }
@@ -4341,8 +4351,8 @@ export async function validateAggregateCall(
             new vscode.Diagnostic(
               rangeOf(doc, cell.value.loc!),
               `\`${agg}.${col}\` expects a boolean, but got "${raw}".`,
-              vscode.DiagnosticSeverity.Error
-            )
+              vscode.DiagnosticSeverity.Error,
+            ),
           );
         }
       }
@@ -4358,7 +4368,7 @@ function validateAtomicOperation(
   fieldInfo: FieldInfo,
   fieldName: string,
   modelName: string,
-  diags: vscode.Diagnostic[]
+  diags: vscode.Diagnostic[],
 ) {
   if (!operatorEntry.key || operatorEntry.key.kind !== "string") {
     return;
@@ -4373,8 +4383,8 @@ function validateAtomicOperation(
       new vscode.Diagnostic(
         keyRange,
         `Invalid atomic operator "${operator}". Valid operators: increment, decrement, multiply, divide.`,
-        vscode.DiagnosticSeverity.Error
-      )
+        vscode.DiagnosticSeverity.Error,
+      ),
     );
     return;
   }
@@ -4386,8 +4396,8 @@ function validateAtomicOperation(
       new vscode.Diagnostic(
         keyRange,
         `Cannot use "${operator}" on non-numeric field "${fieldName}" (type: ${fieldInfo.type}). Atomic operations only work on Int, Float, BigInt, and Decimal fields.`,
-        vscode.DiagnosticSeverity.Error
-      )
+        vscode.DiagnosticSeverity.Error,
+      ),
     );
     return;
   }
@@ -4413,8 +4423,8 @@ function validateAtomicOperation(
       new vscode.Diagnostic(
         valueRange,
         `"${operator}" expects a numeric value compatible with ${fieldInfo.type}, but got "${raw}".`,
-        vscode.DiagnosticSeverity.Error
-      )
+        vscode.DiagnosticSeverity.Error,
+      ),
     );
   }
 
@@ -4426,8 +4436,8 @@ function validateAtomicOperation(
         new vscode.Diagnostic(
           valueRange,
           `Cannot divide by zero.`,
-          vscode.DiagnosticSeverity.Error
-        )
+          vscode.DiagnosticSeverity.Error,
+        ),
       );
     }
   }
@@ -4435,7 +4445,7 @@ function validateAtomicOperation(
 
 function createAtomicOperatorCompletions(
   context: CompletionContext,
-  fieldInfo: FieldInfo
+  fieldInfo: FieldInfo,
 ): vscode.CompletionItem[] {
   const { pos, already, doc } = context;
 
@@ -4448,14 +4458,14 @@ function createAtomicOperatorCompletions(
   return ATOMIC_NUMBER_OPERATORS.map((operator) => {
     const item = new vscode.CompletionItem(
       operator,
-      vscode.CompletionItemKind.Method
+      vscode.CompletionItemKind.Method,
     );
 
     item.insertText = new vscode.SnippetString(`${operator}' => $0`);
     item.documentation = new vscode.MarkdownString(
       `**${operator}** - Atomic number operation\n\n` +
         `Atomically ${operator} the field value.\n\n` +
-        `Example: \`'${operator}' => ${operator === "divide" ? "2" : "1"}\``
+        `Example: \`'${operator}' => ${operator === "divide" ? "2" : "1"}\``,
     );
     item.range = makeReplaceRange(doc, pos, already.length);
     item.sortText = `0_${operator}`;
