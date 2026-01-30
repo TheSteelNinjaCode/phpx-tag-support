@@ -57,7 +57,7 @@ export const getPulsePointCompletions = (): vscode.CompletionItem[] => {
       documentation:
         "Register a side effect that runs when dependencies change.",
       insertText: new vscode.SnippetString(
-        "effect(() => {\n\t$0\n}, [${1:deps}])"
+        "effect(() => {\n\t$0\n}, [${1:deps}])",
       ),
     },
     {
@@ -77,7 +77,7 @@ export const getPulsePointCompletions = (): vscode.CompletionItem[] => {
       detail: "onPhase(phase: HydrationPhase, cb: () => void)",
       documentation: "Register a callback for a specific hydration phase.",
       insertText: new vscode.SnippetString(
-        "onPhase(${1:phase}, () => {\n\t$0\n})"
+        "onPhase(${1:phase}, () => {\n\t$0\n})",
       ),
     },
     {
@@ -109,7 +109,7 @@ export const getPulsePointCompletions = (): vscode.CompletionItem[] => {
       detail: "registerLifecycleHooks(hooks: LifecycleHooks)",
       documentation: "Registers global lifecycle hooks for the application.",
       insertText: new vscode.SnippetString(
-        "registerLifecycleHooks({\n\t$1\n})"
+        "registerLifecycleHooks({\n\t$1\n})",
       ),
     },
     {
@@ -129,7 +129,7 @@ export const getPulsePointCompletions = (): vscode.CompletionItem[] => {
       detail: "createPortal(content, container, options?)",
       documentation: "Renders content into a different part of the DOM.",
       insertText: new vscode.SnippetString(
-        "createPortal(${1:content}, ${2:container})"
+        "createPortal(${1:content}, ${2:container})",
       ),
     },
     {
@@ -166,7 +166,7 @@ export const getPulsePointCompletions = (): vscode.CompletionItem[] => {
       detail: "updatePortal(portalId, content, options?)",
       documentation: "Updates the content or options of an existing portal.",
       insertText: new vscode.SnippetString(
-        "updatePortal(${1:portalId}, ${2:content})"
+        "updatePortal(${1:portalId}, ${2:content})",
       ),
     },
 
@@ -213,11 +213,29 @@ export const getPulsePointCompletions = (): vscode.CompletionItem[] => {
       label: "fetchFunction",
       kind: vscode.CompletionItemKind.Method,
       detail:
-        "fetchFunction<T>(functionName: string, data?: object, abortPrevious?: boolean): Promise<T | string>",
-      documentation:
-        "Execute a backend RPC function. Handles CSRF, JSON/FormData serialization, and AbortControllers.",
+        "fetchFunction<T>(functionName: string, data?: object, options?: boolean | RpcOptions): Promise<T | void>",
+      documentation: `### RPC Features
+- **File Uploads**: Pass \`File\` or \`FileList\` in the data object.
+- **Streaming**: Handle Server-Sent Events with \`onStream\`.
+- **Abort**: Cancel requests using \`abortPrevious: true\`.
+
+**Full RpcOptions Interface:**
+\`\`\`typescript
+type RpcOptions = {
+  abortPrevious?: boolean;
+  onStream?: (chunk: any) => void;
+  onStreamError?: (error: any) => void;
+  onStreamComplete?: () => void;
+  onUploadProgress?: (info: {
+    loaded: number;
+    total: number | null;
+    percent: number | null;
+  }) => void;
+  onUploadComplete?: () => void;
+};
+\`\`\``,
       insertText: new vscode.SnippetString(
-        "fetchFunction('${1:functionName}', { ${2:key}: ${3:value} })"
+        "fetchFunction('${1:functionName}', { ${2:key}: ${3:value} })",
       ),
     },
   ];
@@ -268,7 +286,7 @@ export const getSearchParamsCompletions = (): vscode.CompletionItem[] => {
       documentation:
         "Replaces the current search parameters with a new set. Pass null to remove a key.",
       insertText: new vscode.SnippetString(
-        "replace({\n\t${1:key}: ${2:value}\n})"
+        "replace({\n\t${1:key}: ${2:value}\n})",
       ),
     },
     {
@@ -325,7 +343,7 @@ export const getStoreCompletions = (): vscode.CompletionItem[] => {
       documentation:
         "Updates the local store state. Optionally syncs with the backend.",
       insertText: new vscode.SnippetString(
-        "setState({ ${1:key}: ${2:value} })"
+        "setState({ ${1:key}: ${2:value} })",
       ),
     },
     {
@@ -342,6 +360,7 @@ export const getStoreCompletions = (): vscode.CompletionItem[] => {
     const item = new vscode.CompletionItem(m.label, m.kind);
     item.detail = m.detail;
     item.documentation = new vscode.MarkdownString(m.documentation || "");
+    (item.documentation as vscode.MarkdownString).isTrusted = true;
     if (m.insertText) {
       item.insertText = m.insertText;
     }

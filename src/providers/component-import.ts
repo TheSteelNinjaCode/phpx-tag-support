@@ -173,24 +173,18 @@ export const validateMissingImports = (
   componentMap: Map<string, string>,
 ): void => {
   if (document.languageId !== PHP_LANGUAGE || !shouldAnalyze) {
-    diagnosticCollection.delete(document.uri);
+    diagnosticCollection.set(document.uri, []); // Clear if shouldn't analyze
     return;
   }
 
   const originalText = document.getText();
   const useMap = parsePhpUseStatements(originalText);
-
-  // Sanitize text
   let cleanText = removePhpComments(originalText);
-  // cleanText = blankOutHeredocOpeners(cleanText); // Optional: usually fine to leave in
-  // ✅ FIX: Do NOT remove string literals. This ensures tags inside "$html = '<Cmp>'" are detected.
-  // cleanText = removePhpStringLiterals(cleanText);
 
   const BUILTIN_COMPONENTS = new Set(["Fragment"]);
   const diagnostics: vscode.Diagnostic[] = [];
 
-  // Regex: <Component followed by space, /, >, or end of word boundary
-  // Added `_` to allowed characters just in case.
+  // Regex: <Component (starts with uppercase)
   const tagMatches = [
     ...cleanText.matchAll(/<([A-Z][A-Za-z0-9_]*)(?=[\s/>])/g),
   ];
@@ -198,19 +192,25 @@ export const validateMissingImports = (
   tagMatches.forEach((match) => {
     const tag = match[1];
 
-    if (
-      !useMap.has(tag) &&
-      !BUILTIN_COMPONENTS.has(tag) &&
-      componentMap.has(tag)
-    ) {
+    // FIX: Removed componentMap.has(tag) check.
+    // Now it validates ANY custom tag that isn't imported or built-in.
+    if (!useMap.has(tag) && !BUILTIN_COMPONENTS.has(tag)) {
       const start = document.positionAt((match.index ?? 0) + 1);
       const range = new vscode.Range(start, start.translate(0, tag.length));
+
+      // Check if it exists in the map to provide a better message
+      const existsInProject = componentMap.has(tag);
+      const message = existsInProject
+        ? `Missing import for component <${tag} />`
+        : `Unknown component <${tag} />. Ensure it is defined and imported.`;
 
       diagnostics.push(
         new vscode.Diagnostic(
           range,
-          `Missing import for component <${tag} />`,
-          vscode.DiagnosticSeverity.Warning,
+          message,
+          existsInProject
+            ? vscode.DiagnosticSeverity.Warning
+            : vscode.DiagnosticSeverity.Error,
         ),
       );
     }

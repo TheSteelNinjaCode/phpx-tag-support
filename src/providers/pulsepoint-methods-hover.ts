@@ -11,7 +11,7 @@ export class PulsePointHoverProvider implements vscode.HoverProvider {
   public provideHover(
     document: vscode.TextDocument,
     position: vscode.Position,
-    token: vscode.CancellationToken
+    token: vscode.CancellationToken,
   ): vscode.ProviderResult<vscode.Hover> {
     const range = document.getWordRangeAtPosition(position);
     if (!range) {
@@ -27,7 +27,7 @@ export class PulsePointHoverProvider implements vscode.HoverProvider {
     const offset = getOffsetFromPosition(
       fullText,
       position.line,
-      position.character
+      position.character,
     );
 
     if (!htmlDoc.isInsideScript(offset)) {
@@ -76,18 +76,18 @@ export class PulsePointHoverProvider implements vscode.HoverProvider {
 
   private createHoverFromItem(item: vscode.CompletionItem): vscode.Hover {
     const markdown = new vscode.MarkdownString();
+    markdown.isTrusted = true; // Essential for rendering the RpcOptions code block
 
-    // Add Signature/Detail code block
     if (item.detail) {
       markdown.appendCodeblock(item.detail, "typescript");
     }
 
-    // Add Documentation
     if (item.documentation) {
-      markdown.appendMarkdown("---\n"); // Horizontal rule separator
+      markdown.appendMarkdown("---\n");
       if (typeof item.documentation === "string") {
         markdown.appendMarkdown(item.documentation);
       } else {
+        // Use the value from the MarkdownString objects generated in pulsepoint-methods.ts
         markdown.appendMarkdown(item.documentation.value);
       }
     }
