@@ -184,21 +184,20 @@ export const validateMissingImports = (
   const BUILTIN_COMPONENTS = new Set(["Fragment"]);
   const diagnostics: vscode.Diagnostic[] = [];
 
-  // Regex: <Component (starts with uppercase)
+  // FIX APPLIED HERE:
+  // Added (?<!<) negative lookbehind.
+  // This prevents matching "<<<HTML" (Heredoc) or "<<" (Bitwise) as a component start.
   const tagMatches = [
-    ...cleanText.matchAll(/<([A-Z][A-Za-z0-9_]*)(?=[\s/>])/g),
+    ...cleanText.matchAll(/(?<!<)<([A-Z][A-Za-z0-9_]*)(?=[\s/>])/g),
   ];
 
   tagMatches.forEach((match) => {
     const tag = match[1];
 
-    // FIX: Removed componentMap.has(tag) check.
-    // Now it validates ANY custom tag that isn't imported or built-in.
     if (!useMap.has(tag) && !BUILTIN_COMPONENTS.has(tag)) {
       const start = document.positionAt((match.index ?? 0) + 1);
       const range = new vscode.Range(start, start.translate(0, tag.length));
 
-      // Check if it exists in the map to provide a better message
       const existsInProject = componentMap.has(tag);
       const message = existsInProject
         ? `Missing import for component <${tag} />`
