@@ -11,6 +11,171 @@ interface XmlValidationError {
   };
 }
 
+function hasLikelyMarkup(text: string): boolean {
+  // Focus on actual tags, not escaped PHP regex text like \<\?=
+  // Supports HTML tags and component-like tags (e.g. <Button>)
+  return /<\/?(?:[A-Za-z][\w:-]*)(?:\s|\/?>)/.test(text);
+}
+
+/**
+ * Mask real PHP blocks while preserving length.
+ * IMPORTANT: This is PHP-string/comment aware, so '<?=' and '?>' inside PHP strings
+ * won't be treated as actual PHP tag boundaries.
+ */
+function maskRealPhpBlocksPreserveLength(input: string): string {
+  const chars = input.split("");
+  const n = chars.length;
+
+  let i = 0;
+  let inPhp = false;
+
+  // PHP sub-states (only relevant when inPhp === true)
+  let inSingle = false;
+  let inDouble = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  const blank = (start: number, endExclusive: number) => {
+    for (let k = start; k < endExclusive && k < n; k++) {
+      chars[k] = " ";
+    }
+  };
+
+  while (i < n) {
+    if (!inPhp) {
+      // Detect real PHP opening tags outside PHP mode
+      if (
+        input.startsWith("<?php", i) ||
+        input.startsWith("<?=", i) ||
+        input.startsWith("<?", i)
+      ) {
+        inPhp = true;
+
+        // Mask opening tag
+        if (input.startsWith("<?php", i)) {
+          blank(i, i + 5);
+          i += 5;
+        } else if (input.startsWith("<?=", i)) {
+          blank(i, i + 3);
+          i += 3;
+        } else {
+          blank(i, i + 2);
+          i += 2;
+        }
+
+        // Reset PHP state
+        inSingle = false;
+        inDouble = false;
+        inLineComment = false;
+        inBlockComment = false;
+        continue;
+      }
+
+      i++;
+      continue;
+    }
+
+    // We are inside PHP: mask every char in PHP mode
+    chars[i] = " ";
+
+    // Handle existing comment/string states first
+    if (inLineComment) {
+      if (input[i] === "\n") {
+        inLineComment = false;
+      }
+      i++;
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (input[i] === "*" && i + 1 < n && input[i + 1] === "/") {
+        chars[i + 1] = " ";
+        i += 2;
+        inBlockComment = false;
+        continue;
+      }
+      i++;
+      continue;
+    }
+
+    if (inSingle) {
+      if (input[i] === "\\" && i + 1 < n) {
+        // escaped char inside single-quoted string
+        chars[i + 1] = " ";
+        i += 2;
+        continue;
+      }
+      if (input[i] === "'") {
+        inSingle = false;
+      }
+      i++;
+      continue;
+    }
+
+    if (inDouble) {
+      if (input[i] === "\\" && i + 1 < n) {
+        // escaped char inside double-quoted string
+        chars[i + 1] = " ";
+        i += 2;
+        continue;
+      }
+      if (input[i] === '"') {
+        inDouble = false;
+      }
+      i++;
+      continue;
+    }
+
+    // Not in string/comment: detect PHP close tag
+    if (input[i] === "?" && i + 1 < n && input[i + 1] === ">") {
+      chars[i] = " ";
+      chars[i + 1] = " ";
+      i += 2;
+      inPhp = false;
+      continue;
+    }
+
+    // Start comments
+    if (input[i] === "/" && i + 1 < n && input[i + 1] === "/") {
+      chars[i + 1] = " ";
+      inLineComment = true;
+      i += 2;
+      continue;
+    }
+
+    if (input[i] === "#") {
+      inLineComment = true;
+      i++;
+      continue;
+    }
+
+    if (input[i] === "/" && i + 1 < n && input[i + 1] === "*") {
+      chars[i + 1] = " ";
+      inBlockComment = true;
+      i += 2;
+      continue;
+    }
+
+    // Start strings
+    if (input[i] === "'") {
+      inSingle = true;
+      i++;
+      continue;
+    }
+
+    if (input[i] === '"') {
+      inDouble = true;
+      i++;
+      continue;
+    }
+
+    i++;
+  }
+
+  // If file ends while still inside PHP, that's fine: all remaining chars were already masked.
+  return chars.join("");
+}
+
 export function registerXmlValidator(context: vscode.ExtensionContext) {
   const collection =
     vscode.languages.createDiagnosticCollection("pp-xml-validation");
@@ -22,7 +187,10 @@ export function registerXmlValidator(context: vscode.ExtensionContext) {
     const text = doc.getText();
 
     // 1) Validate XML-like markup outside of PHP blocks
-    diagnostics.push(...validateMixedContent(text, doc));
+    const maybeMixed = hasLikelyMarkup(maskRealPhpBlocksPreserveLength(text));
+    if (maybeMixed) {
+      diagnostics.push(...validateMixedContent(text, doc));
+    }
 
     // 2) Validate heredocs (<<<XML / <<<HTML) inside PHP blocks
     diagnostics.push(...validateHeredocs(text, doc));
@@ -38,7 +206,7 @@ export function registerXmlValidator(context: vscode.ExtensionContext) {
     collection,
     vscode.workspace.onDidOpenTextDocument(validate),
     vscode.workspace.onDidSaveTextDocument(validate),
-    vscode.workspace.onDidChangeTextDocument((e) => validate(e.document))
+    vscode.workspace.onDidChangeTextDocument((e) => validate(e.document)),
   );
 }
 
@@ -48,14 +216,20 @@ export function registerXmlValidator(context: vscode.ExtensionContext) {
  */
 function validateMixedContent(
   text: string,
-  doc: vscode.TextDocument
+  doc: vscode.TextDocument,
 ): vscode.Diagnostic[] {
-  // Mask <?php ... ?> and <?= ... ?> blocks (including missing closing ?> at EOF)
-  const masked = text.replace(/<\?(?:php|=)[\s\S]*?(?:\?>|$)/gi, (m) =>
-    " ".repeat(m.length)
-  );
+  // Mask real PHP blocks only (string/comment aware) so regex strings like
+  // '/<\?= ... \?>|echo .../' do not confuse the XML validator.
+  const masked = maskRealPhpBlocksPreserveLength(text);
 
+  // Fast exits
   if (!masked.trim() || !masked.includes("<")) {
+    return [];
+  }
+
+  // Only validate if there is likely actual markup outside PHP.
+  // This avoids false positives from PHP regex/string literals that contain "<...".
+  if (!hasLikelyMarkup(masked)) {
     return [];
   }
 
@@ -71,7 +245,7 @@ function validateMixedContent(
  */
 function validateHeredocs(
   text: string,
-  doc: vscode.TextDocument
+  doc: vscode.TextDocument,
 ): vscode.Diagnostic[] {
   const diagnostics: vscode.Diagnostic[] = [];
 
@@ -92,7 +266,7 @@ function validateHeredocs(
 
     if (sanitized.trim().includes("<")) {
       diagnostics.push(
-        ...runXmlValidation(sanitized, startOffset, doc, `PHP ${identifier}`)
+        ...runXmlValidation(sanitized, startOffset, doc, `PHP ${identifier}`),
       );
     }
   }
@@ -105,7 +279,7 @@ function maskBareAmpersandsPreserveLength(input: string): string {
   //   &name;  or  &#123;  or  &#x1A;
   return input.replace(
     /&(?![A-Za-z][A-Za-z0-9._:-]*;|#\d+;|#x[0-9A-Fa-f]+;)/g,
-    "＆" // Fullwidth ampersand, length-preserving
+    "＆", // Fullwidth ampersand, length-preserving
   );
 }
 
@@ -113,7 +287,7 @@ function runXmlValidation(
   xmlContent: string,
   offsetAdjustment: number,
   doc: vscode.TextDocument,
-  source: string
+  source: string,
 ): vscode.Diagnostic[] {
   const diagnostics: vscode.Diagnostic[] = [];
 
@@ -151,8 +325,8 @@ function runXmlValidation(
               safeContent,
               offsetAdjustment,
               doc,
-              source
-            )
+              source,
+            ),
           );
           return diagnostics;
         }
@@ -170,16 +344,16 @@ function runXmlValidation(
                 doc,
                 `Invalid XML: ${wErr.msg}`,
                 vscode.DiagnosticSeverity.Error,
-                source
-              )
+                source,
+              ),
             );
             diagnostics.push(
               ...lintAttributesWithoutValues(
                 safeContent,
                 offsetAdjustment,
                 doc,
-                source
-              )
+                source,
+              ),
             );
             return diagnostics;
           }
@@ -200,22 +374,22 @@ function runXmlValidation(
           doc,
           `Invalid XML: ${err.msg}`,
           vscode.DiagnosticSeverity.Error,
-          source
-        )
+          source,
+        ),
       );
     }
   }
 
   // Always run lint to provide guidance like disabled="true" and catch missing values for non-boolean attrs.
   diagnostics.push(
-    ...lintAttributesWithoutValues(safeContent, offsetAdjustment, doc, source)
+    ...lintAttributesWithoutValues(safeContent, offsetAdjustment, doc, source),
   );
 
   return diagnostics;
 }
 
 function parseAttrsRespectingQuotes(
-  attrsPart: string
+  attrsPart: string,
 ): Array<{ name: string; hasValue: boolean; nameIndex: number }> {
   const out: Array<{ name: string; hasValue: boolean; nameIndex: number }> = [];
   const s = attrsPart;
@@ -279,7 +453,7 @@ function lintAttributesWithoutValues(
   xmlContent: string,
   offsetAdjustment: number,
   doc: vscode.TextDocument,
-  source: string
+  source: string,
 ): vscode.Diagnostic[] {
   const diagnostics: vscode.Diagnostic[] = [];
 
@@ -338,8 +512,8 @@ function lintAttributesWithoutValues(
             `Boolean attribute '${a.name}' is allowed, but prefer ${a.name}="true" for strict XML compatibility.`,
             vscode.DiagnosticSeverity.Warning,
             `${source}:boolean-attr`,
-            a.name.length
-          )
+            a.name.length,
+          ),
         );
       } else {
         diagnostics.push(
@@ -349,8 +523,8 @@ function lintAttributesWithoutValues(
             `Invalid XML: attribute '${a.name}' must have a value (e.g., ${a.name}="...").`,
             vscode.DiagnosticSeverity.Error,
             `${source}:missing-attr-value`,
-            a.name.length
-          )
+            a.name.length,
+          ),
         );
       }
     }
@@ -388,11 +562,11 @@ function maskScriptAndStyleBodiesPreserveLength(input: string): string {
 
 function maskTagBodyPreserveLength(
   input: string,
-  tagName: "script" | "style"
+  tagName: "script" | "style",
 ): string {
   const re = new RegExp(
     `<${tagName}\\b[^>]*>[\\s\\S]*?<\\/${tagName}\\s*>`,
-    "gi"
+    "gi",
   );
 
   return input.replace(re, (m) => {
@@ -437,7 +611,7 @@ function makeDiagnosticAtOffset(
   message: string,
   severity: vscode.DiagnosticSeverity,
   code: string,
-  highlightLen: number = 5
+  highlightLen: number = 5,
 ): vscode.Diagnostic {
   const startPos = doc.positionAt(Math.max(0, absoluteOffset));
   const line = doc.lineAt(startPos.line);
@@ -450,7 +624,7 @@ function makeDiagnosticAtOffset(
   const diagnostic = new vscode.Diagnostic(
     new vscode.Range(startPos, endPos),
     message,
-    severity
+    severity,
   );
   diagnostic.source = "Prisma PHP XML";
   diagnostic.code = code;

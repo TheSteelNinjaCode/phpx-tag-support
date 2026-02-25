@@ -2455,7 +2455,30 @@ function isValidPhpType(expr: string, info: FieldInfo): boolean {
   const isFnCall = /^\s*(?:new\s+[A-Za-z_]\w*|\w+)\s*\(.*\)\s*$/.test(raw);
   const isNull = /^null$/i.test(raw);
 
-  // ✅ NEW: Detect PHP Class Constants (e.g., UserType::ADMIN, self::CONST)
+  // ✅ Detect PHP cast expressions, e.g. (int) ($existing->id ?? 0)
+  // Supports common scalar casts and aliases.
+  const castMatch =
+    /^\(\s*(int|integer|float|double|real|string|bool|boolean|array)\s*\)\s*(.+)$/i.exec(
+      raw,
+    );
+
+  const phpCast = castMatch?.[1]?.toLowerCase() ?? null;
+
+  const castKind = phpCast
+    ? {
+        int: "int",
+        integer: "int",
+        float: "float",
+        double: "float",
+        real: "float",
+        string: "string",
+        bool: "bool",
+        boolean: "bool",
+        array: "array",
+      }[phpCast]
+    : null;
+
+  // ✅ Detect PHP Class Constants (e.g., UserType::ADMIN, self::CONST)
   // Matches: Namespaced\Class::CONST, Class::CONST, \Root::CONST
   const isClassConst = /^\\?[A-Za-z_][\w\\]*::[A-Za-z_]\w*$/.test(raw);
 
@@ -2469,7 +2492,7 @@ function isValidPhpType(expr: string, info: FieldInfo): boolean {
     return info.nullable === true;
   }
 
-  // ✅ NEW: Handle Custom Enums
+  // ✅ Handle Custom Enums
   // If the type (e.g., "UserType") isn't in our standard list, treat it as an Enum
   let allowed = phpDataTypes[info.type];
   if (!allowed) {
@@ -2480,20 +2503,21 @@ function isValidPhpType(expr: string, info: FieldInfo): boolean {
   return allowed.some((t) => {
     switch (t) {
       case "string":
-        return isString;
+        return isString || castKind === "string";
       case "int":
-        return isNumber && !raw.includes(".");
+        return (isNumber && !raw.includes(".")) || castKind === "int";
       case "float":
-        return isNumber;
+        return isNumber || castKind === "float";
       case "bool":
-        return isBool;
+        return isBool || castKind === "bool";
       case "array":
-        return isArray;
+        return isArray || castKind === "array";
       case "DateTime":
         return /^new\s+DateTime/.test(raw) || isFnCall || isString;
       case "BigInteger":
+        return isFnCall || castKind === "int";
       case "BigDecimal":
-        return isFnCall;
+        return isFnCall || castKind === "float";
       case "enum":
         // We already allowed vars and class constants above, so here we just check strings
         return isString;

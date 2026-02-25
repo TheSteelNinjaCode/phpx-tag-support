@@ -17,11 +17,41 @@ export function registerMustacheValidator(context: vscode.ExtensionContext) {
   vscode.workspace.textDocuments.forEach(validate);
 }
 
+function isPurePhpDocument(text: string): boolean {
+  // If there are obvious HTML/template tags, it's likely a mixed PHP template => validate.
+  // We intentionally ignore PHP tags like <?php / ?> in this check.
+  const withoutPhpBlocks = text.replace(/<\?(?:php|=)?[\s\S]*?\?>/gi, "");
+
+  const hasHtmlLikeTags = /<\/?[a-z][\w:-]*\b[^>]*>/i.test(withoutPhpBlocks);
+  if (hasHtmlLikeTags) return false;
+
+  // If file contains no closing PHP tag, it's commonly a pure PHP source file (class/helper/service).
+  // Example: modern PHP files usually end without "?>"
+  const hasClosingPhpTag = /\?>/.test(text);
+  if (!hasClosingPhpTag) return true;
+
+  // If it has PHP tags but no HTML tags outside them, still treat as pure PHP.
+  const hasPhpTag = /<\?(?:php|=)?/i.test(text);
+  if (hasPhpTag && !hasHtmlLikeTags) return true;
+
+  return false;
+}
+
 function validate(document: vscode.TextDocument) {
   if (document.languageId !== "html" && document.languageId !== "php") return;
 
   const text = document.getText();
   const diagnostics: vscode.Diagnostic[] = [];
+
+  // ------------------------------------------------------------
+  // IMPORTANT FIX:
+  // Skip pure PHP files (class/service/helper files).
+  // Mustache validation is only useful for mixed template content.
+  // ------------------------------------------------------------
+  if (document.languageId === "php" && isPurePhpDocument(text)) {
+    diagnosticCollection.set(document.uri, diagnostics);
+    return;
+  }
 
   // If your html-parser ever throws, don't kill validation entirely.
   let htmlDoc: { isInsideExcludedRegion: (offset: number) => boolean };
@@ -111,9 +141,7 @@ function validate(document: vscode.TextDocument) {
       const shouldValidate = !inPhp || (inPhp && inHeredoc);
 
       if (inScriptOrStyle) continue;
-
       if (!shouldValidate) continue;
-
       if (htmlDoc.isInsideExcludedRegion(startIndex)) continue;
 
       const nextChar = text[startIndex + 1];
@@ -148,13 +176,8 @@ function validate(document: vscode.TextDocument) {
       // Continue scanning after the closing brace
       boundaryRegex.lastIndex = endPos;
 
-      // --- FIX START ---
-      // If the content contains a PHP opening tag (<? or <?=), skip JS validation.
-      // This prevents "Unexpected token" errors when PHP is used to inject values.
-      if (/<\?/.test(content)) {
-        continue;
-      }
-      // --- FIX END ---
+      // Skip JS validation if PHP code appears inside the braces
+      if (/<\?/.test(content)) continue;
 
       if (!content.trim()) continue;
 
